@@ -231,6 +231,12 @@ target_link_libraries(_C PRIVATE
     MathExtDialect
     AuxiliaryDialect
     TritonTransformsExtend
+    MLIRLinalgDialect
+    MLIRLinalgTransforms
+    MLIRLinalgUtils
+    MLIRMemRefDialect
+    MLIRTensorDialect
+    MLIRAffineDialect
     triton
 )
 
