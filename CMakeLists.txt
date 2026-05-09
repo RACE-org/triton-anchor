@@ -208,6 +208,9 @@ if(TRITON_BUILD_PYTHON_MODULE)
       target_link_libraries(triton PRIVATE "-undefined dynamic_lookup -flto")
     endif()
   endif()
+  
+  # 确保 libtriton.so 输出到 triton/_C 目录
+  set_target_properties(triton PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/triton/_C)
 endif()
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -230,5 +233,9 @@ target_link_libraries(_C PRIVATE
     TritonTransformsExtend
 )
 
-set_target_properties(_C PROPERTIES OUTPUT_NAME "_C")
+# 确保 _C.so 输出到 triton_anchor 目录
+set_target_properties(_C PROPERTIES 
+    OUTPUT_NAME "_C"
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/triton_anchor
+)
 install(TARGETS _C DESTINATION triton_anchor)

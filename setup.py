@@ -77,7 +77,8 @@ class CMakeBuild(build_ext):
 
     def build_extension(self, ext):
         ninja_dir = shutil.which('ninja')
-        extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.path)))
+        # 使用 extdir 作为 CMake 的根安装目录
+        extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
         cmake_dir = get_cmake_dir()
 
         # Python 头文件路径
