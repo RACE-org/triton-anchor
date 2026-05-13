@@ -56,13 +56,20 @@ def _discover_backends():
 
     for ep in eps:
         try:
-            # triton_sophgo/__init__.py automatically injects itself into `backends` and sets driver
-            # so importing the top-level module is enough to trigger the backend registration.
+            # 导入 out-of-tree 后端模块以触发其自注册逻辑。
+            # 必须抑制 stdout/stderr，因为 CMake 的 execute_process 会捕获 stdout，
+            # 而后端模块的 import 可能打印警告信息，导致 CMake 变量被污染。
             top_module_name = ep.module.split('.')[0]
             import importlib
-            importlib.import_module(top_module_name)
+            import io
+            import contextlib
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                importlib.import_module(top_module_name)
         except Exception as e:
-            print(f"Warning: Failed to load out-of-tree backend '{ep.name}': {e}")
+            import sys
+            print(f"Warning: Failed to load out-of-tree backend '{ep.name}': {e}",
+                  file=sys.stderr)
 
     return backends
 
