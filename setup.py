@@ -133,16 +133,16 @@ class CMakeBuild(build_ext):
             cwd=cmake_dir,
         )
 
-        # 收集所有的头文件 (.h 和 .inc) 到 upstream/python/triton/include 目录，以便打包到 wheel 中
-        include_out_dir = os.path.join(get_base_dir(), "upstream", "python", "triton", "include")
+        # 收集所有的头文件 (.h 和 .inc) 到 triton/python/triton/include 目录，以便打包到 wheel 中
+        include_out_dir = os.path.join(get_base_dir(), "triton", "python", "triton", "include")
         os.makedirs(include_out_dir, exist_ok=True)
 
         src_include_dirs = [
-            os.path.join(get_base_dir(), "upstream", "include"),
+            os.path.join(get_base_dir(), "triton", "include"),
             os.path.join(get_base_dir(), "csrc", "include"),
         ]
         build_include_dirs = [
-            os.path.join(cmake_dir, "upstream", "include"),
+            os.path.join(cmake_dir, "triton", "include"),
             os.path.join(cmake_dir, "csrc", "include"),
         ]
 
@@ -194,7 +194,7 @@ setup(
     long_description="",
     package_dir={
         "": "python",
-        "triton": "upstream/python/triton",
+        "triton": "triton/python/triton",
     },
     packages=get_packages(),
     install_requires=["filelock"],
@@ -207,7 +207,7 @@ setup(
         ],
     },
     include_package_data=True,
-    ext_modules=[CMakeExtension("triton", "upstream/python/triton/_C/")],
+    ext_modules=[CMakeExtension("triton", "triton/python/triton/_C/")],
     cmdclass={
         "build_ext": CMakeBuild,
         "build_py": CMakeBuildPy,
