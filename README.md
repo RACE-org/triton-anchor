@@ -19,6 +19,43 @@ Layer 2.5  — AnchorIR Spec        (dual-track whitelist + two-phase validation
 - **ABI 隔离**：提供 `ILinalgOptAdapter`（基于子进程调用 `opt` 的模式）与 `ILinalgPybindAdapter`（基于 Pybind 绑定的模式），在类型层面隔离 C++ ABI，避免多后端带来的符号冲突。
 - **Paradigm / Track 解耦**：`ComputeParadigm`（计算范式）与 `AnchorIRTrack`（IR 轨道）独立声明，硬件后端可根据自身特性自由组合。
 
+## 安装与开发
+
+> 💡 **详细指南**：关于如何从零配置 Docker 环境、安装系统依赖及完整的构建流程，请参阅 [构建与环境配置指南](docs/build.md)。
+
+推荐使用 [uv](https://github.com/astral-sh/uv) 进行极速环境搭建和基础依赖安装：
+
+```bash
+# 开发模式安装 triton-anchor
+uv pip install [--no-build-isolation] -e .
+
+# 构建可分发的 wheel 包
+uv build --wheel [--no-build-isolation]
+```
+
+## 目录结构
+
+```
+triton-anchor/
+├── triton/                  # 上游 Triton 核心（C++ 基础设施与原版 Python 前端）
+├── csrc/                    # triton-anchor 扩展的 C++ Passes (例如 triton-linalg)
+├── docs/                    # 文档（构建与环境配置指南等）
+├── tests/                   # 框架及端到端测试
+└── python/
+    └── triton_anchor/       # triton-anchor 纯前端逻辑层
+        ├── __init__.py      # 公共 API: HWCapability, ComputeParadigm, AnchorIRTrack
+        ├── hw_capability.py # HWCapability 属性与结构设计
+        ├── anchor_ir.py     # AnchorIR 双轨规范白名单 + 两阶段验证器
+        ├── pipeline.py      # 统一 TTIR Pipeline (7 pass)
+        │
+        ├── adapters/        # Layer 2: Linalg Adapters
+        │   ├── base.py              # ILinalgOptAdapter / ILinalgPybindAdapter
+        │   ├── registry.py          # Adapter 注册表
+        │   └── triton_linalg_adapter.py  # ✅ triton-linalg pass 管线 (Pybind)
+        │
+        └── extensions/      # DSL Extensions（层级预留）
+```
+
 ## 编译流程
 
 triton-anchor 负责统一管线的前半部分（TTIR → Linalg / TritonGPU），后半部分（Linalg → 硬件二进制）由各硬件后端独立完成。
@@ -76,88 +113,10 @@ driver_cls = MyDeviceDriver      # 继承 triton.backends.driver.DriverBase
 | **AME Matrix** | — | 面向带矩阵扩展指令集的 RISC-V 架构 |
 | **gpGPU** | — | 面向 SIMT 架构 GPU |
 
-## 快速开始
 
-在前端可以方便地声明并查询硬件能力，或对 IR 进行规范验证：
-
-```python
-from triton_anchor import HWCapability, ComputeParadigm, AnchorIRTrack
-
-# 声明硬件能力
-hw = HWCapability(
-    name="my-device",
-    arch_family="tpu",
-    compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
-    anchor_ir_track=AnchorIRTrack.LINALG,
-    ptr_model="axis_info",
-)
-
-# AnchorIR 两阶段验证
-from triton_anchor.anchor_ir import AnchorIRValidator
-
-validator = AnchorIRValidator(track=AnchorIRTrack.LINALG)
-# Phase 1: pre-hook（基础白名单验证）
-violations = validator.validate_pre_hook(ir_text)
-# Phase 2: post-hook（含后端扩展白名单验证）
-violations = validator.validate_post_hook(ir_text, ext_allowed={"ppl"})
-```
-
-## 安装与开发
-
-> 💡 **详细指南**：关于如何从零配置 Docker 环境、安装系统依赖及完整的构建流程，请参阅 [构建与环境配置指南](docs/build.md)。
-
-推荐使用 [uv](https://github.com/astral-sh/uv) 进行极速环境搭建和基础依赖安装：
-
-```bash
-# 开发模式安装 triton-anchor
-uv pip install [--no-build-isolation] -e .
-
-# 构建可分发的 wheel 包
-uv build --wheel [--no-build-isolation]
-```
-
-## 目录结构
-
-```
-triton_anchor/
-├── __init__.py              # 公共 API: HWCapability, ComputeParadigm, AnchorIRTrack
-├── hw_capability.py         # HWCapability 属性与解耦设计
-├── anchor_ir.py             # AnchorIR 双轨规范白名单 + 两阶段验证器
-├── pipeline.py              # 统一 TTIR Pipeline (7 pass)
-│
-├── adapters/                # Layer 2: Linalg Adapters
-│   ├── base.py              # ILinalgOptAdapter (subprocess) / ILinalgPybindAdapter (pybind)
-│   ├── registry.py          # Adapter 注册表
-│   ├── triton_linalg_adapter.py  # ✅ ILinalgPybindAdapter — triton-linalg pass 管线
-│   ├── triton_shared_adapter.py  # 🔲 ILinalgOptAdapter  — triton-shared
-│   └── hybrid_adapter.py        # 🔲 ILinalgOptAdapter  — Hybrid (Future Work)
-│
-├── extensions/              # DSL Extensions（层级预留）
-├── language/ext/            # DSL 扩展命名空间（前缀预留）
-└── tests/                   # 单元测试
-```
-
-## 核心不变量
-
-| 不变量 | 内容 | 稳定性 |
-|--------|------|--------|
-| **TTIR Pipeline** | 7 必选 Pass + `_require_pass` 关键路径保护 | 仅增不删 |
-| **HWCapability** | 声明式硬件能力 + `AnchorIRTrack` 枚举 | 字段仅增不删 |
-| **AnchorIR 双轨** | Linalg / TritonGPU 双轨白名单 + 禁止 `tt.*`/`smt.*` | 仅增不删 |
-| **Adapter 接口** | `ILinalgOptAdapter` / `ILinalgPybindAdapter` | 向后兼容 |
 
 ## License
 
 Apache 2.0
 
 
-<!-- sync-race-marker -->
-## Sync from triton-race
-
-| 项目 | 值 |
-|---|---|
-| triton-race commit | `059f38e668050f137450b40adcdf953af7d54df7` |
-| commit 日期 | 2026-05-13 11:08:43 +0800 |
-| commit 信息 | [fix]: For load/store op, check that all dimensions of the tensor are… (#47) |
-| 同步时间 | 2026-05-14 16:41:14 |
-<!-- sync-race-marker -->

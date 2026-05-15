@@ -46,13 +46,45 @@ uv venv /opt/venv
 source /opt/venv/bin/activate
 ```
 
-## 3. 安装 triton-anchor
+## 3. 准备 LLVM 工具链
 
-`triton-anchor` 自身是一个轻量级的 Python 前端，主要负责分发 TTIR 和 AnchorIR 规范。通过 `uv` 可以在隔离模式下极速安装：
+因为 `triton-anchor` 需要与 LLVM/MLIR 进行 C++ 级别的链接，所以你需要提前准备好 LLVM 工具链。
+
+### 选项 A：使用预编译的 LLVM Release 包
+
+> **TODO**: 预编译包的获取途径与配置指南待完善。
+
+### 选项 B：从源码手动编译 LLVM
+
+1. 查找 Triton 当前依赖的 LLVM 版本。检查 `triton/cmake/llvm-hash.txt` 文件来获取当前的版本哈希。例如，如果文件内容为：
+       10dc3a8e916d73291269e5e2b82dd22681489aa1
+
+   这意味着当前版本的 Triton 需要基于 [LLVM](https://github.com/llvm/llvm-project) 的 `10dc3a8e` 提交进行构建。
+
+2. 使用 `git checkout` 切换到对应的 LLVM 提交记录。如有需要，你可以对 LLVM 进行额外的源码修改。
+
+3. [编译 LLVM](https://llvm.org/docs/CMake.html)。例如，你可以运行如下命令：
+
+       $ cd $HOME/llvm-project  # 你的 LLVM 源码目录
+       $ mkdir build
+       $ cd build
+       $ cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=ON ../llvm -DLLVM_ENABLE_PROJECTS="mlir;llvm;lld;clang" -DLLVM_TARGETS_TO_BUILD="host;<修改为你的目标架构，例如 RISCV>"
+       $ ninja
+
+4. 喝杯咖啡，这需要花费相当长的一段时间。
+
+5. 编译完成后，你的 LLVM 构建目录为 `$HOME/llvm-project/build`。请在接下来的安装步骤中将其配置给 `LLVM_SYSPATH` 环境变量。
+
+## 4. 安装 triton-anchor
+
+`triton-anchor` 包含了上游 Triton 的核心 C++ 基础设施以及自身的扩展管线（如 `triton-linalg`），负责构建完整的编译管线和分发 AnchorIR 规范。通过 `uv` 可以在隔离模式下进行编译与极速安装：
 
 ```bash
 # 假设你已经克隆了代码到 /triton/triton-anchor
 cd /triton/triton-anchor
+
+# 配置 LLVM 工具链路径 (必需，供 CMake 寻找 MLIR/LLVM)
+export LLVM_SYSPATH=/path/to/llvm-release
 
 # 1. 直接安装（开发模式）
 uv pip install [--no-build-isolation] -e .
@@ -64,35 +96,12 @@ uv pip install -e ".[dev]"
 uv build --wheel [--no-build-isolation]
 ```
 
-## 4. 构建与集成硬件后端 (Out-of-Tree)
+## 5. 构建与集成硬件后端 (Out-of-Tree)
 
-`triton-anchor` 安装完毕后，需要配合具体的硬件后端（如 Sophgo TPU、SpacemiT AME）才能完成端到端的编译。
+> **TODO**: 硬件后端的具体构建与集成流程待完善。
+> 请参考对应的硬件后端仓库（如 `triton-all-backends/sophgo`）中的专用说明文档。
 
-### 以外挂 Sophgo TPU 后端为例：
-
-由于硬件后端通常包含 C++ 代码（如自定义 pass、驱动封装），并依赖特定版本的 LLVM，你需要：
-
-1. **准备 LLVM 等工具链**：
-   下载并解压硬件对应的 LLVM release 包：
-   ```bash
-   tar -xzf llvm-release-***.tar.gz -C /triton/
-   ```
-
-2. **配置环境变量**：
-   通过 source 项目的 `envsetup.sh` 或手动设置路径：
-   ```bash
-   export LLVM_SYSPATH=/triton/llvm-release
-   ```
-
-3. **构建硬件后端包**：
-   ```bash
-   cd /triton/triton-all-backends/sophgo
-   uv build --wheel --no-build-isolation
-   uv pip install --no-build-isolation .
-   ```
-   > **注意**：构建外挂后端时，通常**必须**添加 `--no-build-isolation` 参数。这样 CMake 在构建时才能从当前环境的 `triton-anchor` 和 `triton` 包中正确获取到头文件和库的路径。
-
-## 5. 验证安装
+## 6. 验证安装
 
 完成构建后，Triton 会通过 `entry_points` 自动发现已安装的后端。
 
@@ -101,5 +110,5 @@ uv build --wheel [--no-build-isolation]
 python3 -c "import triton_anchor; print('triton-anchor loaded')"
 
 # 验证底层硬件后端是否被 Triton 自动发现
-python3 -c "from triton.backends import backends; print('sophgo' in backends)"
+python3 -c "from triton.backends import backends; print(backends)"
 ```

@@ -62,9 +62,9 @@ endif()
 # ═══════════════════════════════════════════════════════════════════════
 # 路径定义
 # ═══════════════════════════════════════════════════════════════════════
-set(UPSTREAM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/upstream")
+set(UPSTREAM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/triton")
 set(TRITON_SOURCE_DIR "${UPSTREAM_DIR}")
-set(TRITON_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/upstream")
+set(TRITON_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/triton")
 
 # ═══════════════════════════════════════════════════════════════════════
 # include 路径
@@ -73,9 +73,9 @@ include_directories(${MLIR_INCLUDE_DIRS})
 include_directories(${LLVM_INCLUDE_DIRS})
 # 上游 Triton 头文件
 include_directories(${UPSTREAM_DIR}/include)
-include_directories(${CMAKE_CURRENT_BINARY_DIR}/upstream/include)  # TableGen 生成
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/triton/include)  # TableGen 生成
 include_directories(${UPSTREAM_DIR})                                # third_party 引用
-include_directories(${CMAKE_CURRENT_BINARY_DIR}/upstream)           # third_party TableGen 生成
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/triton)           # third_party TableGen 生成
 # triton-anchor 自有头文件
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/csrc/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/csrc/include)       # triton-anchor TableGen 生成
@@ -110,11 +110,11 @@ endfunction()
 # Part 1: 编译上游 Triton 核心 C++ 库
 # ═══════════════════════════════════════════════════════════════════════
 # TableGen 生成的头文件（Dialect 定义）
-add_subdirectory(upstream/include)
+add_subdirectory(triton/include)
 # C++ 库实现
-add_subdirectory(upstream/lib)
+add_subdirectory(triton/lib)
 # f2reduce 辅助库
-add_subdirectory(upstream/third_party/f2reduce)
+add_subdirectory(triton/third_party/f2reduce)
 
 # 在 csrc 加入之前捕获上游库列表，防止 triton-anchor 的 Pass 被混入 libtriton.so
 get_property(TRITON_UPSTREAM_LIBS GLOBAL PROPERTY TRITON_LIBS)
