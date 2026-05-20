@@ -133,32 +133,32 @@ class CMakeBuild(build_ext):
             cwd=cmake_dir,
         )
 
-        # 收集所有的头文件 (.h 和 .inc) 到 triton/python/triton/include 目录，以便打包到 wheel 中
-        include_out_dir = os.path.join(get_base_dir(), "triton", "python", "triton", "include")
-        os.makedirs(include_out_dir, exist_ok=True)
+        # 收集上游 Triton 头文件到 triton/python/triton/include 目录
+        triton_include_out_dir = os.path.join(get_base_dir(), "triton", "python", "triton", "include")
+        os.makedirs(triton_include_out_dir, exist_ok=True)
+        
+        # 收集 triton-anchor 扩展头文件到 python/triton_anchor/include 目录
+        anchor_include_out_dir = os.path.join(get_base_dir(), "python", "triton_anchor", "include")
+        os.makedirs(anchor_include_out_dir, exist_ok=True)
 
-        src_include_dirs = [
-            os.path.join(get_base_dir(), "triton", "include"),
-            os.path.join(get_base_dir(), "csrc", "include"),
-        ]
-        build_include_dirs = [
-            os.path.join(cmake_dir, "triton", "include"),
-            os.path.join(cmake_dir, "csrc", "include"),
-        ]
-
-        def copy_headers(src_dir):
+        def copy_headers(src_dir, out_dir):
             if not os.path.exists(src_dir): return
             for root, _, files in os.walk(src_dir):
                 for f in files:
                     if f.endswith(".h") or f.endswith(".inc") or f.endswith(".def"):
                         src_path = os.path.join(root, f)
                         rel_path = os.path.relpath(src_path, src_dir)
-                        dst_path = os.path.join(include_out_dir, rel_path)
+                        dst_path = os.path.join(out_dir, rel_path)
                         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
                         shutil.copy2(src_path, dst_path)
 
-        for d in src_include_dirs + build_include_dirs:
-            copy_headers(d)
+        # 拷贝 Triton 头文件
+        copy_headers(os.path.join(get_base_dir(), "triton", "include"), triton_include_out_dir)
+        copy_headers(os.path.join(cmake_dir, "triton", "include"), triton_include_out_dir)
+
+        # 拷贝 Triton-Anchor 扩展头文件
+        copy_headers(os.path.join(get_base_dir(), "csrc", "include"), anchor_include_out_dir)
+        copy_headers(os.path.join(cmake_dir, "csrc", "include"), anchor_include_out_dir)
 
 
 
@@ -201,6 +201,11 @@ setup(
     package_data={
         "triton.tools": ["compile.h", "compile.c"],
         "triton": [
+            "include/**/*.h", "include/**/*.inc", "include/**/*.def",
+            "include/**/**/*.h", "include/**/**/*.inc", "include/**/**/*.def",
+            "include/**/**/**/*.h", "include/**/**/**/*.inc", "include/**/**/**/*.def",
+        ],
+        "triton_anchor": [
             "include/**/*.h", "include/**/*.inc", "include/**/*.def",
             "include/**/**/*.h", "include/**/**/*.inc", "include/**/**/*.def",
             "include/**/**/**/*.h", "include/**/**/**/*.inc", "include/**/**/**/*.def",

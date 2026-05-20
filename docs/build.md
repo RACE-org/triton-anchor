@@ -112,3 +112,9 @@ python3 -c "import triton_anchor; print('triton-anchor loaded')"
 # 验证底层硬件后端是否被 Triton 自动发现
 python3 -c "from triton.backends import backends; print(backends)"
 ```
+
+运行冒烟测试，全面验证 C++ 绑定、MLIR Dialect 注册、HWCapability、AnchorIR Validator、TTIR Pipeline 以及 TTIR 生成等核心功能：
+
+```bash
+python3 tests/test_smoke.py
+```
