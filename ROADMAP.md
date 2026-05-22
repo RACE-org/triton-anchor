@@ -20,8 +20,7 @@
 
 | 目标 | 状态 | 说明 |
 |------|------|------|
-| FlagGems 算子兼容性验证 | 🔲 计划中 | 逐个验证 FlagGems 算子在 Linalg Track 下的编译通过率 |
-| PyTorch `aten` 算子替换路径打通 | 🔲 计划中 | 通过 FlagGems 对 `torch.xxx` 算子的 Triton 实现，经由 triton-anchor 编译到非 GPU 后端 |
+| FlagGems 算子兼容性验证 | 🔲 计划中 | 逐个验证 FlagGems 算子在 Linalg Track/ TritonGPU 下的编译通过率 |
 | FlagGems 核心算子集覆盖 | 🔲 计划中 | 覆盖 BLAS (matmul, addmm)、Reduction (sum, mean, softmax)、Elementwise (relu, gelu, silu) 等高频算子 |
 | 端到端 benchmark 框架 | 🔲 计划中 | 性能基准测试，对比 FlagGems + triton-anchor vs. 原生实现 |
 
@@ -32,7 +31,7 @@
 | 目标 | 状态 | 说明 |
 |------|------|------|
 | AME Matrix 后端原型 | 🔲 计划中 | RISC-V Matrix 扩展指令集后端的参考实现 |
-| gpGPU (SIMT) 后端原型 | 🔲 计划中 | SPIR-V 路径打通 |
+| gpGPU (SIMT) 后端原型 | 🔲 计划中 | 自定义 LLVM 路径打通 |
 | AnchorIR 扩展 Op 注册机制增强 | 🔲 计划中 | 支持后端动态声明扩展 Op 白名单 |
 | CI/CD 多后端测试矩阵 | 🔲 计划中 | GitHub Actions 自动化测试覆盖多种后端 |
 
@@ -42,7 +41,7 @@
 
 | 目标 | 状态 | 说明 |
 |------|------|------|
-| FlagGems 全量算子覆盖 | 🔲 计划中 | 覆盖 FlagGems 支持的全部 PyTorch 算子 |
+| FlagGems 全量算子覆盖 | 🔲 计划中 | 覆盖 FlagGems 支持的全部 Triton 算子 |
 | 性能调优工具集成 | 🔲 计划中 | Profiler / IR Visualizer / Tiling Advisor |
 | 多后端 Kernel 调度策略（包括开芯院自研芯片后端） | 🔲 计划中 | 根据硬件能力自动选择最优 Track 路径 |
 | 社区文档与教程体系 | 🔲 计划中 | 完善贡献指南、API 文档、最佳实践 |
