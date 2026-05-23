@@ -93,11 +93,11 @@ source envsetup.sh
 # 如果您有自定义的 LLVM 构建路径，也可以直接将其作为参数传入：
 # source envsetup.sh /path/to/llvm-release
 
-# 1. 直接安装（开发模式）
-uv pip install --no-build-isolation -e .
-
-# 2. 如果需要构建分发包 (wheel / sdist)
+# 1. 构建分发包 (wheel)
 uv build --wheel --no-build-isolation
+
+# 2. 安装生成的 wheel 包
+uv pip install dist/triton_anchor-*.whl
 ```
 
 ## 5. 构建与集成硬件后端 (Out-of-Tree)
