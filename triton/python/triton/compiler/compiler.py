@@ -1,4 +1,6 @@
 from __future__ import annotations
+from triton._no_ttgir import NO_TTGIR as _NO_TTGIR
+
 import hashlib
 import json
 from .._C.libtriton import get_cache_invalidating_env_vars, ir
@@ -221,85 +223,271 @@ def filter_traceback(e: BaseException):
     else:
         frames[-1].tb_next = None
         e.__traceback__ = frames[0]
+if not _NO_TTGIR:
+
+    # this compile func is only used for faked kernel vector_add
+    # so, it's deprecated after compile function is implemented
+    # keep this case passed, so we can verify basic runtime healthy
 
 
-def compile(src, target=None, options=None):
-    if target is None:
-        target = driver.active.get_current_target()
-    assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
-    backend = make_backend(target)
-    ir_source = not isinstance(src, ASTSource)
-    # create backend
-    if ir_source:
-        assert isinstance(src, str), "source must be either AST or a filepath"
-        src = IRSource(src)
-    extra_options = src.parse_options()
-    options = backend.parse_options(dict(options or dict(), **extra_options))
-    # create cache manager
-    env_vars = get_cache_invalidating_env_vars()
-    key = f"{triton_key()}-{src.hash()}-{backend.hash()}-{options.hash()}-{str(sorted(env_vars.items()))}"
-    hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    fn_cache_manager = get_cache_manager(hash)
-    # For dumping/overriding only hash the source as we want it to be independent of triton
-    # core changes to make it easier to track kernels by hash.
-    enable_override = os.environ.get("TRITON_KERNEL_OVERRIDE", "0") == "1"
-    enable_ir_dump = os.environ.get("TRITON_KERNEL_DUMP", "0") == "1"
-    fn_override_manager = get_override_manager(src.hash()) if enable_override else None
-    fn_dump_manager = get_dump_manager(src.hash()) if enable_ir_dump else None
-    metadata_filename = f"{src.name}.json"
-    metadata_group = fn_cache_manager.get_group(metadata_filename) or {}
-    metadata_path = metadata_group.get(metadata_filename)
-    always_compile = os.environ.get("TRITON_ALWAYS_COMPILE", "0") == "1"
-    if not always_compile and metadata_path is not None:
-        # cache hit!
-        metadata = json.loads(Path(metadata_path).read_text())
+    def compile_deprecated(src, target=None, options=None):
+        if target is None:
+            target = driver.active.get_current_target()
+        assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
+        backend = make_backend(target)
+        ir_source = not isinstance(src, ASTSource)
+        # create backend
+        if ir_source:
+            assert isinstance(src, str), "source must be either AST or a filepath"
+            src = IRSource(src)
+        extra_options = src.parse_options()
+        options = backend.parse_options(dict(options or dict(), **extra_options))
+        # create cache manager
+        env_vars = get_cache_invalidating_env_vars()
+        key = f"{triton_key()}-{src.hash()}-{backend.hash()}-{options.hash()}-{str(sorted(env_vars.items()))}"
+        hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        fn_cache_manager = get_cache_manager(hash)
+        # For dumping/overriding only hash the source as we want it to be independent of triton
+        # core changes to make it easier to track kernels by hash.
+        enable_override = os.environ.get("TRITON_KERNEL_OVERRIDE", "0") == "1"
+        enable_ir_dump = os.environ.get("TRITON_KERNEL_DUMP", "0") == "1"
+        fn_override_manager = get_override_manager(src.hash()) if enable_override else None
+        fn_dump_manager = get_dump_manager(src.hash()) if enable_ir_dump else None
+        metadata_filename = f"{src.name}.json"
+        metadata_group = fn_cache_manager.get_group(metadata_filename) or {}
+        metadata_path = metadata_group.get(metadata_filename)
+        always_compile = os.environ.get("TRITON_ALWAYS_COMPILE", "0") == "1"
+        if not always_compile and metadata_path is not None:
+            # cache hit!
+            metadata = json.loads(Path(metadata_path).read_text())
+            return CompiledKernel(src, metadata_group, hash)
+        # initialize metadata
+        metadata = {
+            "hash": hash,
+            "target": target,
+            **options.__dict__,
+            **env_vars,
+            "shared": 0,
+            "name": "add_matrices"
+        }
+
+        # faked compiled result by fantgpu which is spv format
+        current_file_path = os.path.dirname(__file__)
+        # test/backend/third_party_backends
+        fantgpu_test_dir = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, "test/backend/third_party_backends")
+        fantgpu_test_case = os.path.join(fantgpu_test_dir, "vector_add.spv")
+
+        with open(fantgpu_test_case, 'rb') as f:
+            ext = "spv"
+            module_spv = f.read()
+            ir_filename = f"{src.name}.{ext}"
+            metadata_group[ir_filename] = fn_cache_manager.put(module_spv, ir_filename)
+            if fn_dump_manager is not None:
+                fn_dump_manager.put(module_spv, ir_filename)
+
+            # write-back metadata
+            metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
+                                                                     binary=False)
+            fn_cache_manager.put_group(metadata_filename, metadata_group)
+            # return handle to compiled kernel
+            return CompiledKernel(src, metadata_group, hash)
+
+        assert 0, "error: spv file should be generated for use!!!"
+
+
+if not _NO_TTGIR:
+    def compile(src, target=None, options=None):
+        if target is None:
+            target = driver.active.get_current_target()
+        assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
+        backend = make_backend(target)
+        ir_source = not isinstance(src, ASTSource)
+        # create backend
+        if ir_source:
+            assert isinstance(src, str), "source must be either AST or a filepath"
+            src = IRSource(src)
+        extra_options = src.parse_options()
+        options = backend.parse_options(dict(options or dict(), **extra_options))
+        # create cache manager
+        env_vars = get_cache_invalidating_env_vars()
+        key = f"{triton_key()}-{src.hash()}-{backend.hash()}-{options.hash()}-{str(sorted(env_vars.items()))}"
+        hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        fn_cache_manager = get_cache_manager(hash)
+        # For dumping/overriding only hash the source as we want it to be independent of triton
+        # core changes to make it easier to track kernels by hash.
+        enable_override = os.environ.get("TRITON_KERNEL_OVERRIDE", "0") == "1"
+        enable_ir_dump = os.environ.get("TRITON_KERNEL_DUMP", "0") == "1"
+        fn_override_manager = get_override_manager(src.hash()) if enable_override else None
+        fn_dump_manager = get_dump_manager(src.hash()) if enable_ir_dump else None
+        metadata_filename = f"{src.name}.json"
+        metadata_group = fn_cache_manager.get_group(metadata_filename) or {}
+        metadata_path = metadata_group.get(metadata_filename)
+        always_compile = os.environ.get("TRITON_ALWAYS_COMPILE", "0") == "1"
+        if not always_compile and metadata_path is not None:
+            # cache hit!
+            metadata = json.loads(Path(metadata_path).read_text())
+            return CompiledKernel(src, metadata_group, hash)
+        # initialize metadata
+        metadata = {
+            "hash": hash,
+            "target": target,
+            **options.__dict__,
+            **env_vars,
+        }
+        # run compilation pipeline  and populate metadata
+        stages = dict()
+        backend.add_stages(stages, options)
+        first_stage = list(stages.keys()).index(src.ext)
+        # when the source is an IR file, don't apply the passes related to this stage. This makes it easier to write IR level tests.
+        if ir_source:
+            first_stage += 1
+        context = ir.context()
+        ir.load_dialects(context)
+        backend.load_dialects(context)
+        codegen_fns = backend.get_codegen_implementation()
+        try:
+            module = src.make_ir(options, codegen_fns, context)
+        except Exception as e:
+            filter_traceback(e)
+            raise
+        use_ttgir_loc = os.environ.get("USE_TTGIR_LOC", "0") == "1"
+        for ext, compile_ir in list(stages.items())[first_stage:]:
+            # TODO:Temporary slution
+            if ext == "hipfb":
+                if os.environ.get('USE_USC', '1') == '1':
+                    usc_file_name = f"{src.name}.out"
+                    usc_input_file = metadata_group[usc_file_name]
+                    file_dir = os.path.dirname(usc_input_file)
+                    out_file = f"{file_dir}/{src.name}.{ext}"
+                    import subprocess
+                    clang_offload_bundler = "/usr/local/fant/lib/llvm/17.0/bin/clang-offload-bundler"
+                    subprocess.check_call([clang_offload_bundler, "-type", "o",  "-bundle-align", "4096", "-targets", "host-x86_64-unknown-linux,hip-usc64----generic", "-input", "/dev/null", "-input", usc_input_file, "-output", out_file])
+                    ir_filename = f"{src.name}.{ext}"
+                    metadata_group[ir_filename] = out_file
+                else:
+                    spirv_file_name = f"{src.name}.spv"
+                    spirv_input_file = metadata_group[spirv_file_name]
+                    file_dir = os.path.dirname(spirv_input_file)
+                    out_file = f"{file_dir}/{src.name}.{ext}"
+                    import subprocess
+                    clang_offload_bundler = "/usr/local/fant/lib/llvm/17.0/bin/clang-offload-bundler"
+                    subprocess.check_call([clang_offload_bundler, "-type", "o",  "-bundle-align", "4096", "-targets", "host-x86_64-unknown-linux,hip-spirv64----generic", "-input", "/dev/null", "-input", spirv_input_file, "-output", out_file])
+                    ir_filename = f"{src.name}.{ext}"
+                    metadata_group[ir_filename] = out_file
+            elif ext == "usc":
+                ll_file_name = f"{src.name}.llir"
+                ll_input_file = metadata_group[ll_file_name]
+                file_dir = os.path.dirname(ll_input_file)
+                out_file = f"{file_dir}/{src.name}.out"
+                out_opt_file = f"{file_dir}/{src.name}-lower.out"
+                import subprocess
+                opt = "/usr/local/fant/lib/llvm/17.0/bin/opt"
+                libLLVMOpt = "/usr/local/fant/lib/llvm/libLLVMHipSpvPasses.so"
+                subprocess.check_call([opt, ll_input_file, "-load-pass-plugin", libLLVMOpt, "-passes=hip-post-link-passes", "--disable-shadow-kernel", "-o", out_opt_file])
+                oclcompiler = "/usr/local/fant/lib/llvm/17.0/bin/oclcompiler"
+                subprocess.check_call([oclcompiler, "-x", "spir", out_opt_file, "-o", out_file, "-FP64"])
+                output_filename = f"{src.name}.out"
+                metadata_group[output_filename] = out_file
+            else:
+                next_module = compile_ir(module, metadata)
+                ir_filename = f"{src.name}.{ext}"
+                metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
+            if fn_dump_manager is not None:
+                fn_dump_manager.put(next_module, ir_filename)
+            if (fn_override_manager is not None and fn_override_manager.has_file(ir_filename)):
+                print(f"\nOverriding kernel with file {ir_filename}")
+                full_name = fn_override_manager.get_file(ir_filename)
+                next_module = parse(full_name, ext, context)
+            # use an env variable to parse ttgir from file
+            if use_ttgir_loc and ext == "ttgir":
+                ttgir_full_name = fn_cache_manager.get_file(ir_filename)
+                next_module.create_location_snapshot(ttgir_full_name)
+                print(f"Create new locations for {ttgir_full_name}")
+            module = next_module
+        # write-back metadata
+        metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
+                                                                 binary=False)
+        fn_cache_manager.put_group(metadata_filename, metadata_group)
+        # return handle to compiled kernel
         return CompiledKernel(src, metadata_group, hash)
-    # initialize metadata
-    metadata = {
-        "hash": hash,
-        "target": target,
-        **options.__dict__,
-        **env_vars,
-    }
-    # run compilation pipeline  and populate metadata
-    stages = dict()
-    backend.add_stages(stages, options)
-    first_stage = list(stages.keys()).index(src.ext)
-    # when the source is an IR file, don't apply the passes related to this stage. This makes it easier to write IR level tests.
-    if ir_source:
-        first_stage += 1
-    context = ir.context()
-    ir.load_dialects(context)
-    backend.load_dialects(context)
-    codegen_fns = backend.get_codegen_implementation()
-    try:
-        module = src.make_ir(options, codegen_fns, context)
-    except Exception as e:
-        filter_traceback(e)
-        raise
-    use_ttgir_loc = os.environ.get("USE_TTGIR_LOC", "0") == "1"
-    for ext, compile_ir in list(stages.items())[first_stage:]:
-        next_module = compile_ir(module, metadata)
-        ir_filename = f"{src.name}.{ext}"
-        metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
-        if fn_dump_manager is not None:
-            fn_dump_manager.put(next_module, ir_filename)
-        if (fn_override_manager is not None and fn_override_manager.has_file(ir_filename)):
-            print(f"\nOverriding kernel with file {ir_filename}")
-            full_name = fn_override_manager.get_file(ir_filename)
-            next_module = parse(full_name, ext, context)
-        # use an env variable to parse ttgir from file
-        if use_ttgir_loc and ext == "ttgir":
-            ttgir_full_name = fn_cache_manager.get_file(ir_filename)
-            next_module.create_location_snapshot(ttgir_full_name)
-            print(f"Create new locations for {ttgir_full_name}")
-        module = next_module
-    # write-back metadata
-    metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
-                                                             binary=False)
-    fn_cache_manager.put_group(metadata_filename, metadata_group)
-    # return handle to compiled kernel
-    return CompiledKernel(src, metadata_group, hash)
+else:
+    def compile(src, target=None, options=None):
+        if target is None:
+            target = driver.active.get_current_target()
+        assert isinstance(target, GPUTarget), "target must be of GPUTarget type"
+        backend = make_backend(target)
+        ir_source = not isinstance(src, ASTSource)
+        # create backend
+        if ir_source:
+            assert isinstance(src, str), "source must be either AST or a filepath"
+            src = IRSource(src)
+        extra_options = src.parse_options()
+        options = backend.parse_options(dict(options or dict(), **extra_options))
+        # create cache manager
+        env_vars = get_cache_invalidating_env_vars()
+        key = f"{triton_key()}-{src.hash()}-{backend.hash()}-{options.hash()}-{str(sorted(env_vars.items()))}"
+        hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        fn_cache_manager = get_cache_manager(hash)
+        # For dumping/overriding only hash the source as we want it to be independent of triton
+        # core changes to make it easier to track kernels by hash.
+        enable_override = os.environ.get("TRITON_KERNEL_OVERRIDE", "0") == "1"
+        enable_ir_dump = os.environ.get("TRITON_KERNEL_DUMP", "0") == "1"
+        fn_override_manager = get_override_manager(src.hash()) if enable_override else None
+        fn_dump_manager = get_dump_manager(src.hash()) if enable_ir_dump else None
+        metadata_filename = f"{src.name}.json"
+        metadata_group = fn_cache_manager.get_group(metadata_filename) or {}
+        metadata_path = metadata_group.get(metadata_filename)
+        always_compile = os.environ.get("TRITON_ALWAYS_COMPILE", "0") == "1"
+        if not always_compile and metadata_path is not None:
+            # cache hit!
+            metadata = json.loads(Path(metadata_path).read_text())
+            return CompiledKernel(src, metadata_group, hash)
+        # initialize metadata
+        metadata = {
+            "hash": hash,
+            "target": target,
+            **options.__dict__,
+            **env_vars,
+        }
+        # run compilation pipeline  and populate metadata
+        stages = dict()
+        backend.add_stages(stages, options)
+        first_stage = list(stages.keys()).index(src.ext)
+        # when the source is an IR file, don't apply the passes related to this stage. This makes it easier to write IR level tests.
+        if ir_source:
+            first_stage += 1
+        context = ir.context()
+        ir.load_dialects(context)
+        backend.load_dialects(context)
+        codegen_fns = backend.get_codegen_implementation()
+        try:
+            module = src.make_ir(options, codegen_fns, context)
+        except Exception as e:
+            filter_traceback(e)
+            raise
+        use_ttgir_loc = os.environ.get("USE_TTGIR_LOC", "0") == "1"
+        for ext, compile_ir in list(stages.items())[first_stage:]:
+            next_module = compile_ir(module, metadata)
+            ir_filename = f"{src.name}.{ext}"
+            metadata_group[ir_filename] = fn_cache_manager.put(next_module, ir_filename)
+            if fn_dump_manager is not None:
+                fn_dump_manager.put(next_module, ir_filename)
+            if (fn_override_manager is not None and fn_override_manager.has_file(ir_filename)):
+                print(f"\nOverriding kernel with file {ir_filename}")
+                full_name = fn_override_manager.get_file(ir_filename)
+                next_module = parse(full_name, ext, context)
+            # use an env variable to parse ttgir from file
+            if use_ttgir_loc and ext == "ttgir":
+                ttgir_full_name = fn_cache_manager.get_file(ir_filename)
+                next_module.create_location_snapshot(ttgir_full_name)
+                print(f"Create new locations for {ttgir_full_name}")
+            module = next_module
+        # write-back metadata
+        metadata_group[metadata_filename] = fn_cache_manager.put(json.dumps(metadata, default=vars), metadata_filename,
+                                                                 binary=False)
+        fn_cache_manager.put_group(metadata_filename, metadata_group)
+        # return handle to compiled kernel
+        return CompiledKernel(src, metadata_group, hash)
 
 
 def make_backend(target):
@@ -326,87 +514,212 @@ class LazyDict:
         self.extras.append((func, args))
 
 
-class CompiledKernel:
+if not _NO_TTGIR:
+    class CompiledKernel:
 
-    # Hooks for external tools to monitor the execution of triton kernels
-    # TODO: move out of this namespace since it's a runtime thing
-    launch_enter_hook = None
-    launch_exit_hook = None
+        # Hooks for external tools to monitor the execution of triton kernels
+        # TODO: move out of this namespace since it's a runtime thing
+        launch_enter_hook = None
+        launch_exit_hook = None
 
-    def __init__(self, src, metadata_group, hash):
-        from collections import namedtuple
-        metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
-        metadata = json.loads(metadata_path.read_text())
-        metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
-        # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
-        target = metadata['target']
-        metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
-        KernelMetadata = namedtuple('KernelMetadata', sorted(list(metadata.keys())))
-        self.metadata = KernelMetadata(**metadata)
-        backend = make_backend(self.metadata.target)
-        self.packed_metadata = backend.pack_metadata(self.metadata)
-        self.src = src
-        self.hash = hash
-        self.name = self.metadata.name
-        # stores the text of each level of IR that was generated during compilation
-        asm_files = [Path(p) for c, p in metadata_group.items() if not c.endswith(".json")]
-        binary_ext = backend.binary_ext
-        self.asm = {
-            file.suffix[1:]: file.read_bytes() if file.suffix[1:] == binary_ext else file.read_text()
-            for file in asm_files
-        }
-        self.kernel = self.asm[binary_ext]
-        # binaries are lazily initialized
-        # because it involves doing runtime things
-        # (e.g., checking amount of shared memory on current device)
-        self.module = None
-        self.function = None
+        def __init__(self, src, metadata_group, hash):
+            from collections import namedtuple
+            metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
+            metadata = json.loads(metadata_path.read_text())
+            metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
+            # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
+            target = metadata['target']
+            metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
+            KernelMetadata = namedtuple('KernelMetadata', sorted(list(metadata.keys())))
+            self.metadata = KernelMetadata(**metadata)
+            backend = make_backend(self.metadata.target)
+            self.packed_metadata = backend.pack_metadata(self.metadata)
+            self.src = src
+            self.hash = hash
+            self.name = self.metadata.name
+            # stores the text of each level of IR that was generated during compilation
+            asm_files = [Path(p) for c, p in metadata_group.items() if not c.endswith(".json")]
+            binary_ext = backend.binary_ext
+            self.asm = {
+                file.suffix[1:]: file.read_bytes() if (file.suffix[1:] == binary_ext or file.suffix[1:] == "spv" or file.suffix[1:] == "out") else file.read_text()
+                for file in asm_files
+            }
+            self.kernel = self.asm[binary_ext]
+            # binaries are lazily initialized
+            # because it involves doing runtime things
+            # (e.g., checking amount of shared memory on current device)
+            self.module = None
+            self.function = None
+            self.queue = None  # added by fantgpu for ocl
+            self.context = None
+            self.target = target
 
-    def _init_handles(self):
-        if self.module is not None:
-            return
-        device = driver.active.get_current_device()
-        # create launcher
-        self.run = driver.active.launcher_cls(self.src, self.metadata)
-        # not enough shared memory to run the kernel
-        max_shared = driver.active.utils.get_device_properties(device)["max_shared_mem"]
-        if self.metadata.shared > max_shared:
-            raise OutOfResources(self.metadata.shared, max_shared, "shared memory")
-        # TODO: n_regs, n_spills should be metadata generated when calling `ptxas`
-        self.module, self.function, self.n_regs, self.n_spills = driver.active.utils.load_binary(
-            self.name, self.kernel, self.metadata.shared, device)
+        def _init_handles(self):
+            if self.module is not None:
+                return
 
-    def __getattribute__(self, name):
-        if name == 'run':
-            self._init_handles()
-        return super().__getattribute__(name)
+            device = driver.active.get_current_device()
 
-    def launch_metadata(self, grid, stream, *args):
-        if CompiledKernel.launch_enter_hook is None:
-            return None
-        ret = LazyDict({"name": self.name, "function": self.function, "stream": stream})
-        if not isinstance(self.src, ASTSource) or self.src.fn.launch_metadata is None:
-            return ret
-        arg_dict = {}
-        arg_idx = 0
-        for i, arg_name in enumerate(self.src.fn.arg_names):
-            if i in self.src.fn.constexprs:
-                arg_dict[arg_name] = self.src.constants[arg_name]
+            # create launcher
+            self.run = driver.active.launcher_cls(self.src, self.metadata)
+            # not enough shared memory to run the kernel
+            if self.target['arch'] == "FantGPU":
+                max_shared = driver.active.device_properties["max_shared_mem"]
             else:
-                arg_dict[arg_name] = args[arg_idx]
-                arg_idx += 1
-        ret.add(self.src.fn.launch_metadata, (grid, self.metadata, arg_dict))
-        return ret
+                max_shared = driver.active.utils.get_device_properties(device)["max_shared_mem"]
+            if self.metadata.shared > max_shared:
+                raise OutOfResources(self.metadata.shared, max_shared, "shared memory")
+            # TODO: n_regs, n_spills should be metadata generated when calling `ptxas`
 
-    def __getitem__(self, grid):
-        self._init_handles()
+            # modified by fantgpu
+            if self.target['arch'] == "FantGPU":
+                self.module, self.function, self.n_regs, self.n_spills, self.queue, self.context = driver.active.utils.load_binary(
+                    self.name, self.kernel, self.metadata.shared, device)
+            else:
+                self.module, self.function, self.n_regs, self.n_spills = driver.active.utils.load_binary(
+                    self.name, self.kernel, self.metadata.shared, device)
 
-        def runner(*args, stream=None):
-            if stream is None:
-                device = driver.active.get_current_device()
-                stream = driver.active.get_current_stream(device)
-            launch_metadata = self.launch_metadata(grid, stream, *args)
-            self.run(grid[0], grid[1], grid[2], stream, self.function, self.packed_metadata, launch_metadata,
-                     CompiledKernel.launch_enter_hook, CompiledKernel.launch_exit_hook, *args)
+        def __getattribute__(self, name):
+            if name == 'run':
+                self._init_handles()
+            return super().__getattribute__(name)
 
-        return runner
+        def launch_metadata(self, grid, stream, *args):
+            if CompiledKernel.launch_enter_hook is None:
+                return None
+            ret = LazyDict({"name": self.name, "function": self.function, "stream": stream})
+            if not isinstance(self.src, ASTSource) or self.src.fn.launch_metadata is None:
+                return ret
+            arg_dict = {}
+            arg_idx = 0
+            for i, arg_name in enumerate(self.src.fn.arg_names):
+                if i in self.src.fn.constexprs:
+                    arg_dict[arg_name] = self.src.constants[arg_name]
+                else:
+                    arg_dict[arg_name] = args[arg_idx]
+                    arg_idx += 1
+            ret.add(self.src.fn.launch_metadata, (grid, self.metadata, arg_dict))
+            return ret
+
+        def __getitem__(self, grid):
+            self._init_handles()
+
+            def runner(*args, stream=None):
+                if stream is None:
+                    device = driver.active.get_current_device()
+                    stream = driver.active.get_current_stream(device)
+                launch_metadata = self.launch_metadata(grid, stream, *args)
+
+                if self.target['arch'] == "FANT_HIP":
+                    stream = driver.active.get_current_stream(device).fant_stream
+                if self.target['arch'] == "FantGPU":
+                    self.run(grid[0], grid[1], grid[2],
+                             self.queue, self.function, self.packed_metadata, launch_metadata,
+                             CompiledKernel.launch_enter_hook, CompiledKernel.launch_exit_hook, self.name, *args)
+                else:
+                    self.run(grid[0], grid[1], grid[2], stream, self.function, self.packed_metadata, launch_metadata,
+                             CompiledKernel.launch_enter_hook, CompiledKernel.launch_exit_hook, *args)
+
+            return runner
+
+        # When CompiledKernel is compiled and constructed, no "run" attribute
+        # At the time of first run, self.run is constructed in function _init_handles.
+        # At the same time when self.run been constructed, binary is loaded, cl res are constructed.
+
+        # Later, this CompiledKernel is run by repeatedly, self.run, cl res won't need be constructed again. binary isn't loaded again.
+
+        # So, as long as CompiledKernel is alive, cl res can't be released
+        # when this CompiledKernel is destroyed, cl res can be released.
+        # Due to gc of python, __del__ function won't be called immediately.
+        # As long as CompiledKernel is destroyed, __del__ called, so cl res must be released at a proper time.
+        def __del__(self):
+            try:
+                if (self.target['arch'] == "FantGPU") and (self.module is not None):
+                    driver.active.utils.unload_binary(self.module, self.function, self.queue, self.context)
+            except Exception as e:
+                print(f"An error occurred during the unload_binary call: {e}")
+else:
+    class CompiledKernel:
+
+        # Hooks for external tools to monitor the execution of triton kernels
+        # TODO: move out of this namespace since it's a runtime thing
+        launch_enter_hook = None
+        launch_exit_hook = None
+
+        def __init__(self, src, metadata_group, hash):
+            from collections import namedtuple
+            metadata_path = next((Path(p) for c, p in metadata_group.items() if c.endswith(".json")))
+            metadata = json.loads(metadata_path.read_text())
+            metadata['cluster_dims'] = tuple(metadata['cluster_dims'])
+            # JSON serialization dumps the target as a dict. Restore it to a GPUTarget.
+            target = metadata['target']
+            metadata['target'] = GPUTarget(target['backend'], target['arch'], target['warp_size'])
+            KernelMetadata = namedtuple('KernelMetadata', sorted(list(metadata.keys())))
+            self.metadata = KernelMetadata(**metadata)
+            backend = make_backend(self.metadata.target)
+            self.packed_metadata = backend.pack_metadata(self.metadata)
+            self.src = src
+            self.hash = hash
+            self.name = self.metadata.name
+            # stores the text of each level of IR that was generated during compilation
+            asm_files = [Path(p) for c, p in metadata_group.items() if not c.endswith(".json")]
+            binary_ext = backend.binary_ext
+            self.asm = {
+                file.suffix[1:]: file.read_bytes() if file.suffix[1:] == binary_ext else file.read_text()
+                for file in asm_files
+            }
+            self.kernel = self.asm[binary_ext]
+            # binaries are lazily initialized
+            # because it involves doing runtime things
+            # (e.g., checking amount of shared memory on current device)
+            self.module = None
+            self.function = None
+
+        def _init_handles(self):
+            if self.module is not None:
+                return
+            device = driver.active.get_current_device()
+            # create launcher
+            self.run = driver.active.launcher_cls(self.src, self.metadata)
+            # not enough shared memory to run the kernel
+            max_shared = driver.active.utils.get_device_properties(device)["max_shared_mem"]
+            if self.metadata.shared > max_shared:
+                raise OutOfResources(self.metadata.shared, max_shared, "shared memory")
+            # TODO: n_regs, n_spills should be metadata generated when calling `ptxas`
+            self.module, self.function, self.n_regs, self.n_spills = driver.active.utils.load_binary(
+                self.name, self.kernel, self.metadata.shared, device)
+
+        def __getattribute__(self, name):
+            if name == 'run':
+                self._init_handles()
+            return super().__getattribute__(name)
+
+        def launch_metadata(self, grid, stream, *args):
+            if CompiledKernel.launch_enter_hook is None:
+                return None
+            ret = LazyDict({"name": self.name, "function": self.function, "stream": stream})
+            if not isinstance(self.src, ASTSource) or self.src.fn.launch_metadata is None:
+                return ret
+            arg_dict = {}
+            arg_idx = 0
+            for i, arg_name in enumerate(self.src.fn.arg_names):
+                if i in self.src.fn.constexprs:
+                    arg_dict[arg_name] = self.src.constants[arg_name]
+                else:
+                    arg_dict[arg_name] = args[arg_idx]
+                    arg_idx += 1
+            ret.add(self.src.fn.launch_metadata, (grid, self.metadata, arg_dict))
+            return ret
+
+        def __getitem__(self, grid):
+            self._init_handles()
+
+            def runner(*args, stream=None):
+                if stream is None:
+                    device = driver.active.get_current_device()
+                    stream = driver.active.get_current_stream(device)
+                launch_metadata = self.launch_metadata(grid, stream, *args)
+                self.run(grid[0], grid[1], grid[2], stream, self.function, self.packed_metadata, launch_metadata,
+                         CompiledKernel.launch_enter_hook, CompiledKernel.launch_exit_hook, *args)
+
+            return runner

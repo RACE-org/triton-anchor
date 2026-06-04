@@ -1,6 +1,9 @@
 #include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#ifndef NO_TTGIR
+#include "mlir/Dialect/Math/Transforms/Passes.h"
+#endif // NO_TTGIR
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Index/IR/IndexDialect.h"
@@ -131,7 +134,15 @@ void populateMathPatternsAndLegality(TritonGPUTypeConverter &typeConverter,
                GenericOpPattern<math::LogOp>, GenericOpPattern<math::Log2Op>,
                GenericOpPattern<math::ErfOp>, GenericOpPattern<math::AbsFOp>,
                GenericOpPattern<math::AbsIOp>, GenericOpPattern<math::SqrtOp>,
+#ifndef NO_TTGIR
+               GenericOpPattern<math::RsqrtOp>, GenericOpPattern<math::FmaOp>,
+               GenericOpPattern<math::PowFOp>, GenericOpPattern<math::TanhOp>,
+               GenericOpPattern<math::TruncOp>, GenericOpPattern<math::IsFiniteOp>,
+               GenericOpPattern<math::IsInfOp>, GenericOpPattern<math::IsNaNOp>,
+               GenericOpPattern<math::RoundEvenOp>>(
+#else
                GenericOpPattern<math::RsqrtOp>, GenericOpPattern<math::FmaOp>>(
+#endif // NO_TTGIR
       typeConverter, context);
 }
 
@@ -235,6 +246,13 @@ struct TritonDotPattern : public OpConversionPattern<triton::DotOp> {
       retSizePerThread[rank - 1] = 4;
       retSizePerThread[rank - 2] = 4;
     }
+#ifndef NO_TTGIR
+    retSizePerThread[rank - 1] = std::min(
+        retSizePerThread[rank - 1], static_cast<unsigned>(origShape[rank - 1]));
+    retSizePerThread[rank - 2] = std::min(
+        retSizePerThread[rank - 2], static_cast<unsigned>(origShape[rank - 2]));
+
+#endif // NO_TTGIR
     SmallVector<unsigned> retOrder(rank);
     for (unsigned i = 0; i < rank; ++i)
       retOrder[i] = rank - 1 - i;
@@ -538,10 +556,17 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::ClampFOp>,
       GenericOpPattern<triton::PreciseSqrtOp>,
       GenericOpPattern<triton::PreciseDivFOp>,
+#ifndef NO_TTGIR
+      GenericOpPattern<triton::DivRZOp>,
+#endif // NO_TTGIR
       GenericOpPattern<triton::MulhiUIOp>,
       GenericOpPattern<triton::ElementwiseInlineAsmOp>, TritonReducePattern,
       GenericOpPattern<triton::ReduceReturnOp>, TritonScanPattern,
+#ifndef NO_TTGIR
+      GenericOpPattern<triton::ScanReturnOp>, GenericOpPattern<triton::TMALoadOp>,
+#else
       GenericOpPattern<triton::ScanReturnOp>,
+#endif // NO_TTGIR
       GenericOpPattern<triton::MakeRangeOp>, TritonExpandDimsPattern,
       TritonTransPattern, TritonDotPattern, GenericOpPattern<triton::LoadOp>,
       GenericOpPattern<triton::StoreOp>, GenericOpPattern<triton::HistogramOp>,
@@ -768,6 +793,9 @@ public:
     // add rules
     populateArithPatternsAndLegality(typeConverter, patterns, target);
     populateMathPatternsAndLegality(typeConverter, patterns, target);
+#ifndef NO_TTGIR
+    mlir::populateExpandFPowIPattern(patterns);
+#endif // NO_TTGIR
     populateTritonPatterns(typeConverter, patterns, numCTAs);
     // TODO: can we use
     //    mlir::scf::populateSCFStructurealTypeConversionsAndLegality(...) here?

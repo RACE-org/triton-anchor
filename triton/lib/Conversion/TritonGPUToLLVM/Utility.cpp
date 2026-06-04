@@ -390,6 +390,21 @@ SmallVector<Value> delinearize(RewriterBase &rewriter, Location loc,
   return multiDim;
 }
 
+#ifndef NO_TTGIR
+SmallVector<unsigned> delinearize(unsigned linear, ArrayRef<unsigned> shape,
+                                  ArrayRef<unsigned> order) {
+  auto rank = shape.size();
+  assert(order.size() == rank);
+  SmallVector<unsigned> multiDim(rank);
+  for (auto dim : order) {
+    multiDim[dim] = linear % shape[dim];
+    linear /= shape[dim];
+  }
+  assert(linear == 0);
+  return multiDim;
+}
+
+#endif // NO_TTGIR
 Value linearize(ConversionPatternRewriter &rewriter, Location loc,
                 ArrayRef<Value> multiDim, ArrayRef<unsigned> shape,
                 ArrayRef<unsigned> order) {
@@ -412,6 +427,16 @@ Value linearize(ConversionPatternRewriter &rewriter, Location loc,
   return linear;
 }
 
+#ifndef NO_TTGIR
+size_t linearize(ArrayRef<unsigned> multiDim, ArrayRef<unsigned> shape,
+                 ArrayRef<unsigned> order) {
+  size_t linear = 0;
+  for (unsigned dim : llvm::reverse(order))
+    linear = linear * shape[dim] + multiDim[dim];
+  return linear;
+}
+
+#endif // NO_TTGIR
 Value addStringToModule(Location loc, ConversionPatternRewriter &rewriter,
                         StringRef key, StringRef content) {
   auto moduleOp = rewriter.getBlock()->getParent()->getParentOfType<ModuleOp>();
@@ -597,6 +622,22 @@ SmallVector<Value> getMultiDimOffset(Attribute layout, Location loc,
     multiDimOffset[1] = add(multiDimBase[1], i32_val(offsets[elemId][1]));
     return multiDimOffset;
   }
+#ifndef NO_TTGIR
+  if (isa<FANTWmmaEncodingAttr>(layout)) {
+    auto multiDimBase =
+        emitBaseIndexForLayout(loc, rewriter, targetInfo, layout, type, false);
+    SmallVector<SmallVector<unsigned>> offsets;
+    assert(rank == 2);
+    SmallVector<Value> multiDimOffset(rank);
+    if (auto wmmaLayout = dyn_cast<FANTWmmaEncodingAttr>(layout)) {
+      emitFANTWmmaOffsetForCTA(wmmaLayout, offsets, 0, multiDimCTAInRepId[0],
+                               multiDimCTAInRepId[1]);
+    }
+    multiDimOffset[0] = add(multiDimBase[0], i32_val(offsets[elemId][0]));
+    multiDimOffset[1] = add(multiDimBase[1], i32_val(offsets[elemId][1]));
+    return multiDimOffset;
+  }
+#endif // NO_TTGIR
   llvm_unreachable("unexpected layout in getMultiDimOffset");
 }
 
@@ -616,4 +657,25 @@ SmallVector<Value> getWrappedMultiDimOffset(
 }
 
 } // namespace LLVM
+#ifndef NO_TTGIR
+
+SharedMemoryObject
+getExpandedSharedMemoryObject(ConversionPatternRewriter &rewriter, Location loc,
+                              SharedMemoryObject smemObj,
+                              ArrayRef<int64_t> shape) {
+  assert(shape.size() == 2 || shape.size() == 3);
+  auto strides = smemObj.getStrides();
+  auto offsets = smemObj.getOffsets();
+  auto rank = strides.size();
+  assert(rank == shape.size());
+  if (rank == 3)
+    return smemObj;
+  strides.insert(strides.begin(), i32_val(shape[0] * shape[1]));
+  offsets.insert(offsets.begin(), i32_val(0));
+  auto expandedSmemObj = SharedMemoryObject(
+      smemObj.getBase(), smemObj.getBaseElemType(), strides, offsets);
+  return expandedSmemObj;
+}
+
+#endif // NO_TTGIR
 } // namespace mlir

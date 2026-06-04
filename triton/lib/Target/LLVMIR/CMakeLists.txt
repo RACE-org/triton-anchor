@@ -15,6 +15,7 @@ add_triton_library(TritonLLVMIR
         MLIRLLVMDialect
         MLIRLLVMToLLVMIRTranslation
         MLIRNVVMToLLVMIRTranslation
+        $<$<NOT:$<BOOL:${NO_TTGIR}>>:MLIRFTVMToLLVMIRTranslation>
         MLIRROCDLToLLVMIRTranslation
         MLIRSCFToControlFlow
         MLIRSupport

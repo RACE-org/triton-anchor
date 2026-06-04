@@ -332,6 +332,28 @@ compared to 1*64 when the hasLeadingOffset is false.
           }
         }
 
+#ifndef NO_TTGIR
+        if (mlir::isa<FANTWmmaEncodingAttr>(dotOpEnc.getParent())) {
+          if (dotOpEnc.getOpIdx() == 0) {
+            const int numBanks = 16;
+            const int bankBitWidth = 32;
+
+            // number of inner dimension rows per one pattern repeat
+            int innerDimLength = shape[order[0]];
+            int elemsPerOneBanksRow = (numBanks * bankBitWidth) / typeWidthInBit;
+
+            int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
+            int vecSize = ((typeWidthInBit == 16) ? 64 : 32 ) / typeWidthInBit;
+            int maxPhase = 4 / perPhase;
+
+            return get(context, vecSize, perPhase, maxPhase, order, CTALayout);
+          } else {
+            // Do not swizzle in case k dimension is not innermost.
+            // In this case accesses will go in different banks even without swizzling.
+            return get(context, 1, 1, 1, order, CTALayout);
+          }
+        }
+#endif // NO_TTGIR
 
         auto mmaEnc = mlir::dyn_cast<NvidiaMmaEncodingAttr>(dotOpEnc.getParent());
 
@@ -990,6 +1012,66 @@ Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
   }];
 }
 
+#ifndef NO_TTGIR
+def FANTWmmaEncodingAttr : DistributedEncoding<"FANTWmmaEncoding", "fant_wmma_encoding", [MmaEncodingTrait]> {
+  let mnemonic = "fant_wmma";
+
+  let description = [{
+An important limitation of WMMA for layout is a shape for tiles proccessed
+by a single warp. It is [16, 16].
+This encoding assumes specific access to matrix elements by threads.
+Example:
+Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
+
+    warp 0 [16, 16]           warp 1 [16, 16]           warp 2 [16, 16]
+-----------/\----------   -----------/\----------   -----------/\----------
+[0   0   1  ... 7    7]   [0   0   1  ... 7    7]   [0   0   1  ... 7    7]
+...                       ...                       ...                    
+[56  56  57 ... 63  63]   [56  56  57 ... 63  63]   [56  56  57 ... 63  63]
+[64  64  65 ... 71  71]   [64  64  65 ... 71  71]   [64  64  65 ... 71  71]
+...                       ...                       ...
+[120 120 121 . 127 127]   [120 120 121 . 127 127]   [120 120 121 . 127 127] 
+
+    warp 3 [16, 16]           warp 4 [16, 16]           warp 5 [16, 16]
+-----------/\----------   -----------/\----------   -----------/\----------
+[0   0   1  ... 7    7]   [0   0   1  ... 7    7]   [0   0   1  ... 7    7]
+...                       ...                       ...                    
+[56  56  57 ... 63  63]   [56  56  57 ... 63  63]   [56  56  57 ... 63  63]
+[64  64  65 ... 71  71]   [64  64  65 ... 71  71]   [64  64  65 ... 71  71]
+...                       ...                       ...
+[120 120 121 . 127 127]   [120 120 121 . 127 127]   [120 120 121 . 127 127] 
+  }];
+
+  let parameters = (
+    ins
+    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    "CTALayoutAttr":$CTALayout
+  );
+
+  let hasCustomAssemblyFormat = 1;
+
+  let extraClassDeclaration = extraDistributedDeclaration # [{
+    bool supportReduction() const {
+      return true;
+    }
+    SmallVector<unsigned> getSizePerThreadForOperands(unsigned opIdx) const;
+    SmallVector<unsigned> getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape, int opIdx) const;
+    unsigned getTotalElemsPerThreadForOperands(ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const;
+    SmallVector<int64_t> getWMMAElemsPerInstrForOperands() const;
+    SmallVector<int64_t> getWMMARepForOperands(ArrayRef<int64_t> operandShape,
+                                      Type elemType, int kWidth, int opIdx) const;
+    static SmallVector<unsigned> getMNKDimPerWMMAInstr();
+
+    SmallVector<unsigned> getContigPerThread() {
+      auto rank = getWarpsPerCTA().size();
+      SmallVector<unsigned> contigPerThread(rank, 1);
+      contigPerThread[1] = 2;
+      return contigPerThread;
+    };
+  }];
+}
+
+#endif // NO_TTGIR
 def NvidiaMmaEncodingAttr : DistributedEncoding<"NvidiaMmaEncoding", "nvidia_mma_encoding", [MmaEncodingTrait]> {
   let mnemonic = "nvidia_mma";
 

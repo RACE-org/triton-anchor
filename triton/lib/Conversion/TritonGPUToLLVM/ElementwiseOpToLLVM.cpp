@@ -791,6 +791,11 @@ void mlir::triton::populateElementwiseOpToLLVMPatterns(
   POPULATE_UNARY_OP(triton::BitcastOp, LLVM::BitcastOp)
   POPULATE_UNARY_OP(triton::IntToPtrOp, LLVM::IntToPtrOp)
   POPULATE_UNARY_OP(triton::PtrToIntOp, LLVM::PtrToIntOp)
+#ifndef NO_TTGIR
+  POPULATE_UNARY_OP(math::PowFOp, math::PowFOp)
+  POPULATE_UNARY_OP(math::TanhOp, math::TanhOp)
+  POPULATE_UNARY_OP(math::TruncOp, math::TruncOp)
+#endif // NO_TTGIR
 #undef POPULATE_UNARY_OP
 
 #define POPULATE_BINARY_OP(SRC_OP, DST_OP)                                     \

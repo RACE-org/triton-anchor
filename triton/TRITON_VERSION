@@ -1,4 +1,12 @@
 # Vendored from: https://github.com/openai/triton
 # Commit: 757b6a61e7df814ba806f498f8bb3160f84b120c
 # Date: 2026-05-08
-# 升级指南见 docs/upgrade_triton.md
+#
+# 裁剪内容：
+# - 删除 third_party/nvidia/ (NVIDIA 后端)
+# - 删除 third_party/amd/ (AMD 后端)
+# - 删除 third_party/proton/ (Profiler)
+# - 删除 bin/ (triton-opt 等工具)
+# - 删除 test/, unittest/
+# - 删除 python/triton/ops/ (NVIDIA 专属算子)
+# - 移除 lib/Conversion/TritonGPUToLLVM/CMakeLists.txt 中的 NVGPUIR 依赖

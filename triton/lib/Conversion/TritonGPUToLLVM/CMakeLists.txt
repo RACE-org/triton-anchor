@@ -35,3 +35,7 @@ add_triton_library(TritonGPUToLLVM
     TritonGPUTransforms
     TritonNvidiaGPUTransforms
 )
+
+if(NOT NO_TTGIR AND TARGET NVGPUIR)
+  target_link_libraries(TritonGPUToLLVM PUBLIC NVGPUIR)
+endif()

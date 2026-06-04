@@ -1,4 +1,6 @@
 from __future__ import annotations
+from triton._no_ttgir import NO_TTGIR as _NO_TTGIR
+
 
 from warnings import warn
 from contextlib import contextmanager
@@ -1608,7 +1610,13 @@ def _experimental_descriptor_load(desc_pointer, offsets, shape, dtype, _builder=
     """
     type = block_type(dtype, shape)
     return semantic.descriptor_load(desc_pointer, offsets, "", "", type, _builder)
+if not _NO_TTGIR:
 
+    @builtin
+    def tma_load(desc_pointer, shape, dtype, is_matrixa=True, _builder=None):
+        is_matrixa = _constexpr_to_value(is_matrixa)
+        type = block_type(dtype, shape)
+        return semantic.tma_load(desc_pointer, type, is_matrixa, _builder)
 
 @builtin
 def _experimental_descriptor_store(desc_pointer, value, offsets, _builder=None):
@@ -1853,9 +1861,10 @@ def where(condition, x, y, _builder=None):
 # -----------------------
 
 
-@builtin
-def minimum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
-    """
+if not _NO_TTGIR:
+    @builtin
+    def minimum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
+        """
     Computes the element-wise minimum of :code:`x` and :code:`y`.
 
     :param x: the first input tensor
@@ -1867,17 +1876,37 @@ def minimum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
 
     .. seealso:: :class:`tl.PropagateNan`
     """
-    x = _to_tensor(x, _builder)
-    y = _to_tensor(y, _builder)
-    x = _promote_bfloat16_to_float32(x, _builder=_builder)
-    y = _promote_bfloat16_to_float32(y, _builder=_builder)
-    propagate_nan = _constexpr_to_value(propagate_nan)
-    return semantic.minimum(x, y, propagate_nan, _builder)
+        x = _to_tensor(x, _builder)
+        y = _to_tensor(y, _builder)
+        propagate_nan = _constexpr_to_value(propagate_nan)
+        return semantic.minimum(x, y, propagate_nan, _builder)
+else:
+    @builtin
+    def minimum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
+        """
+    Computes the element-wise minimum of :code:`x` and :code:`y`.
 
+    :param x: the first input tensor
+    :type x: Block
+    :param y: the second input tensor
+    :type y: Block
+    :param propagate_nan: whether to propagate NaN values.
+    :type propagate_nan: tl.PropagateNan
 
-@builtin
-def maximum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
+    .. seealso:: :class:`tl.PropagateNan`
     """
+        x = _to_tensor(x, _builder)
+        y = _to_tensor(y, _builder)
+        x = _promote_bfloat16_to_float32(x, _builder=_builder)
+        y = _promote_bfloat16_to_float32(y, _builder=_builder)
+        propagate_nan = _constexpr_to_value(propagate_nan)
+        return semantic.minimum(x, y, propagate_nan, _builder)
+
+
+if not _NO_TTGIR:
+    @builtin
+    def maximum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
+        """
     Computes the element-wise maximum of :code:`x` and :code:`y`.
 
     :param x: the first input tensor
@@ -1889,12 +1918,31 @@ def maximum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
 
     .. seealso:: :class:`tl.PropagateNan`
     """
-    x = _to_tensor(x, _builder)
-    y = _to_tensor(y, _builder)
-    x = _promote_bfloat16_to_float32(x, _builder=_builder)
-    y = _promote_bfloat16_to_float32(y, _builder=_builder)
-    propagate_nan = _constexpr_to_value(propagate_nan)
-    return semantic.maximum(x, y, propagate_nan, _builder)
+        x = _to_tensor(x, _builder)
+        y = _to_tensor(y, _builder)
+        propagate_nan = _constexpr_to_value(propagate_nan)
+        return semantic.maximum(x, y, propagate_nan, _builder)
+else:
+    @builtin
+    def maximum(x, y, propagate_nan: constexpr = PropagateNan.NONE, _builder=None):
+        """
+    Computes the element-wise maximum of :code:`x` and :code:`y`.
+
+    :param x: the first input tensor
+    :type x: Block
+    :param y: the second input tensor
+    :type y: Block
+    :param propagate_nan: whether to propagate NaN values.
+    :type propagate_nan: tl.PropagateNan
+
+    .. seealso:: :class:`tl.PropagateNan`
+    """
+        x = _to_tensor(x, _builder)
+        y = _to_tensor(y, _builder)
+        x = _promote_bfloat16_to_float32(x, _builder=_builder)
+        y = _promote_bfloat16_to_float32(y, _builder=_builder)
+        propagate_nan = _constexpr_to_value(propagate_nan)
+        return semantic.maximum(x, y, propagate_nan, _builder)
 
 
 @builtin

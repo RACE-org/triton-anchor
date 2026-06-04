@@ -1,2 +1,5 @@
 add_subdirectory(TritonToTritonGPU)
 add_subdirectory(TritonGPUToLLVM)
+if(TRITON_ENABLE_SPIRV AND NOT NO_TTGIR)
+  add_subdirectory(TritonGPUToSPIRV)
+endif()

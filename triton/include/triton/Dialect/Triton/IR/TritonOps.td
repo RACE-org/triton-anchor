@@ -177,6 +177,24 @@ def TT_PreciseDivFOp : TT_Op<"precise_divf", [Elementwise,
     let assemblyFormat = "$x `,` $y attr-dict `:` type($x)";
 }
 
+#ifndef NO_TTGIR
+def TT_DivRZOp : TT_Op<"div_rz", [Elementwise,
+                                  SameOperandsAndResultType,
+                                  Pure]> {
+    let summary = "floating point divide, round-toward-zero";
+
+    let description = [{
+        floating point divide, round-toward-zero.
+    }];
+
+    let arguments = (ins TT_FloatLike:$x, TT_FloatLike:$y);
+
+    let results = (outs TT_FloatLike:$result);
+
+    let assemblyFormat = "$x `,` $y attr-dict `:` type($x)";
+}
+
+#endif // NO_TTGIR
 def TT_MulhiUIOp : TT_Op<"mulhiui", [Elementwise,
                                   SameOperandsAndResultType,
                                   Pure]> {
@@ -1122,6 +1140,28 @@ def TT_ExperimentalDescriptorLoadOp : TT_Op<"experimental_descriptor_load", [
     }];
 }
 
+#ifndef NO_TTGIR
+def TT_TMALoadOp : TT_Op<"tma_load", [
+  MemoryEffects<[MemRead<GlobalMemory>]>]> {
+    let summary = "Load from gmem to register";
+    let description = [{
+      This operation will be lowered to TMA builtin func on targets supporting it.
+    }];
+    let arguments = (
+      ins
+      TT_PtrType:$desc_ptr,
+      DefaultValuedAttr<BoolAttr, "true">:$isMatrixA
+    );
+
+    let results = (outs TT_Type:$result);
+
+    let assemblyFormat = [{
+      $desc_ptr `[` $isMatrixA `]`
+      attr-dict `:` qualified(type($desc_ptr)) `->` type($result)
+    }];
+}
+
+#endif // NO_TTGIR
 def TT_ExperimentalDescriptorStoreOp : TT_Op<"experimental_descriptor_store", [
   MemoryEffects<[MemWrite<GlobalMemory>]>]> {
     let summary = "store value based on descriptor";

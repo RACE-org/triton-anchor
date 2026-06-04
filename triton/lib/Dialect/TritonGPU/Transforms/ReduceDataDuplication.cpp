@@ -58,6 +58,13 @@ public:
             dstDotOp.getParent() == srcMfmaEncoding)
           return;
       }
+#ifndef NO_TTGIR
+      if (auto srcBlockEncoding =
+              dyn_cast<triton::gpu::BlockedEncodingAttr>(srcEncoding)) {
+        if (isa<triton::gpu::FANTWmmaEncodingAttr>(dstDotOp.getParent()))
+          return;
+      }
+#endif // NO_TTGIR
       auto srcOrder = triton::gpu::getOrder(srcEncoding);
       auto rank = srcOrder.size();
       SmallVector<unsigned> sharedOrder;

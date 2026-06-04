@@ -1,12 +1,21 @@
 """Adapter package — TTIR → Linalg/TritonGPU conversion adapters."""
 
 from .base import (
-    ITritonToLinalgAdapter as ITritonToLinalgAdapter,
-    ILinalgOptAdapter as ILinalgOptAdapter,
-    ILinalgPybindAdapter as ILinalgPybindAdapter,
-    AdapterConversionError as AdapterConversionError,
+    ITritonToLinalgAdapter,
+    ILinalgOptAdapter,
+    ILinalgPybindAdapter,
+    AdapterConversionError,
 )
-from .registry import AdapterRegistry as AdapterRegistry, get_adapter as get_adapter
+from .registry import AdapterRegistry, get_adapter
+
+__all__ = [
+    "ITritonToLinalgAdapter",
+    "ILinalgOptAdapter",
+    "ILinalgPybindAdapter",
+    "AdapterConversionError",
+    "AdapterRegistry",
+    "get_adapter",
+]
 
 # 注册默认自带的 in-process adapter
 try:

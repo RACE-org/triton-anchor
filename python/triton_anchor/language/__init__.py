@@ -16,6 +16,7 @@ dynamically from ``entry_points("triton.dsl_extensions")``.
 # When a user does `from triton_anchor.language.ext import smt`,
 # we look up the registered extension and return its builtins.
 
+# import importlib
 import sys
 from types import ModuleType
 

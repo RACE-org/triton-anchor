@@ -1,24 +1,48 @@
+from triton._no_ttgir import NO_TTGIR as _NO_TTGIR
+
 from triton.language import core
+if _NO_TTGIR:
 
 
-@core.extern
-def abs(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("int32"), ): ("__triton_hip_iabs", core.dtype("int32")),
-            (core.dtype("int64"), ): ("__triton_hip_iabs", core.dtype("int64")),
-            (core.dtype("fp32"), ): ("__triton_hip_fabs", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__triton_hip_fabs", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
+    @core.extern
+    def abs(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("int32"), ): ("__triton_hip_iabs", core.dtype("int32")),
+                (core.dtype("int64"), ): ("__triton_hip_iabs", core.dtype("int64")),
+                (core.dtype("fp32"), ): ("__triton_hip_fabs", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__triton_hip_fabs", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def floor(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_floor_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_floor_f64", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
+# @core.extern
+# def abs(arg0, _builder=None):
+#     return core.extern_elementwise(
+#         "", "", [arg0], {
+#             (core.dtype("int32"), ): ("__triton_hip_iabs", core.dtype("int32")),
+#             (core.dtype("int64"), ): ("__triton_hip_iabs", core.dtype("int64")),
+#             (core.dtype("fp32"), ): ("__triton_hip_fabs", core.dtype("fp32")),
+#             (core.dtype("fp64"), ): ("__triton_hip_fabs", core.dtype("fp64")),
+#         }, is_pure=True, _builder=_builder)
+
+
+if not _NO_TTGIR:
+    @core.extern
+    def floor(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_floor_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_floor_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_floor_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def floor(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_floor_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_floor_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
 
 
 @core.extern
@@ -30,47 +54,95 @@ def rsqrt(arg0, _builder=None):
         }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def ceil(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_ceil_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_ceil_f64", core.dtype("fp64")),
+if not _NO_TTGIR:
+    @core.extern
+    def ceil(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_ceil_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_ceil_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_ceil_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def ceil(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_ceil_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_ceil_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
+
+
+if not _NO_TTGIR:
+    @core.extern
+    def trunc(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_trunc_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_trunc_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_trunc_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def trunc(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_trunc_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_trunc_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
+
+
+if not _NO_TTGIR:
+    @core.extern
+    def exp2(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_exp2_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_exp2_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_exp2_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def exp2(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_exp2_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_exp2_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
+
+
+if not _NO_TTGIR:
+    @core.extern
+    def exp(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_exp_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_exp_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_exp_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def exp(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_exp_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_exp_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
+if _NO_TTGIR:
+
+
+    @core.extern
+    def fast_dividef(arg0, arg1, _builder=None):
+        return core.extern_elementwise("", "", [arg0, arg1], {
+            (core.dtype("fp32"), core.dtype("fp32")): ("__triton_hip_fast_fdividef", core.dtype("fp32")),
         }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def trunc(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_trunc_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_trunc_f64", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
-
-
-@core.extern
-def exp2(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_exp2_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_exp2_f64", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
-
-
-@core.extern
-def exp(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_exp_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_exp_f64", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
-
-
-@core.extern
-def fast_dividef(arg0, arg1, _builder=None):
-    return core.extern_elementwise("", "", [arg0, arg1], {
-        (core.dtype("fp32"), core.dtype("fp32")): ("__triton_hip_fast_fdividef", core.dtype("fp32")),
-    }, is_pure=True, _builder=_builder)
+# @core.extern
+# def fast_dividef(arg0, arg1, _builder=None):
+#     return core.extern_elementwise("", "", [arg0, arg1], {
+#         (core.dtype("fp32"), core.dtype("fp32")): ("__triton_hip_fast_fdividef", core.dtype("fp32")),
+#     }, is_pure=True, _builder=_builder)
 
 
 @core.extern
@@ -80,15 +152,25 @@ def sqrt(arg0, _builder=None):
             (core.dtype("fp32"), ): ("__ocml_sqrt_f32", core.dtype("fp32")),
             (core.dtype("fp64"), ): ("__ocml_sqrt_f64", core.dtype("fp64")),
         }, is_pure=True, _builder=_builder)
+if _NO_TTGIR:
 
 
-@core.extern
-def llrint(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__triton_hip_llrint", core.dtype("int64")),
-            (core.dtype("fp64"), ): ("__triton_hip_llrint", core.dtype("int64")),
-        }, is_pure=True, _builder=_builder)
+    @core.extern
+    def llrint(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__triton_hip_llrint", core.dtype("int64")),
+                (core.dtype("fp64"), ): ("__triton_hip_llrint", core.dtype("int64")),
+            }, is_pure=True, _builder=_builder)
+
+
+# @core.extern
+# def llrint(arg0, _builder=None):
+#     return core.extern_elementwise(
+#         "", "", [arg0], {
+#             (core.dtype("fp32"), ): ("__triton_hip_llrint", core.dtype("int64")),
+#             (core.dtype("fp64"), ): ("__triton_hip_llrint", core.dtype("int64")),
+#         }, is_pure=True, _builder=_builder)
 
 
 @core.extern
@@ -102,15 +184,27 @@ def nearbyint(arg0, _builder=None):
         }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def isnan(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [
-            arg0,
-        ], {
-            (core.dtype("fp32"), ): ("__ocml_isnan_f32", core.dtype("int32")),
-            (core.dtype("fp64"), ): ("__ocml_isnan_f64", core.dtype("int32")),
-        }, is_pure=True, _builder=_builder)
+if not _NO_TTGIR:
+    @core.extern
+    def isnan(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [
+                arg0,
+            ], {
+                (core.dtype("fp32"), ): ("__ocml_isnan_f32", core.dtype("int32")),
+                (core.dtype("fp64"), ): ("__ocml_isnan_f64", core.dtype("int32")),
+                (core.dtype("bf16"), ): ("__ocml_isnan_bf16", core.dtype("int32")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def isnan(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [
+                arg0,
+            ], {
+                (core.dtype("fp32"), ): ("__ocml_isnan_f32", core.dtype("int32")),
+                (core.dtype("fp64"), ): ("__ocml_isnan_f64", core.dtype("int32")),
+            }, is_pure=True, _builder=_builder)
 
 
 @core.extern
@@ -133,13 +227,23 @@ def copysign(arg0, arg1, _builder=None):
         }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def isinf(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_isinf_f32", core.dtype("int32")),
-            (core.dtype("fp64"), ): ("__ocml_isinf_f64", core.dtype("int32")),
-        }, is_pure=True, _builder=_builder)
+if not _NO_TTGIR:
+    @core.extern
+    def isinf(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_isinf_f32", core.dtype("int32")),
+                (core.dtype("fp64"), ): ("__ocml_isinf_f64", core.dtype("int32")),
+                (core.dtype("bf16"), ): ("__ocml_isinf_bf16", core.dtype("int32")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def isinf(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_isinf_f32", core.dtype("int32")),
+                (core.dtype("fp64"), ): ("__ocml_isinf_f64", core.dtype("int32")),
+            }, is_pure=True, _builder=_builder)
 
 
 @core.extern
@@ -151,22 +255,42 @@ def nextafter(arg0, arg1, _builder=None):
         }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def sin(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_sin_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_sin_f64", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
+if not _NO_TTGIR:
+    @core.extern
+    def sin(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_sin_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_sin_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_sin_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def sin(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_sin_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_sin_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def cos(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_cos_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_cos_f64", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
+if not _NO_TTGIR:
+    @core.extern
+    def cos(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_cos_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_cos_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_cos_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def cos(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_cos_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_cos_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
 
 
 @core.extern
@@ -205,13 +329,23 @@ def sinh(arg0, _builder=None):
         }, is_pure=True, _builder=_builder)
 
 
-@core.extern
-def tanh(arg0, _builder=None):
-    return core.extern_elementwise(
-        "", "", [arg0], {
-            (core.dtype("fp32"), ): ("__ocml_tanh_f32", core.dtype("fp32")),
-            (core.dtype("fp64"), ): ("__ocml_tanh_f64", core.dtype("fp64")),
-        }, is_pure=True, _builder=_builder)
+if not _NO_TTGIR:
+    @core.extern
+    def tanh(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_tanh_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_tanh_f64", core.dtype("fp64")),
+                (core.dtype("bf16"), ): ("__ocml_tanh_bf16", core.dtype("bf16")),
+            }, is_pure=True, _builder=_builder)
+else:
+    @core.extern
+    def tanh(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_tanh_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_tanh_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
 
 
 @core.extern
@@ -465,4 +599,38 @@ def ilogb(arg0, _builder=None):
         "", "", [arg0], {
             (core.dtype("fp32"), ): ("__ocml_ilogb_f32", core.dtype("int32")),
             (core.dtype("fp64"), ): ("__ocml_ilogb_f64", core.dtype("int32")),
+        }, is_pure=True, _builder=_builder)
+if not _NO_TTGIR:
+
+    @core.extern
+    def round(arg0, _builder=None):
+        return core.extern_elementwise(
+            "", "", [arg0], {
+                (core.dtype("fp32"), ): ("__ocml_round_f32", core.dtype("fp32")),
+                (core.dtype("fp64"), ): ("__ocml_round_f64", core.dtype("fp64")),
+            }, is_pure=True, _builder=_builder)
+
+    @core.extern
+    def finitef(arg0, _builder=None):
+        return core.extern_elementwise("", "", [arg0], {
+            (core.dtype("fp32"), ): ("__ocml_isfinite_f32", core.dtype("int32")),
+        }, is_pure=True, _builder=_builder)
+
+    @core.extern
+    def isfinited(arg0, _builder=None):
+        return core.extern_elementwise("", "", [arg0], {
+            (core.dtype("fp64"), ): ("__ocml_isfinite_f64", core.dtype("int32")),
+        }, is_pure=True, _builder=_builder)
+
+    @core.extern
+    def div_rz(arg0, arg1, _builder=None):
+        return core.extern_elementwise("", "", [arg0, arg1], {
+            (core.dtype("fp32"), core.dtype("fp32")): ("__ocml_div_rtz_f32", core.dtype("fp32")),
+        }, is_pure=True, _builder=_builder)
+
+
+    @core.extern
+    def div_rn(arg0, arg1, _builder=None):
+        return core.extern_elementwise("", "", [arg0, arg1], {
+            (core.dtype("fp32"), core.dtype("fp32")): ("__ocml_div_rtn_f32", core.dtype("fp32")),
         }, is_pure=True, _builder=_builder)

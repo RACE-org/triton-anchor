@@ -9,6 +9,7 @@ add_triton_library(TritonToTritonGPU
     MLIRIR
     MLIRPass
     MLIRTransforms
+    $<$<NOT:$<BOOL:${NO_TTGIR}>>:MLIRMathTransforms>
     TritonIR
     TritonGPUIR
     TritonGPUTransforms

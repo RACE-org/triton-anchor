@@ -3,11 +3,17 @@
 #include <pybind11/stl.h>
 
 #include "mlir/Bytecode/BytecodeWriter.h"
+#ifndef NO_TTGIR
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#endif // NO_TTGIR
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Index/IR/IndexDialect.h"
 #include "mlir/Dialect/Index/IR/IndexOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#ifndef NO_TTGIR
+#include "mlir/Dialect/Math/IR/Math.h"
+#endif // NO_TTGIR
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -346,6 +352,10 @@ void init_triton_ir(py::module &&m) {
   py::class_<IntegerAttr, Attribute>(m, "integer_attr", py::module_local());
   py::class_<BoolAttr, Attribute>(m, "bool_attr", py::module_local());
 
+#ifndef NO_TTGIR
+  py::class_<StringAttr, Attribute>(m, "string_attr", py::module_local());
+
+#endif // NO_TTGIR
   // Ops
   py::class_<OpState>(m, "OpState", py::module_local())
       .def("set_attr",
@@ -607,6 +617,12 @@ void init_triton_ir(py::module &&m) {
            [](TritonOpBuilder &self, int32_t value) {
              return self.getBuilder().getI32IntegerAttr(value);
            })
+#ifndef NO_TTGIR
+      .def("get_string_attr",
+           [](TritonOpBuilder &self, const std::string &value) {
+             return self.getBuilder().getStringAttr(value);
+           })
+#endif // NO_TTGIR
       // Use arith.ConstantOp to create constants
       // Constants
       .def("get_int1",
@@ -1068,6 +1084,16 @@ void init_triton_ir(py::module &&m) {
            [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
              return Value(self.create<PreciseDivFOp>(lhs, rhs));
            })
+#ifndef NO_TTGIR
+      .def("create_precise_divrz",
+           [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
+             return Value(self.create<DivRZOp>(lhs, rhs));
+           })
+      .def("create_math_trunc",
+           [](TritonOpBuilder &self, Value &input) -> Value {
+             return Value(self.create<math::TruncOp>(input));
+           })
+#endif // NO_TTGIR
       // AddPtr (similar to GEP)
       .def("create_addptr",
            [](TritonOpBuilder &self, Value &ptr, Value &offset) -> Value {
@@ -1251,6 +1277,14 @@ void init_triton_ir(py::module &&m) {
              return self.create<ExperimentalDescriptorLoadOp>(
                  type, desc_ptr, indices, cacheModifier, evictionPolicy);
            })
+#ifndef NO_TTGIR
+      .def("create_tma_load",
+           [](TritonOpBuilder &self, Value &desc_ptr, Type type,
+              bool isMatrixA) -> Value {
+             return self.create<TMALoadOp>(
+                 type, desc_ptr, isMatrixA);
+           })
+#endif // NO_TTGIR
       .def("create_descriptor_store",
            [](TritonOpBuilder &self, Value &desc_ptr, Value value,
               std::vector<Value> &indices) -> void {
@@ -1447,6 +1481,40 @@ void init_triton_ir(py::module &&m) {
            [](TritonOpBuilder &self, Value &val) -> Value {
              return self.create<math::AbsIOp>(val);
            })
+#ifndef NO_TTGIR
+      .def("create_pow",
+            [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
+              return self.create<math::PowFOp>(lhs, rhs);
+            })
+      .def("create_fpowi",
+            [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
+              return self.create<math::FPowIOp>(lhs, rhs);
+            })
+      .def("create_fmod",
+            [](TritonOpBuilder &self, Value &lhs, Value &rhs) -> Value {
+              return self.create<arith::RemFOp>(lhs, rhs);
+            })
+      .def("create_tanh",
+           [](TritonOpBuilder &self, Value &val) -> Value {
+             return self.create<math::TanhOp>(val);
+           })
+      .def("create_isfinite",
+           [](TritonOpBuilder &self, Value &val) -> Value {
+             return self.create<math::IsFiniteOp>(val);
+           })
+      .def("create_rint",
+           [](TritonOpBuilder &self, Value &val) -> Value {
+             return self.create<math::RoundEvenOp>(val);
+           })
+      .def("create_isinf",
+           [](TritonOpBuilder &self, Value &val) -> Value {
+             return self.create<math::IsInfOp>(val);
+           })
+      .def("create_isnan",
+           [](TritonOpBuilder &self, Value &val) -> Value {
+             return self.create<math::IsNaNOp>(val);
+           })  
+#endif // NO_TTGIR
       .def("create_reduce",
            [](TritonOpBuilder &self, std::vector<Value> operands, int axis)
                -> OpState { return self.create<ReduceOp>(operands, axis); })

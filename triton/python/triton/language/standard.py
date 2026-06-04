@@ -1,4 +1,6 @@
 from __future__ import annotations
+from triton._no_ttgir import NO_TTGIR as _NO_TTGIR
+
 
 from ..runtime.jit import jit
 from . import core
@@ -319,24 +321,44 @@ def cumprod(input, axis=0, reverse=False):
 # sort
 
 
-@jit
-def _compare_and_swap(x, flip, i: core.constexpr, n_dims: core.constexpr):
-    n_outer: core.constexpr = x.numel >> n_dims
-    shape: core.constexpr = [n_outer * 2**i, 2, 2**(n_dims - i - 1)]
-    y = core.reshape(x, shape)
-    # slice left/right with 'stride' 2**(n_dims - i - 1)
-    mask = core.arange(0, 2)[None, :, None]
-    left = core.broadcast_to(sum(y * (1 - mask), 1)[:, None, :], shape)
-    right = core.broadcast_to(sum(y * mask, 1)[:, None, :], shape)
-    left = core.reshape(left, x.shape)
-    right = core.reshape(right, x.shape)
-    # actual compare-and-swap
-    idtype = core.get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
-    ileft = left.to(idtype, bitcast=True)
-    iright = right.to(idtype, bitcast=True)
-    ix = x.to(idtype, bitcast=True)
-    ret = ix ^ core.where((left > right) ^ flip, ileft ^ iright, zeros_like(ix))
-    return ret.to(x.dtype, bitcast=True)
+if not _NO_TTGIR:
+    @jit
+    def _compare_and_swap(x, flip, i: core.constexpr, n_dims: core.constexpr):
+        n_outer: core.constexpr = x.numel >> n_dims
+        shape: core.constexpr = [n_outer * 2**i, 2, 2**(n_dims - i - 1)]
+        y = core.reshape(x, shape)
+        # slice left/right with 'stride' 2**(n_dims - i - 1)
+        mask = core.arange(0, 2)[None, :, None]
+        left = core.broadcast_to(sum(y * (1 - mask), 1)[:, None, :], shape).to(y.dtype)
+        right = core.broadcast_to(sum(y * mask, 1)[:, None, :], shape).to(y.dtype)
+        left = core.reshape(left, x.shape)
+        right = core.reshape(right, x.shape)
+        # actual compare-and-swap
+        idtype = core.get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
+        ileft = left.to(idtype, bitcast=True)
+        iright = right.to(idtype, bitcast=True)
+        ix = x.to(idtype, bitcast=True)
+        ret = ix ^ core.where((left > right) ^ flip, ileft ^ iright, zeros_like(ix))
+        return ret.to(x.dtype, bitcast=True)
+else:
+    @jit
+    def _compare_and_swap(x, flip, i: core.constexpr, n_dims: core.constexpr):
+        n_outer: core.constexpr = x.numel >> n_dims
+        shape: core.constexpr = [n_outer * 2**i, 2, 2**(n_dims - i - 1)]
+        y = core.reshape(x, shape)
+        # slice left/right with 'stride' 2**(n_dims - i - 1)
+        mask = core.arange(0, 2)[None, :, None]
+        left = core.broadcast_to(sum(y * (1 - mask), 1)[:, None, :], shape)
+        right = core.broadcast_to(sum(y * mask, 1)[:, None, :], shape)
+        left = core.reshape(left, x.shape)
+        right = core.reshape(right, x.shape)
+        # actual compare-and-swap
+        idtype = core.get_int_dtype(bitwidth=x.dtype.primitive_bitwidth, signed=True)
+        ileft = left.to(idtype, bitcast=True)
+        iright = right.to(idtype, bitcast=True)
+        ix = x.to(idtype, bitcast=True)
+        ret = ix ^ core.where((left > right) ^ flip, ileft ^ iright, zeros_like(ix))
+        return ret.to(x.dtype, bitcast=True)
 
 
 @jit

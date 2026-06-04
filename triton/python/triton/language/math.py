@@ -1,3 +1,5 @@
+from triton._no_ttgir import NO_TTGIR as _NO_TTGIR
+
 from . import core
 from . import semantic
 from functools import wraps
@@ -92,22 +94,40 @@ def umulhi(x, y, _builder=None):
     return core.tensor(_builder.create_umulhi(x.handle, y.handle), x.type)
 
 
-@core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
-@_add_math_1arg_docstr("exponential")
-@core._tensor_member_fn
-def exp(x, _builder=None):
-    x = core._to_tensor(x, _builder)
-    return core.tensor(_builder.create_exp(x.handle), x.type)
+if not _NO_TTGIR:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64", "bf16"])
+    @_add_math_1arg_docstr("exponential")
+    @core._tensor_member_fn
+    def exp(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_exp(x.handle), x.type)
+else:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_1arg_docstr("exponential")
+    @core._tensor_member_fn
+    def exp(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_exp(x.handle), x.type)
 
 
-@core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
-@_add_math_1arg_docstr("exponential (base 2)")
-@core._tensor_member_fn
-def exp2(x, _builder=None):
-    x = core._to_tensor(x, _builder)
-    return core.tensor(_builder.create_exp2(x.handle), x.type)
+if not _NO_TTGIR:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64", "bf16"])
+    @_add_math_1arg_docstr("exponential (base 2)")
+    @core._tensor_member_fn
+    def exp2(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_exp2(x.handle), x.type)
+else:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_1arg_docstr("exponential (base 2)")
+    @core._tensor_member_fn
+    def exp2(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_exp2(x.handle), x.type)
 
 
 @core.builtin
@@ -128,22 +148,40 @@ def log2(x, _builder=None):
     return core.tensor(_builder.create_log2(x.handle), x.type)
 
 
-@core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
-@_add_math_1arg_docstr("cosine")
-@core._tensor_member_fn
-def cos(x, _builder=None):
-    x = core._to_tensor(x, _builder)
-    return core.tensor(_builder.create_cos(x.handle), x.type)
+if not _NO_TTGIR:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64", "bf16"])
+    @_add_math_1arg_docstr("cosine")
+    @core._tensor_member_fn
+    def cos(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_cos(x.handle), x.type)
+else:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_1arg_docstr("cosine")
+    @core._tensor_member_fn
+    def cos(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_cos(x.handle), x.type)
 
 
-@core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
-@_add_math_1arg_docstr("sine")
-@core._tensor_member_fn
-def sin(x, _builder=None):
-    x = core._to_tensor(x, _builder)
-    return core.tensor(_builder.create_sin(x.handle), x.type)
+if not _NO_TTGIR:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64", "bf16"])
+    @_add_math_1arg_docstr("sine")
+    @core._tensor_member_fn
+    def sin(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_sin(x.handle), x.type)
+else:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_1arg_docstr("sine")
+    @core._tensor_member_fn
+    def sin(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_sin(x.handle), x.type)
 
 
 @core.builtin
@@ -209,6 +247,17 @@ def div_rn(x, y, _builder=None):
     y = core._to_tensor(y, _builder)
     x, y = core.binary_op_type_legalization(x, y, _builder)
     return core.tensor(_builder.create_precise_divf(x.handle, y.handle), x.type)
+if not _NO_TTGIR:
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32"])
+    @_add_math_2arg_docstr("precise division (rounding to zero)")
+    def div_rz(x, y, _builder=None):
+        x = core._to_tensor(x, _builder)
+        y = core._to_tensor(y, _builder)
+        x, y = core.binary_op_type_legalization(x, y, _builder)
+        return core.tensor(_builder.create_precise_divrz(x.handle, y.handle), x.type)
 
 
 @core.builtin
@@ -220,22 +269,40 @@ def erf(x, _builder=None):
     return core.tensor(_builder.create_erf(x.handle), x.type)
 
 
-@core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
-@_add_math_1arg_docstr("floor")
-@core._tensor_member_fn
-def floor(x, _builder=None):
-    x = core._to_tensor(x, _builder)
-    return core.tensor(_builder.create_floor(x.handle), x.type)
+if not _NO_TTGIR:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64", "bf16"])
+    @_add_math_1arg_docstr("floor")
+    @core._tensor_member_fn
+    def floor(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_floor(x.handle), x.type)
+else:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_1arg_docstr("floor")
+    @core._tensor_member_fn
+    def floor(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_floor(x.handle), x.type)
 
 
-@core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
-@_add_math_1arg_docstr("ceil")
-@core._tensor_member_fn
-def ceil(x, _builder=None):
-    x = core._to_tensor(x, _builder)
-    return core.tensor(_builder.create_ceil(x.handle), x.type)
+if not _NO_TTGIR:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64", "bf16"])
+    @_add_math_1arg_docstr("ceil")
+    @core._tensor_member_fn
+    def ceil(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_ceil(x.handle), x.type)
+else:
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_1arg_docstr("ceil")
+    @core._tensor_member_fn
+    def ceil(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_ceil(x.handle), x.type)
 
 
 @core.builtin
@@ -248,3 +315,91 @@ def fma(x, y, z, _builder=None):
     z, x = core.binary_op_type_legalization(z, x, _builder)
     z, y = core.binary_op_type_legalization(z, y, _builder)
     return core.tensor(_builder.create_fma(x.handle, y.handle, z.handle), x.type)
+if not _NO_TTGIR:
+
+
+    # Generate libdevice op temporarily.
+    @core.builtin
+    @_check_dtype(dtypes=["fp16", "fp32", "fp64", "int32"])
+    @_add_math_2arg_docstr("pow")
+    @core._tensor_member_fn
+    def pow(x, y, _builder=None):
+        x = core._to_tensor(x, _builder)
+        y = core._to_tensor(y, _builder)
+        dtype = y.dtype
+
+        if dtype.is_int32():
+            if y.shape == []:
+                mask = core.full(x.shape, 1, core.int32, _builder=_builder)
+            else:
+                mask = core.broadcast_to(y, x.shape, _builder=_builder)
+            return core.tensor(_builder.create_fpowi(x.handle, mask.handle), x.type)
+        else:
+            x, y = core.binary_op_type_legalization(x, y, _builder)
+            return core.tensor(_builder.create_pow(x.handle, y.handle), x.type)
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64", "bf16"])
+    @_add_math_1arg_docstr("tanh")
+    @core._tensor_member_fn
+    def tanh(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_tanh(x.handle), x.type)
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32"])
+    @_add_math_1arg_docstr("finitef")
+    @core._tensor_member_fn
+    def finitef(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        # Note: type(x.type) --> block_type, and this op returns bool type.
+        return core.tensor(_builder.create_isfinite(x.handle), core.block_type(core.dtype("int1"), x.type.get_block_shapes()))
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32"])
+    @_add_math_1arg_docstr("isinf")
+    @core._tensor_member_fn
+    def isinf(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_isinf(x.handle), core.block_type(core.dtype("int1"), x.type.get_block_shapes()))
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32"])
+    @_add_math_1arg_docstr("isnan")
+    @core._tensor_member_fn
+    def isnan(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_isnan(x.handle), core.block_type(core.dtype("int1"), x.type.get_block_shapes()))
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "bf16"])
+    @_add_math_1arg_docstr("trunc")
+    @core._tensor_member_fn
+    def trunc(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_math_trunc(x.handle), x.type)
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_2arg_docstr("fmod")
+    @core._tensor_member_fn
+    def fmod(x, y, _builder=None):
+        x = core._to_tensor(x, _builder)
+        y = core._to_tensor(y, _builder)
+        x, y = core.binary_op_type_legalization(x, y, _builder)
+        return core.tensor(_builder.create_fmod(x.handle, y.handle), x.type)
+
+
+    @core.builtin
+    @_check_dtype(dtypes=["fp32", "fp64"])
+    @_add_math_1arg_docstr("rint")
+    @core._tensor_member_fn
+    def rint(x, _builder=None):
+        x = core._to_tensor(x, _builder)
+        return core.tensor(_builder.create_rint(x.handle), x.type)

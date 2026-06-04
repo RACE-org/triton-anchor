@@ -239,12 +239,20 @@ bool hasConvertToMMATransisitiveUse(Operation *op, Attribute encoding) {
         if (isa<triton::gpu::AMDMfmaEncodingAttr,
                 triton::gpu::AMDWmmaEncodingAttr>(dstEncoding))
           return true;
+#ifndef NO_TTGIR
+        if (isa<triton::gpu::FANTWmmaEncodingAttr>(dstEncoding))
+          return true;
+#endif // NO_TTGIR
         if (isa<triton::gpu::DotOperandEncodingAttr>(dstEncoding)) {
           if (auto mmaLayout = dyn_cast<NvidiaMmaEncodingAttr>(encoding)) {
             return mmaLayout.getVersionMajor() > 1;
           } else {
             assert((mlir::isa<triton::gpu::AMDMfmaEncodingAttr,
+#ifndef NO_TTGIR
+                              triton::gpu::AMDWmmaEncodingAttr, triton::gpu::FANTWmmaEncodingAttr>(encoding)));
+#else
                               triton::gpu::AMDWmmaEncodingAttr>(encoding)));
+#endif // NO_TTGIR
             return true;
           }
         }

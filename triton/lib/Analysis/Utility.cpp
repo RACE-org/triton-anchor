@@ -481,7 +481,21 @@ bool supportMFMA(triton::DotOp op) {
 }
 
 static bool supportWMMAGranularity(int m, int n, int k) {
+#ifndef NO_TTGIR
+  return m % 16 == 0 && n % 16 == 0 && k % 32 == 0;
+}
+
+static bool supportFANTWMMAGranularity(Type a, int m, int n, int k) {
+  if (a.isBF16() || a.isF16())
+    return m % 16 == 0 && n % 16 == 0 && k % 32 == 0;
+
+  if (a.isF32())
+    return m % 16 == 0 && n % 16 == 0 && k % 16 == 0;
+
+  return false;
+#else
   return m % 16 == 0 && n % 16 == 0 && k % 16 == 0;
+#endif // NO_TTGIR
 }
 
 static bool supportWMMATypes(Type a, Type b, Type c, Type d) {
@@ -500,7 +514,12 @@ static bool supportWMMATypes(Type a, Type b, Type c, Type d) {
       return c.isBF16() || c.isF32();
     if (a.isF16())
       return c.isF16() || c.isF32();
+#ifndef NO_TTGIR
+    if (a.isF32())
+      return c.isF32();
+#else
     return aWidth <= cWidth && aWidth <= 16;
+#endif // NO_TTGIR
   }
   return false;
 }
@@ -515,7 +534,13 @@ bool supportWMMA(triton::DotOp op) {
   auto bElemTy = bTy.getElementType();
   auto cElemTy = cTy.getElementType();
   auto dElemTy = dTy.getElementType();
+#ifndef NO_TTGIR
+  if (dElemTy.isF32() && aElemTy.isF32() &&
+      op.getInputPrecision() != InputPrecision::TF32)
+    return false;
+#else
 
+#endif // NO_TTGIR
   if (!supportWMMATypes(aElemTy, bElemTy, cElemTy, dElemTy))
     return false;
 
@@ -525,7 +550,11 @@ bool supportWMMA(triton::DotOp op) {
   auto rank = aShape.size();
   assert(bShape.size() == rank);
   assert(aShape[rank - 1] == bShape[rank - 2]);
+#ifndef NO_TTGIR
+  if (!supportFANTWMMAGranularity(aElemTy, aShape[rank - 2], bShape[rank - 1],
+#else
   if (!supportWMMAGranularity(aShape[rank - 2], bShape[rank - 1],
+#endif // NO_TTGIR
                               aShape[rank - 1]))
     return false;
 

@@ -307,6 +307,10 @@ SmallVector<unsigned> getCTAsPerCGA(Attribute layout) {
     return distributedLayout.getCTAsPerCGA();
   else if (mlir::isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(layout))
     return {1, 1};
+#ifndef NO_TTGIR
+  else if (mlir::isa<FANTWmmaEncodingAttr>(layout))
+    return {1, 1};
+#endif // NO_TTGIR
   else if (auto sharedLayout = mlir::dyn_cast<SharedEncodingAttr>(layout))
     ref = sharedLayout.getCTALayout().getCTAsPerCGA();
   else
@@ -322,6 +326,11 @@ SmallVector<unsigned> getCTASplitNum(Attribute layout) {
   } else if (mlir::isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(layout)) {
     res.resize(2);
     res[0] = res[1] = 1;
+#ifndef NO_TTGIR
+  } else if (mlir::isa<FANTWmmaEncodingAttr>(layout)) {
+    res.resize(2);
+    res[0] = res[1] = 1;
+#endif // NO_TTGIR
   } else if (auto sharedLayout = mlir::dyn_cast<SharedEncodingAttr>(layout)) {
     res.assign(sharedLayout.getCTALayout().getCTASplitNum().begin(),
                sharedLayout.getCTALayout().getCTASplitNum().end());
@@ -338,6 +347,10 @@ SmallVector<unsigned> getCTAOrder(Attribute layout) {
     res = distributedLayout.getCTAOrder();
   } else if (mlir::isa<AMDMfmaEncodingAttr, AMDWmmaEncodingAttr>(layout)) {
     return {0, 1};
+#ifndef NO_TTGIR
+  } else if (mlir::isa<FANTWmmaEncodingAttr>(layout)) {
+    return {0, 1};
+#endif // NO_TTGIR
   } else if (auto sharedLayout = mlir::dyn_cast<SharedEncodingAttr>(layout)) {
     res = SmallVector<unsigned>(sharedLayout.getCTALayout().getCTAOrder());
   } else {
@@ -393,6 +406,10 @@ unsigned getNumWarpsPerCTA(Attribute layout) {
     warpsPerCTA = mfmaLayout.getWarpsPerCTA();
   else if (auto wmmaLayout = dyn_cast<AMDWmmaEncodingAttr>(layout))
     warpsPerCTA = wmmaLayout.getWarpsPerCTA();
+#ifndef NO_TTGIR
+  else if (auto wmmaLayout = dyn_cast<FANTWmmaEncodingAttr>(layout))
+    warpsPerCTA = wmmaLayout.getWarpsPerCTA();
+#endif // NO_TTGIR
   else if (auto dotLayout = dyn_cast<DotOperandEncodingAttr>(layout))
     return getNumWarpsPerCTA(dotLayout.getParent());
   else if (auto sharedLayout = dyn_cast<SharedEncodingAttr>(layout))
@@ -818,11 +835,41 @@ AMDWmmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
   return elemsPerThread;
 }
 
+#ifndef NO_TTGIR
+SmallVector<unsigned>
+FANTWmmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
+                                       Type eltTy) const {
+  size_t rank = shape.size();
+  assert((rank == 2 || rank == 3) && "Unexpected rank of wmma layout");
+
+  SmallVector<unsigned> elemsPerThread(rank);
+  auto mnkDim = getMNKDimPerWMMAInstr();
+  auto elemsPerThreadPerTile = getSizePerThread();
+  auto warpsPerCTA = getWarpsPerCTA();
+  if (rank == 3)
+    elemsPerThread[0] = ceil<unsigned>(shape[0], getWarpsPerCTA()[0]);
+  elemsPerThread[rank - 2] =
+      ceil<unsigned>(shape[rank - 2], mnkDim[0] * warpsPerCTA[rank - 2]) *
+      elemsPerThreadPerTile[rank - 2];
+  elemsPerThread[rank - 1] =
+      ceil<unsigned>(shape[rank - 1], mnkDim[1] * warpsPerCTA[rank - 1]) *
+      elemsPerThreadPerTile[rank - 1];
+  return elemsPerThread;
+}
+
+#endif // NO_TTGIR
 unsigned AMDWmmaEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
                                                      Type eltTy) const {
   return product<unsigned>(getElemsPerThread(shape, eltTy));
 }
 
+#ifndef NO_TTGIR
+unsigned FANTWmmaEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
+                                                     Type eltTy) const {
+  return product<unsigned>(getElemsPerThread(shape, eltTy));
+}
+
+#endif // NO_TTGIR
 //
 
 SmallVector<unsigned>
@@ -940,16 +987,44 @@ unsigned DotOperandEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
                                                        getKWidth(), getOpIdx());
   }
   if (auto blockedLayout = mlir::dyn_cast<BlockedEncodingAttr>(getParent())) {
+#ifndef NO_TTGIR
+    auto shapePerCTA =
+        expandMatrixShapeWithBatch(ArrayRef(getShapePerCTA(*this, shape)));
+    auto shapePerCTATile =
+        expandMatrixShapeWithBatch(ArrayRef(::getShapePerCTATile(blockedLayout)));
+    auto sizePerThread =
+        expandMatrixShapeWithBatch(ArrayRef(blockedLayout.getSizePerThread()));
+#else
     auto shapePerCTA = getShapePerCTA(*this, shape);
     auto shapePerCTATile = ::getShapePerCTATile(blockedLayout);
     auto order = blockedLayout.getOrder();
     auto sizePerThread = ::getSizePerThread(blockedLayout);
+#endif // NO_TTGIR
 
+#ifndef NO_TTGIR
+    int batchDim = 0;
+    int kDim = getOpIdx() == 0 ? 2 : 1;
+    int nonKDim = getOpIdx() == 0 ? 1 : 2;
+#else
     int K = getOpIdx() == 0 ? shapePerCTA[1] : shapePerCTA[0];
     int otherDim = getOpIdx() == 1 ? shapePerCTA[1] : shapePerCTA[0];
+#endif // NO_TTGIR
 
+#ifndef NO_TTGIR
+    int batchSize =
+        std::max<int>(shapePerCTA[batchDim] / shapePerCTATile[batchDim], 1) *
+        sizePerThread[batchDim];
+    int kSize = shapePerCTA[kDim];
+    int nonKSize =
+        std::max<int>(shapePerCTA[nonKDim] / shapePerCTATile[nonKDim], 1) *
+        sizePerThread[nonKDim];
+#else
     bool isM = getOpIdx() == 0;
+#endif // NO_TTGIR
 
+#ifndef NO_TTGIR
+    return batchSize * kSize * nonKSize;
+#else
     int mSizePerThread =
         order[0] == 1 ? sizePerThread[order[1]] : sizePerThread[order[0]];
     int nSizePerThread =
@@ -963,6 +1038,7 @@ unsigned DotOperandEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
     int shapePerCTAMNTile = isM ? mShapePerCTATile : nShapePerCTATile;
 
     return K * std::max<int>(otherDim / shapePerCTAMNTile, 1) * sizePerThreadMN;
+#endif // NO_TTGIR
   }
   llvm_unreachable("unknown dot operand parent layout");
   return 0;
@@ -1044,6 +1120,16 @@ LogicalResult DotOperandEncodingAttr::verify(
     return success();
   }
 
+#ifndef NO_TTGIR
+  if (auto parentAttr = mlir::dyn_cast<FANTWmmaEncodingAttr>(parent)) {
+    // TODO: remove this condition if new values are supported
+    if (kWidth != 8 && kWidth != 4 && kWidth != 2)
+      return emitError() << "triton_gpu.dot_op kWidth parameter supports "
+                            "only 16 for WMMA parent";
+    return success();
+  }
+
+#endif // NO_TTGIR
   if (auto parentAttr = mlir::dyn_cast<AMDMfmaEncodingAttr>(parent)) {
     if (kWidth == 0)
       return emitError()
@@ -1392,6 +1478,53 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
                                                 warpsPerCTA, *CTALayout);
 }
 
+#ifndef NO_TTGIR
+Attribute FANTWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
+  if (parser.parseLess().failed())
+    return {};
+  DictionaryAttr dict;
+  if (parser.parseAttribute(dict).failed())
+    return {};
+  if (parser.parseGreater().failed())
+    return {};
+
+  SmallVector<unsigned> warpsPerCTA;
+  std::optional<SmallVector<unsigned>> CTAsPerCGA;
+  std::optional<SmallVector<unsigned>> CTASplitNum;
+  std::optional<SmallVector<unsigned>> CTAOrder;
+
+  for (const NamedAttribute &attr : dict) {
+    if (attr.getName() == "warpsPerCTA") {
+      if (parseIntArrayAttr(parser, attr, warpsPerCTA, "warpsPerCTA").failed())
+        return {};
+    }
+    if (attr.getName() == "CTAsPerCGA") {
+      if (parseIntArrayAttr(parser, attr, CTAsPerCGA.emplace(), "CTAsPerCGA")
+              .failed())
+        return {};
+    }
+    if (attr.getName() == "CTASplitNum") {
+      if (parseIntArrayAttr(parser, attr, CTASplitNum.emplace(), "CTASplitNum")
+              .failed())
+        return {};
+    }
+    if (attr.getName() == "CTAOrder") {
+      if (parseIntArrayAttr(parser, attr, CTAOrder.emplace(), "CTAOrder")
+              .failed())
+        return {};
+    }
+  }
+
+  std::optional<CTALayoutAttr> CTALayout = getCTALayoutOrError(
+      parser, CTAsPerCGA, CTASplitNum, CTAOrder, /*rank=*/warpsPerCTA.size());
+  if (!CTALayout.has_value())
+    return {};
+
+  return parser.getChecked<FANTWmmaEncodingAttr>(parser.getContext(),
+                                                warpsPerCTA, *CTALayout);
+}
+
+#endif // NO_TTGIR
 void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]";
@@ -1399,6 +1532,15 @@ void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
                       /*rank=*/getWarpsPerCTA().size());
   printer << "}>";
 }
+#ifndef NO_TTGIR
+void FANTWmmaEncodingAttr::print(AsmPrinter &printer) const {
+  printer << "<{"
+          << "warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]";
+  maybePrintCTALayout(getContext(), printer, getCTALayout(),
+                      /*rank=*/getWarpsPerCTA().size());
+  printer << "}>";
+}
+#endif // NO_TTGIR
 
 //===----------------------------------------------------------------------===//
 // Sliced Encoding
@@ -1784,6 +1926,132 @@ SmallVector<unsigned> AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr() {
   return {16, 16, 16};
 }
 
+#ifndef NO_TTGIR
+SmallVector<unsigned>
+FANTWmmaEncodingAttr::getShapePerCTATile(ArrayRef<int64_t> tensorShape) const {
+  auto warpsPerCTA = getWarpsPerCTA();
+  auto rank = warpsPerCTA.size();
+  SmallVector<unsigned> shapePerCTATile(warpsPerCTA.begin(), warpsPerCTA.end());
+
+  auto mnkDim = getMNKDimPerWMMAInstr();
+  shapePerCTATile[rank - 2] *= mnkDim[0];
+  shapePerCTATile[rank - 1] *= mnkDim[1];
+  return shapePerCTATile;
+}
+SmallVector<unsigned> FANTWmmaEncodingAttr::getCTAsPerCGA() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
+}
+SmallVector<unsigned> FANTWmmaEncodingAttr::getCTAOrder() const {
+  return SmallVector<unsigned>(getCTALayout().getCTAOrder());
+}
+SmallVector<unsigned> FANTWmmaEncodingAttr::getCTASplitNum() const {
+  return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
+}
+SmallVector<unsigned> FANTWmmaEncodingAttr::getWarpsPerCTA() const {
+  return SmallVector<unsigned>(getWarpsPerCTA__());
+}
+SmallVector<unsigned> FANTWmmaEncodingAttr::getWarpOrder() const {
+  return ::getOrder(*this);
+}
+SmallVector<unsigned> FANTWmmaEncodingAttr::getThreadOrder() const {
+  return ::getOrder(*this);
+}
+SmallVector<unsigned> FANTWmmaEncodingAttr::getThreadsPerWarp() const {
+  auto rank = getWarpsPerCTA().size();
+  SmallVector<unsigned> threads(rank, 1);
+  auto mnkInstr = getMNKDimPerWMMAInstr();
+  threads[rank - 2] = mnkInstr[0] / getSizePerThread()[rank - 2];
+  threads[rank - 1] = mnkInstr[1] / getSizePerThread()[rank - 1];
+  return threads;
+}
+
+SmallVector<unsigned> FANTWmmaEncodingAttr::getSizePerThread() const {
+  auto rank = getWarpsPerCTA().size();
+  SmallVector<unsigned> sizePerThread(rank, 1);
+  sizePerThread[rank - 2] = 1;
+  sizePerThread[rank - 1] = 2;
+  return sizePerThread;
+}
+SmallVector<unsigned>
+FANTWmmaEncodingAttr::getSizePerThreadForOperands(unsigned opIdx) const {
+  auto rank = getWarpsPerCTA().size();
+  SmallVector<unsigned> sizePerThread(rank, 1);
+  if (opIdx == 0) {
+    sizePerThread[rank - 2] = 1;
+    sizePerThread[rank - 1] = 4;
+  } else if (opIdx == 1) {
+    sizePerThread[rank - 2] = 4;
+    sizePerThread[rank - 1] = 1;
+  } else {
+    llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
+  }
+  return sizePerThread;
+}
+
+SmallVector<unsigned>
+FANTWmmaEncodingAttr::getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape,
+                                                      int opIdx) const {
+  auto parentShapePerCTA = getShapePerCTATile(shape);
+  auto rank = shape.size();
+  assert(rank = 2);
+  if (opIdx == 0) {
+    return {parentShapePerCTA[0], static_cast<unsigned>(shape[1])};
+  } else if (opIdx == 1) {
+    return {static_cast<unsigned>(shape[0]), parentShapePerCTA[1]};
+  } else {
+    llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
+  }
+}
+
+unsigned FANTWmmaEncodingAttr::getTotalElemsPerThreadForOperands(
+    ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const {
+  auto rep = getWMMARepForOperands(shape, eltTy, kWidth, opIdx);
+  return product(rep) * kWidth;
+}
+
+SmallVector<int64_t>
+FANTWmmaEncodingAttr::getWMMAElemsPerInstrForOperands() const {
+  return {16, 16};
+}
+
+SmallVector<int64_t>
+FANTWmmaEncodingAttr::getWMMARepForOperands(ArrayRef<int64_t> operandShape,
+                                           Type elemType, int kWidth,
+                                           int opIdx) const {
+  auto operandTileShape = getWMMAElemsPerInstrForOperands();
+  assert(operandTileShape.size() == 2);
+  if (elemType.isF16() || elemType.isBF16()) {
+    if (opIdx ==0) operandTileShape[1] = 32;
+    else operandTileShape[0] = 32;
+  }
+
+  auto warpsPerCTA = getWarpsPerCTA();
+  auto rank = operandShape.size();
+  assert(rank == 2 || rank == 3);
+  int numRepBatch =
+      rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
+  if (opIdx == 0)
+    return {
+        numRepBatch,
+        std::max<int64_t>(1, operandShape[rank - 2] /
+                                 (operandTileShape[0] * warpsPerCTA[rank - 2])),
+        std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1])};
+  else {
+    assert(opIdx == 1);
+    return {
+        numRepBatch,
+        std::max<int64_t>(1, operandShape[rank - 2] / operandTileShape[0]),
+        std::max<int64_t>(1, operandShape[rank - 1] / (operandTileShape[1] *
+                                                       warpsPerCTA[rank - 1]))};
+  }
+}
+
+SmallVector<unsigned> FANTWmmaEncodingAttr::getMNKDimPerWMMAInstr() {
+  // TODO: move magic numbers out of the code
+  return {16, 16, 32};
+}
+
+#endif // NO_TTGIR
 //===----------------------------------------------------------------------===//
 // Mma encoding
 //===----------------------------------------------------------------------===//
@@ -2975,3 +3243,34 @@ LogicalResult TritonGPUDialect::verifyOperationAttribute(Operation *op,
   // TODO: fill this.
   return success();
 }
+#ifndef NO_TTGIR
+template <typename T>
+llvm::SmallVector<T>
+mlir::triton::gpu::expandMatrixShapeWithBatch(llvm::ArrayRef<T> s) {
+  auto rank = s.size();
+  assert(rank == 2 || rank == 3);
+  if (rank == 3)
+    return llvm::SmallVector<T>(s);
+  return {1, s[0], s[1]};
+}
+
+template llvm::SmallVector<int64_t>
+mlir::triton::gpu::expandMatrixShapeWithBatch<int64_t>(
+    llvm::ArrayRef<int64_t> s);
+
+template llvm::SmallVector<unsigned>
+mlir::triton::gpu::expandMatrixShapeWithBatch<unsigned>(
+    llvm::ArrayRef<unsigned> s);
+
+llvm::SmallVector<unsigned>
+mlir::triton::gpu::expandMatrixOrderWithBatch(llvm::ArrayRef<unsigned> o) {
+  int rank = o.size();
+  assert(rank == 2 || rank == 3);
+  if (rank == 3)
+    return llvm::SmallVector<unsigned>(o);
+  llvm::SmallVector<unsigned> expanded(3, 0);
+  for (int i = 0; i < rank; ++i)
+    expanded[i] += o[i] + 1;
+  return expanded;
+}
+#endif // NO_TTGIR

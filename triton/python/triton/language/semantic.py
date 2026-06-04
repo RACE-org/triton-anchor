@@ -1,4 +1,6 @@
 from __future__ import annotations  # remove after python 3.11
+from triton._no_ttgir import NO_TTGIR as _NO_TTGIR
+
 
 from typing import List, Optional, Sequence, Tuple, TypeVar
 
@@ -56,39 +58,74 @@ def integer_promote_impl(a_ty: tl.dtype, b_ty: tl.dtype) -> tl.dtype:
     raise TypeError(f"unexpected signedness {a_sn} and {b_sn}")
 
 
-def computation_type_impl(a_ty: tl.dtype, b_ty: tl.dtype, div_or_mod: bool) -> tl.dtype:
-    # 1) if one operand is double, the other is implicitly
-    #    converted to double
-    if a_ty.is_fp64() or b_ty.is_fp64():
-        return tl.float64
-    # 2) if one operand is float, the other is implicitly
-    #    converted to float
-    if a_ty.is_fp32() or b_ty.is_fp32():
-        return tl.float32
-    # 3 ) if one operand is half, the other is implicitly converted to half
-    #     unless we're doing / or %, which do not exist natively in PTX for fp16.
-    #     Supported PTX op: add, sub, mul, fma, neg, abs, min, max, tanh, ex2, setp
-    if a_ty.is_fp16() or b_ty.is_fp16():
-        if div_or_mod:
+if not _NO_TTGIR:
+    def computation_type_impl(a_ty: tl.dtype, b_ty: tl.dtype, div_or_mod: bool) -> tl.dtype:
+        # 1) if one operand is double, the other is implicitly
+        #    converted to double
+        if a_ty.is_fp64() or b_ty.is_fp64():
+            return tl.float64
+        # 2) if one operand is float, the other is implicitly
+        #    converted to float
+        if a_ty.is_fp32() or b_ty.is_fp32():
             return tl.float32
-        else:
-            return tl.float16
-    # 4) return bf16 only if both operands are of bf16
-    if a_ty.is_bf16() or b_ty.is_bf16():
-        if div_or_mod:
+        # 3 ) if one operand is half, the other is implicitly converted to half
+        #     unless we're doing / or %, which do not exist natively in PTX for fp16.
+        #     Supported PTX op: add, sub, mul, fma, neg, abs, min, max, tanh, ex2, setp
+        if a_ty.is_fp16() or b_ty.is_fp16():
+            if div_or_mod:
+                return tl.float32
+            else:
+                return tl.float16
+        # 4) return bf16 only if both operands are of bf16
+        if a_ty.is_bf16() or b_ty.is_bf16():
+            if div_or_mod:
+                return tl.float32
+            if a_ty.is_bf16() and b_ty.is_bf16():
+                return tl.bfloat16
             return tl.float32
-        if a_ty.is_bf16() and b_ty.is_bf16():
-            return tl.bfloat16
-        return tl.float32
-    if not a_ty.is_int() or not b_ty.is_int():
-        raise TypeError(f"unexpected type {a_ty} and {b_ty}")
-    # 5 ) both operands are integer and undergo
-    #    integer promotion
-    if div_or_mod and a_ty.int_signedness != b_ty.int_signedness:
-        raise TypeError("Cannot use /, #, or % with " + a_ty.__repr__() + " and " + b_ty.__repr__() +
-                        " because they have different signedness;"
-                        "this is unlikely to result in a useful answer. Cast them to the same signedness.")
-    return integer_promote_impl(a_ty, b_ty)
+        if not a_ty.is_int() or not b_ty.is_int():
+            raise TypeError(f"unexpected type {a_ty} and {b_ty}")
+        # 5 ) both operands are integer and undergo
+        #    integer promotion
+        if div_or_mod and a_ty.int_signedness != b_ty.int_signedness:
+            raise TypeError("Cannot use /, #, or % with " + a_ty.__repr__() + " and " + b_ty.__repr__()
+                            + " because they have different signedness;"
+                            "this is unlikely to result in a useful answer. Cast them to the same signedness.")
+        return integer_promote_impl(a_ty, b_ty)
+else:
+    def computation_type_impl(a_ty: tl.dtype, b_ty: tl.dtype, div_or_mod: bool) -> tl.dtype:
+        # 1) if one operand is double, the other is implicitly
+        #    converted to double
+        if a_ty.is_fp64() or b_ty.is_fp64():
+            return tl.float64
+        # 2) if one operand is float, the other is implicitly
+        #    converted to float
+        if a_ty.is_fp32() or b_ty.is_fp32():
+            return tl.float32
+        # 3 ) if one operand is half, the other is implicitly converted to half
+        #     unless we're doing / or %, which do not exist natively in PTX for fp16.
+        #     Supported PTX op: add, sub, mul, fma, neg, abs, min, max, tanh, ex2, setp
+        if a_ty.is_fp16() or b_ty.is_fp16():
+            if div_or_mod:
+                return tl.float32
+            else:
+                return tl.float16
+        # 4) return bf16 only if both operands are of bf16
+        if a_ty.is_bf16() or b_ty.is_bf16():
+            if div_or_mod:
+                return tl.float32
+            if a_ty.is_bf16() and b_ty.is_bf16():
+                return tl.bfloat16
+            return tl.float32
+        if not a_ty.is_int() or not b_ty.is_int():
+            raise TypeError(f"unexpected type {a_ty} and {b_ty}")
+        # 5 ) both operands are integer and undergo
+        #    integer promotion
+        if div_or_mod and a_ty.int_signedness != b_ty.int_signedness:
+            raise TypeError("Cannot use /, #, or % with " + a_ty.__repr__() + " and " + b_ty.__repr__() +
+                            " because they have different signedness;"
+                            "this is unlikely to result in a useful answer. Cast them to the same signedness.")
+        return integer_promote_impl(a_ty, b_ty)
 
 
 # ===----------------------------------------------------------------------===//
@@ -963,63 +1000,124 @@ def _load_block_pointer(ptr, mask, other, boundary_check, padding, cache, evicti
         builder.create_tensor_pointer_load(ptr.handle, boundary_check, padding, cache, eviction, is_volatile), dst_ty)
 
 
-def _load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile, builder):
-    # Load by a tensor of pointers or a pointer of scalar: `block_type<pointer_type<>>` or `pointer_type<>`
-    if not ptr.type.scalar.is_ptr():
-        raise ValueError(f"Unsupported ptr type {ptr.type.__repr__()} in `tl.load`")
+if not _NO_TTGIR:
+    def _load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile, builder):
+        # Load by a tensor of pointers or a pointer of scalar: `block_type<pointer_type<>>` or `pointer_type<>`
+        if not ptr.type.scalar.is_ptr():
+            raise ValueError(f"Unsupported ptr type {ptr.type.__repr__()} in `tl.load`")
 
-    # Check `mask`, `other`, `boundary_check`, and `padding` arguments
-    if mask is None and other is not None:
-        raise ValueError("`other` cannot be provided without `mask`")
-    if padding or boundary_check:
-        raise ValueError("`padding_option` or `boundary_check` argument is not supported for loading a tensor of"
-                         "pointers or loading a scalar. Because the compiler does not know the boundary; please "
-                         "use block pointers (defined by `make_block_ptr`) instead")
+        # Check `mask`, `other`, `boundary_check`, and `padding` arguments
+        if mask is None and other is not None:
+            raise ValueError("`other` cannot be provided without `mask`")
+        if padding or boundary_check:
+            raise ValueError("`padding_option` or `boundary_check` argument is not supported for loading a tensor of"
+                             "pointers or loading a scalar. Because the compiler does not know the boundary; please "
+                             "use block pointers (defined by `make_block_ptr`) instead")
 
-    # For a pointer of scalar, check the type of `mask` and `other`
-    if not ptr.type.is_block():
-        if mask and mask.type.is_block():
-            raise ValueError("Mask argument cannot be block type if pointer argument is not a block")
-        if other and other.type.is_block():
-            raise ValueError("Other argument cannot be block type if pointer argument is not a block")
+        # For a pointer of scalar, check the type of `mask` and `other`
+        if not ptr.type.is_block():
+            if mask and mask.type.is_block():
+                raise ValueError("Mask argument cannot be block type if pointer argument is not a block")
+            if other and other.type.is_block():
+                raise ValueError("Other argument cannot be block type if pointer argument is not a block")
 
-    # Make `mask` and `other` into the same shape as `ptr`
-    if ptr.type.is_block():
-        if mask is not None:
-            mask = broadcast_impl_shape(mask, ptr.type.get_block_shapes(), builder)
+        # Make `mask` and `other` into the same shape as `ptr`
+        if ptr.type.is_block():
+            if mask is not None:
+                mask = broadcast_impl_shape(mask, ptr.type.get_block_shapes(), builder)
+            if other is not None:
+                other = broadcast_impl_shape(other, ptr.type.get_block_shapes(), builder)
+
+        # Get `pointer_type<elt_ty>` and `elt_ty`
+        ptr_ty = ptr.type.scalar
+        elt_ty = ptr_ty.element_ty
+
+        # Treat `pointer_type<tl.int1>` as `pointer_type<tl.int8>`
+        is_bool = elt_ty == tl.int1
+        if is_bool:
+            elt_ty = tl.int8
+            ptr_ty = tl.pointer_type(elt_ty, ptr_ty.address_space)
+            ptr = cast(ptr, ptr_ty, builder)
+
+        # Cast `other` into `elt_ty` type
         if other is not None:
-            other = broadcast_impl_shape(other, ptr.type.get_block_shapes(), builder)
+            other = cast(other, elt_ty, builder)
 
-    # Get `pointer_type<elt_ty>` and `elt_ty`
-    ptr_ty = ptr.type.scalar
-    elt_ty = ptr_ty.element_ty
+        # Create loaded result type `dst_ty`
+        if ptr.type.is_block():
+            shape = ptr.type.get_block_shapes()
+            dst_ty = tl.block_type(elt_ty, shape)
+        else:
+            # Load by de-referencing the pointer of scalar
+            dst_ty = elt_ty
 
-    # Treat `pointer_type<tl.int1>` as `pointer_type<tl.int8>`
-    if elt_ty == tl.int1:
-        elt_ty = tl.int8
-        ptr_ty = tl.pointer_type(elt_ty, ptr_ty.address_space)
-        ptr = cast(ptr, ptr_ty, builder)
+        # Build IR
+        if not mask:
+            ret = tl.tensor(builder.create_load(ptr.handle, cache, eviction, is_volatile), dst_ty)
+        else:
+            ret = tl.tensor(
+                builder.create_masked_load(ptr.handle, mask.handle, other.handle if other else None, cache, eviction,
+                                           is_volatile), dst_ty)
+        if is_bool:
+            ret = cast(ret, tl.int1, builder)
+        return ret
+else:
+    def _load_legacy(ptr, mask, other, boundary_check, padding, cache, eviction, is_volatile, builder):
+        # Load by a tensor of pointers or a pointer of scalar: `block_type<pointer_type<>>` or `pointer_type<>`
+        if not ptr.type.scalar.is_ptr():
+            raise ValueError(f"Unsupported ptr type {ptr.type.__repr__()} in `tl.load`")
 
-    # Cast `other` into `ele_ty` type
-    if other is not None:
-        other = cast(other, elt_ty, builder)
+        # Check `mask`, `other`, `boundary_check`, and `padding` arguments
+        if mask is None and other is not None:
+            raise ValueError("`other` cannot be provided without `mask`")
+        if padding or boundary_check:
+            raise ValueError("`padding_option` or `boundary_check` argument is not supported for loading a tensor of"
+                             "pointers or loading a scalar. Because the compiler does not know the boundary; please "
+                             "use block pointers (defined by `make_block_ptr`) instead")
 
-    # Create loaded result type `dst_ty`
-    if ptr.type.is_block():
-        shape = ptr.type.get_block_shapes()
-        dst_ty = tl.block_type(elt_ty, shape)
-    else:
-        # Load by de-referencing the pointer of scalar
-        dst_ty = elt_ty
+        # For a pointer of scalar, check the type of `mask` and `other`
+        if not ptr.type.is_block():
+            if mask and mask.type.is_block():
+                raise ValueError("Mask argument cannot be block type if pointer argument is not a block")
+            if other and other.type.is_block():
+                raise ValueError("Other argument cannot be block type if pointer argument is not a block")
 
-    # Build IR
-    if mask is None:
-        return tl.tensor(builder.create_load(ptr.handle, cache, eviction, is_volatile), dst_ty)
-    else:
-        return tl.tensor(
-            builder.create_masked_load(ptr.handle, mask.handle, other.handle if other else None, cache, eviction,
-                                       is_volatile), dst_ty)
+        # Make `mask` and `other` into the same shape as `ptr`
+        if ptr.type.is_block():
+            if mask is not None:
+                mask = broadcast_impl_shape(mask, ptr.type.get_block_shapes(), builder)
+            if other is not None:
+                other = broadcast_impl_shape(other, ptr.type.get_block_shapes(), builder)
 
+        # Get `pointer_type<elt_ty>` and `elt_ty`
+        ptr_ty = ptr.type.scalar
+        elt_ty = ptr_ty.element_ty
+
+        # Treat `pointer_type<tl.int1>` as `pointer_type<tl.int8>`
+        if elt_ty == tl.int1:
+            elt_ty = tl.int8
+            ptr_ty = tl.pointer_type(elt_ty, ptr_ty.address_space)
+            ptr = cast(ptr, ptr_ty, builder)
+
+        # Cast `other` into `ele_ty` type
+        if other is not None:
+            other = cast(other, elt_ty, builder)
+
+        # Create loaded result type `dst_ty`
+        if ptr.type.is_block():
+            shape = ptr.type.get_block_shapes()
+            dst_ty = tl.block_type(elt_ty, shape)
+        else:
+            # Load by de-referencing the pointer of scalar
+            dst_ty = elt_ty
+
+        # Build IR
+        if mask is None:
+            return tl.tensor(builder.create_load(ptr.handle, cache, eviction, is_volatile), dst_ty)
+        else:
+            return tl.tensor(
+                builder.create_masked_load(ptr.handle, mask.handle, other.handle if other else None, cache, eviction,
+                                           is_volatile), dst_ty)
 
 def load(ptr: tl.tensor, mask: Optional[tl.tensor], other: Optional[tl.tensor], boundary_check: Tuple,
          padding_option: str, cache_modifier: str, eviction_policy: str, is_volatile: bool,
@@ -1044,7 +1142,11 @@ def descriptor_load(desc_ptr: tl.tensor, offsets, cache_modifier: str, eviction_
                                        _str_to_load_cache_modifier(cache_modifier),
                                        _str_to_eviction_policy(eviction_policy))
     return tl.tensor(x, type)
+if not _NO_TTGIR:
 
+    def tma_load(desc_ptr: tl.tensor, type, is_matrixa: bool, builder: ir.builder) -> tl.tensor:
+        x = builder.create_tma_load(desc_ptr.handle, type.to_ir(builder), is_matrixa)
+        return tl.tensor(x, type)
 
 def descriptor_store(desc_ptr: tl.tensor, value: tl.tensor, offsets, builder: ir.builder) -> tl.tensor:
     offsets = _convert_to_ir_values(builder, offsets, require_i64=False)
@@ -1316,95 +1418,186 @@ def _str_to_dot_input_precision(input_precision, builder):
     return getattr(ir.INPUT_PRECISION, input_precision)
 
 
-def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], max_num_imprecise_acc: int,
-        out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
+if not _NO_TTGIR:
+    def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], max_num_imprecise_acc: int,
+            out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
 
-    def assert_dtypes_valid(lhs_dtype, rhs_dtype, options):
-        if not options.allow_fp8e4nv:
-            assert not lhs_dtype.is_fp8e4nv() and not rhs_dtype.is_fp8e4nv(
-            ), "Dot op does not support fp8e4nv on CUDA arch < 90"
-            if lhs_dtype.is_fp8() and rhs_dtype.is_fp8():
-                return
-            assert lhs_dtype == rhs_dtype, f"First input ({lhs_dtype}) and second input ({rhs_dtype}) must have the same dtype!"
-        else:
-            if lhs_dtype.is_int() or rhs_dtype.is_int():
-                assert lhs_dtype == rhs_dtype, f"Both operands must be same type. First operand ({lhs_dtype}) and second operand ({rhs_dtype})"
-                assert lhs_dtype.is_int8() or lhs_dtype.is_uint8(
-                ), f"Both operands must be either int8 or uint8. Operand type ({lhs_dtype})"
-            elif lhs_dtype.is_fp8() or rhs_dtype.is_fp8():
-                if options.allow_fp8e4b15:
-                    allowed_types = ['fp8e4nv', 'fp8e5', 'fp8e4b15']
-                else:
-                    allowed_types = ['fp8e4nv', 'fp8e5']
-
-                def _validate_dtype(dtype, allowed_types, operand_name):
-                    if not any(getattr(dtype, f'is_{dtype_name}')() for dtype_name in allowed_types):
-                        supported_types = ', '.join(allowed_types)
-                        raise AssertionError(f"Only supports {supported_types}. {operand_name} ({dtype})")
-
-                _validate_dtype(lhs_dtype, allowed_types, "First operand")
-                _validate_dtype(rhs_dtype, allowed_types, "Second operand")
-            else:
-                assert lhs_dtype.is_fp16() or lhs_dtype.is_bf16() or lhs_dtype.is_fp32() or lhs_dtype.is_int1(
-                ), f"Unsupported dtype {lhs_dtype}"
-                assert rhs_dtype.is_fp16() or rhs_dtype.is_bf16() or rhs_dtype.is_fp32() or rhs_dtype.is_int1(
-                ), f"Unsupported dtype {rhs_dtype}"
+        def assert_dtypes_valid(lhs_dtype, rhs_dtype, options):
+            if not options.allow_fp8e4nv:
+                assert not lhs_dtype.is_fp8e4nv() and not rhs_dtype.is_fp8e4nv(
+                ), "Dot op does not support fp8e4nv on CUDA arch < 90"
+                if lhs_dtype.is_fp8() and rhs_dtype.is_fp8():
+                    return
                 assert lhs_dtype == rhs_dtype, f"First input ({lhs_dtype}) and second input ({rhs_dtype}) must have the same dtype!"
+            else:
+                if lhs_dtype.is_int() or rhs_dtype.is_int():
+                    assert lhs_dtype == rhs_dtype, f"Both operands must be same type. First operand ({lhs_dtype}) and second operand ({rhs_dtype})"
+                    assert lhs_dtype.is_int8() or lhs_dtype.is_uint8(
+                    ), f"Both operands must be either int8 or uint8. Operand type ({lhs_dtype})"
+                elif lhs_dtype.is_fp8() or rhs_dtype.is_fp8():
+                    if options.allow_fp8e4b15:
+                        allowed_types = ['fp8e4nv', 'fp8e5', 'fp8e4b15']
+                    else:
+                        allowed_types = ['fp8e4nv', 'fp8e5']
 
-    assert lhs.type.is_block() and rhs.type.is_block()
-    assert_dtypes_valid(lhs.dtype, rhs.dtype, builder.options)
-    if lhs.dtype.is_fp8e4b15() or rhs.dtype.is_fp8e4b15():
-        lhs = cast(lhs, tl.float16, builder)
-        rhs = cast(rhs, tl.float16, builder)
+                    def _validate_dtype(dtype, allowed_types, operand_name):
+                        if not any(getattr(dtype, f'is_{dtype_name}')() for dtype_name in allowed_types):
+                            supported_types = ', '.join(allowed_types)
+                            raise AssertionError(f"Only supports {supported_types}. {operand_name} ({dtype})")
 
-    if input_precision is None:
-        input_precision = builder.options.default_dot_input_precision
+                    _validate_dtype(lhs_dtype, allowed_types, "First operand")
+                    _validate_dtype(rhs_dtype, allowed_types, "Second operand")
+                else:
+                    assert lhs_dtype.is_fp16() or lhs_dtype.is_bf16() or lhs_dtype.is_fp32() or lhs_dtype.is_int1(
+                    ), f"Unsupported dtype {lhs_dtype}"
+                    assert rhs_dtype.is_fp16() or rhs_dtype.is_bf16() or rhs_dtype.is_fp32() or rhs_dtype.is_int1(
+                    ), f"Unsupported dtype {rhs_dtype}"
+                    assert lhs_dtype == rhs_dtype, f"First input ({lhs_dtype}) and second input ({rhs_dtype}) must have the same dtype!"
 
-    input_precision = _str_to_dot_input_precision(input_precision, builder)
+        assert lhs.type.is_block() and rhs.type.is_block()
+        assert_dtypes_valid(lhs.dtype, rhs.dtype, builder.options)
+        if lhs.dtype.is_fp8e4b15() or rhs.dtype.is_fp8e4b15():
+            lhs = cast(lhs, tl.float16, builder)
+            rhs = cast(rhs, tl.float16, builder)
 
-    lhs_rank = len(lhs.shape)
-    rhs_rank = len(rhs.shape)
-    assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
-    assert lhs.shape[-1].value == rhs.shape[
-        -2].value, f"First input shape ({lhs.shape}) and second input shape {rhs.shape} are not compatible for matmul (second index of first shape ({lhs.shape[-1].value}) must be equal to first index of second shape ({rhs.shape[-2].value})"
-    assert lhs.shape[-2].value >= 16 and lhs.shape[-1].value >= 16 \
-        and rhs.shape[-1].value >= 16, \
-        f"All non-batch values in both first input shape ({lhs.shape}) and second input shape ({rhs.shape}) must be >= 16!"
-    if lhs.type.scalar.is_int():
-        assert lhs.type.scalar == tl.int8, "only int8 supported!"
-        # TODO: This is CUDA specific, check if ROCm has the same limitation
-        assert lhs.shape[1].value >= 32, "small blocks not supported!"
-        _0 = builder.get_int32(0)
-        ret_scalar_ty = tl.int32
-    elif out_dtype.is_bf16():
-        raise ValueError(
-            "out_dtype=bfloat16 is unsupported. Please use out_dtype=float32/float16 and cast with `.to(tl.bfloat16)`")
-    elif lhs.type.scalar.is_fp32() or lhs.type.scalar.is_bf16():
-        _0 = builder.get_fp32(0)
-        ret_scalar_ty = tl.float32
-    else:
-        _0 = builder.get_fp16(0) if out_dtype.is_fp16() else builder.get_fp32(0)
-        ret_scalar_ty = out_dtype
+        if input_precision is None:
+            input_precision = builder.options.default_dot_input_precision
 
-    M = lhs.type.shape[-2]
-    N = rhs.type.shape[-1]
-    B = lhs.type.shape[0] if lhs_rank == 3 else None
-    ret_ty = tl.block_type(ret_scalar_ty, [B, M, N] if B else [M, N])
-    if acc is None:
-        acc_handle = builder.create_splat(_0, [B, M, N] if B else [M, N])
-    else:
-        acc_handle = acc.handle
-        assert acc.type == ret_ty
+        input_precision = _str_to_dot_input_precision(input_precision, builder)
 
-    # max_num_imprecise_acc only applies to fp8 -> fp32 dot on sm_90
-    if max_num_imprecise_acc is None:
-        if lhs.dtype.is_fp8() and rhs.dtype.is_fp8():
-            max_num_imprecise_acc = builder.options.max_num_imprecise_acc_default
+        lhs_rank = len(lhs.shape)
+        rhs_rank = len(rhs.shape)
+        assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
+        assert lhs.shape[-1].value == rhs.shape[
+            -2].value, f"First input shape ({lhs.shape}) and second input shape {rhs.shape} are not compatible for matmul (second index of first shape ({lhs.shape[-1].value}) must be equal to first index of second shape ({rhs.shape[-2].value})"
+        # assert lhs.shape[-2].value >= 16 and lhs.shape[-1].value >= 16 \
+        # and rhs.shape[-1].value >= 16, \
+        # f"All non-batch values in both first input shape ({lhs.shape}) and second input shape ({rhs.shape}) must be >= 16!"
+        if lhs.type.scalar.is_int():
+            assert lhs.type.scalar == tl.int8, "only int8 supported!"
+            # TODO: This is CUDA specific, check if ROCm has the same limitation
+            assert lhs.shape[1].value >= 32, "small blocks not supported!"
+            _0 = builder.get_int32(0)
+            ret_scalar_ty = tl.int32
+        elif out_dtype.is_bf16():
+            raise ValueError(
+                "out_dtype=bfloat16 is unsupported. Please use out_dtype=float32/float16 and cast with `.to(tl.bfloat16)`")
+        elif lhs.type.scalar.is_fp32() or lhs.type.scalar.is_bf16():
+            _0 = builder.get_fp32(0)
+            ret_scalar_ty = tl.float32
         else:
-            max_num_imprecise_acc = 0
+            _0 = builder.get_fp16(0) if out_dtype.is_fp16() else builder.get_fp32(0)
+            ret_scalar_ty = out_dtype
 
-    return tl.tensor(builder.create_dot(lhs.handle, rhs.handle, acc_handle, input_precision, max_num_imprecise_acc),
-                     ret_ty)
+        M = lhs.type.shape[-2]
+        N = rhs.type.shape[-1]
+        B = lhs.type.shape[0] if lhs_rank == 3 else None
+        ret_ty = tl.block_type(ret_scalar_ty, [B, M, N] if B else [M, N])
+        if acc is None:
+            acc_handle = builder.create_splat(_0, [B, M, N] if B else [M, N])
+        else:
+            acc_handle = acc.handle
+            assert acc.type == ret_ty
+
+        # max_num_imprecise_acc only applies to fp8 -> fp32 dot on sm_90
+        if max_num_imprecise_acc is None:
+            if lhs.dtype.is_fp8() and rhs.dtype.is_fp8():
+                max_num_imprecise_acc = builder.options.max_num_imprecise_acc_default
+            else:
+                max_num_imprecise_acc = 0
+
+        return tl.tensor(builder.create_dot(lhs.handle, rhs.handle, acc_handle, input_precision, max_num_imprecise_acc),
+                         ret_ty)
+else:
+    def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optional[str], max_num_imprecise_acc: int,
+            out_dtype: tl.dtype, builder: ir.builder) -> tl.tensor:
+
+        def assert_dtypes_valid(lhs_dtype, rhs_dtype, options):
+            if not options.allow_fp8e4nv:
+                assert not lhs_dtype.is_fp8e4nv() and not rhs_dtype.is_fp8e4nv(
+                ), "Dot op does not support fp8e4nv on CUDA arch < 90"
+                if lhs_dtype.is_fp8() and rhs_dtype.is_fp8():
+                    return
+                assert lhs_dtype == rhs_dtype, f"First input ({lhs_dtype}) and second input ({rhs_dtype}) must have the same dtype!"
+            else:
+                if lhs_dtype.is_int() or rhs_dtype.is_int():
+                    assert lhs_dtype == rhs_dtype, f"Both operands must be same type. First operand ({lhs_dtype}) and second operand ({rhs_dtype})"
+                    assert lhs_dtype.is_int8() or lhs_dtype.is_uint8(
+                    ), f"Both operands must be either int8 or uint8. Operand type ({lhs_dtype})"
+                elif lhs_dtype.is_fp8() or rhs_dtype.is_fp8():
+                    if options.allow_fp8e4b15:
+                        allowed_types = ['fp8e4nv', 'fp8e5', 'fp8e4b15']
+                    else:
+                        allowed_types = ['fp8e4nv', 'fp8e5']
+
+                    def _validate_dtype(dtype, allowed_types, operand_name):
+                        if not any(getattr(dtype, f'is_{dtype_name}')() for dtype_name in allowed_types):
+                            supported_types = ', '.join(allowed_types)
+                            raise AssertionError(f"Only supports {supported_types}. {operand_name} ({dtype})")
+
+                    _validate_dtype(lhs_dtype, allowed_types, "First operand")
+                    _validate_dtype(rhs_dtype, allowed_types, "Second operand")
+                else:
+                    assert lhs_dtype.is_fp16() or lhs_dtype.is_bf16() or lhs_dtype.is_fp32() or lhs_dtype.is_int1(
+                    ), f"Unsupported dtype {lhs_dtype}"
+                    assert rhs_dtype.is_fp16() or rhs_dtype.is_bf16() or rhs_dtype.is_fp32() or rhs_dtype.is_int1(
+                    ), f"Unsupported dtype {rhs_dtype}"
+                    assert lhs_dtype == rhs_dtype, f"First input ({lhs_dtype}) and second input ({rhs_dtype}) must have the same dtype!"
+
+        assert lhs.type.is_block() and rhs.type.is_block()
+        assert_dtypes_valid(lhs.dtype, rhs.dtype, builder.options)
+        if lhs.dtype.is_fp8e4b15() or rhs.dtype.is_fp8e4b15():
+            lhs = cast(lhs, tl.float16, builder)
+            rhs = cast(rhs, tl.float16, builder)
+
+        if input_precision is None:
+            input_precision = builder.options.default_dot_input_precision
+
+        input_precision = _str_to_dot_input_precision(input_precision, builder)
+
+        lhs_rank = len(lhs.shape)
+        rhs_rank = len(rhs.shape)
+        assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
+        assert lhs.shape[-1].value == rhs.shape[
+            -2].value, f"First input shape ({lhs.shape}) and second input shape {rhs.shape} are not compatible for matmul (second index of first shape ({lhs.shape[-1].value}) must be equal to first index of second shape ({rhs.shape[-2].value})"
+        assert lhs.shape[-2].value >= 16 and lhs.shape[-1].value >= 16 \
+            and rhs.shape[-1].value >= 16, \
+            f"All non-batch values in both first input shape ({lhs.shape}) and second input shape ({rhs.shape}) must be >= 16!"
+        if lhs.type.scalar.is_int():
+            assert lhs.type.scalar == tl.int8, "only int8 supported!"
+            # TODO: This is CUDA specific, check if ROCm has the same limitation
+            assert lhs.shape[1].value >= 32, "small blocks not supported!"
+            _0 = builder.get_int32(0)
+            ret_scalar_ty = tl.int32
+        elif out_dtype.is_bf16():
+            raise ValueError(
+                "out_dtype=bfloat16 is unsupported. Please use out_dtype=float32/float16 and cast with `.to(tl.bfloat16)`")
+        elif lhs.type.scalar.is_fp32() or lhs.type.scalar.is_bf16():
+            _0 = builder.get_fp32(0)
+            ret_scalar_ty = tl.float32
+        else:
+            _0 = builder.get_fp16(0) if out_dtype.is_fp16() else builder.get_fp32(0)
+            ret_scalar_ty = out_dtype
+
+        M = lhs.type.shape[-2]
+        N = rhs.type.shape[-1]
+        B = lhs.type.shape[0] if lhs_rank == 3 else None
+        ret_ty = tl.block_type(ret_scalar_ty, [B, M, N] if B else [M, N])
+        if acc is None:
+            acc_handle = builder.create_splat(_0, [B, M, N] if B else [M, N])
+        else:
+            acc_handle = acc.handle
+            assert acc.type == ret_ty
+
+        # max_num_imprecise_acc only applies to fp8 -> fp32 dot on sm_90
+        if max_num_imprecise_acc is None:
+            if lhs.dtype.is_fp8() and rhs.dtype.is_fp8():
+                max_num_imprecise_acc = builder.options.max_num_imprecise_acc_default
+            else:
+                max_num_imprecise_acc = 0
+
+        return tl.tensor(builder.create_dot(lhs.handle, rhs.handle, acc_handle, input_precision, max_num_imprecise_acc),
+                         ret_ty)
 
 
 # ===----------------------------------------------------------------------===//

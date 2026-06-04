@@ -5,11 +5,35 @@ if(POLICY CMP0116)
 endif()
 
 project(triton-anchor LANGUAGES CXX)
+option(TRITON_ENABLE_SPIRV "Build Triton SPIRV components" OFF)
+
+set(NO_TTGIR_TRUE_VALUES 1 ON TRUE YES)
+set(NO_TTGIR_FALSE_VALUES "" 0 OFF FALSE NO)
+if(NOT DEFINED NO_TTGIR)
+  set(NO_TTGIR OFF)
+  if(DEFINED ENV{NO_TTGIR})
+    string(TOUPPER "$ENV{NO_TTGIR}" NO_TTGIR_ENV)
+    if(NO_TTGIR_ENV IN_LIST NO_TTGIR_TRUE_VALUES)
+      set(NO_TTGIR ON)
+    elseif(NOT NO_TTGIR_ENV IN_LIST NO_TTGIR_FALSE_VALUES)
+      message(FATAL_ERROR "Invalid NO_TTGIR value: $ENV{NO_TTGIR}")
+    endif()
+  endif()
+endif()
+set(NO_TTGIR "${NO_TTGIR}" CACHE BOOL "Disable fantasy TTGIR extensions")
+message(STATUS "NO_TTGIR: ${NO_TTGIR}")
+
+if(NO_TTGIR)
+  add_compile_definitions(NO_TTGIR)
+  list(APPEND LLVM_TABLEGEN_FLAGS -DNO_TTGIR)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/triton/cmake")
 
 # ═══════════════════════════════════════════════════════════════════════
 # LLVM / MLIR 查找
@@ -136,6 +160,11 @@ set(TRITON_ANCHOR_EXPORTED_TARGETS
     MathExtDialect
     AuxiliaryDialect
     TritonIR
+    TritonGPUIR
+    TritonNvidiaGPUIR
+    TritonAnalysis
+    TritonGPUTransforms
+    TritonGPUToLLVM
 )
 foreach(target ${TRITON_ANCHOR_EXPORTED_TARGETS})
     if(TARGET ${target})
@@ -196,6 +225,11 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRIndexToLLVM
     MLIRGPUToROCDLTransforms
 
+    $<$<NOT:$<BOOL:${NO_TTGIR}>>:MLIRFTVMToLLVMIRTranslation>
+    TritonAnalysis
+    TritonTransforms
+    TritonGPUTransforms
+
     # 为 triton-anchor 补充的 Linalg 依赖
     MLIRLinalgDialect
     MLIRLinalgTransforms
@@ -229,6 +263,9 @@ if(TRITON_BUILD_PYTHON_MODULE)
     LLVMAMDGPUCodeGen
     LLVMAMDGPUAsmParser
   )
+  if(TRITON_ENABLE_SPIRV AND NOT NO_TTGIR)
+    list(APPEND TRITON_LIBRARIES TritonSPIRV TritonGPUToSPIRV)
+  endif()
 
   # 按架构选择指令后端
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
@@ -261,4 +298,3 @@ if(TRITON_BUILD_PYTHON_MODULE)
   # 确保 libtriton.so 输出到 triton/_C 目录
   set_target_properties(triton PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/triton/_C)
 endif()
-

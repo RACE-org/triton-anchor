@@ -1,4 +1,6 @@
 """isort:skip_file"""
+from triton._no_ttgir import NO_TTGIR as _NO_TTGIR
+
 __version__ = '3.0.0'
 
 # ---------------------------------------
@@ -25,29 +27,55 @@ from . import language
 from . import testing
 from . import tools
 
-__all__ = [
-    "autotune",
-    "cdiv",
-    "CompilationError",
-    "compile",
-    "Config",
-    "heuristics",
-    "impl",
-    "InterpreterError",
-    "jit",
-    "JITFunction",
-    "KernelInterface",
-    "language",
-    "MockTensor",
-    "next_power_of_2",
-    "OutOfResources",
-    "reinterpret",
-    "runtime",
-    "TensorWrapper",
-    "TritonError",
-    "testing",
-    "tools",
-]
+if not _NO_TTGIR:
+    __all__ = [
+        "autotune",
+        "cdiv",
+        "CompilationError",
+        "compile",
+        "Config",
+        "heuristics",
+        "impl",
+        "InterpreterError",
+        "jit",
+        "JITFunction",
+        "KernelInterface",
+        "language",
+        "MockTensor",
+        "next_power_of_2",
+        "ops",
+        "OutOfResources",
+        "reinterpret",
+        "runtime",
+        "TensorWrapper",
+        "TritonError",
+        "testing",
+        "tools",
+    ]
+else:
+    __all__ = [
+        "autotune",
+        "cdiv",
+        "CompilationError",
+        "compile",
+        "Config",
+        "heuristics",
+        "impl",
+        "InterpreterError",
+        "jit",
+        "JITFunction",
+        "KernelInterface",
+        "language",
+        "MockTensor",
+        "next_power_of_2",
+        "OutOfResources",
+        "reinterpret",
+        "runtime",
+        "TensorWrapper",
+        "TritonError",
+        "testing",
+        "tools",
+    ]
 
 # -------------------------------------
 # misc. utilities that  don't fit well

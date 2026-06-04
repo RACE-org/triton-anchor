@@ -17,6 +17,9 @@ triton-anchor 冒烟测试
 import sys
 import traceback
 
+import triton
+import triton.language as tl
+
 
 # ============================================================================
 # 测试框架
@@ -274,10 +277,6 @@ def test_adapter_discovery():
         print("  triton-linalg adapter 已注册 ✓")
     else:
         print("  ⚠️  triton-linalg adapter 未发现（可能 entry_points 未安装）")
-
-
-import triton  # noqa: E402
-import triton.language as tl  # noqa: E402
 
 
 @triton.jit

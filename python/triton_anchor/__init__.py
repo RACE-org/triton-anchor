@@ -13,12 +13,14 @@ Architecture:
 
 __version__ = "0.1.3"
 
-from .hw_capability import (
-    HWCapability as HWCapability,
-    ComputeParadigm as ComputeParadigm,
-)
-from .anchor_ir import (
-    AnchorIRTrack as AnchorIRTrack,
-    AnchorIRValidator as AnchorIRValidator,
-)
-from .pipeline import build_ttir_pipeline as build_ttir_pipeline
+from .hw_capability import HWCapability, ComputeParadigm
+from .anchor_ir import AnchorIRTrack, AnchorIRValidator
+from .pipeline import build_ttir_pipeline
+
+__all__ = [
+    "HWCapability",
+    "ComputeParadigm",
+    "AnchorIRTrack",
+    "AnchorIRValidator",
+    "build_ttir_pipeline",
+]

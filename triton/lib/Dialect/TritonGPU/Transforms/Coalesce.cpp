@@ -166,8 +166,17 @@ struct CoalescePass : public impl::TritonGPUCoalesceBase<CoalescePass> {
       Value ptr = getMemAccessPtr(curr);
       if (!ptr)
         return;
+#ifndef NO_TTGIR
+      if (auto tensorType = dyn_cast<RankedTensorType>(ptr.getType())) {
+        auto rank = tensorType.getShape().size();
+        if (rank == 3) return;
+      }
+      // We only convert `tensor<tt.ptr<>>` or `tt.ptr<tensor<>>` load/store
+      bool isPtrTensor = false, isTensorPointer = false;
+#else
       // We only convert `tensor<tt.ptr<>>` load/store
       bool isPtrTensor = false;
+#endif // NO_TTGIR
       if (auto tensorType = dyn_cast<RankedTensorType>(ptr.getType()))
         isPtrTensor = isa<PointerType>(tensorType.getElementType());
       if (!isPtrTensor)
