@@ -120,7 +120,7 @@ add_subdirectory(triton/third_party/f2reduce)
 get_property(TRITON_UPSTREAM_LIBS GLOBAL PROPERTY TRITON_LIBS)
 
 # ═══════════════════════════════════════════════════════════════════════
-# Part 2: 编译 triton-anchor 自有 C++ Pass（triton-linalg 等）
+# Part 2: 编译 triton-anchor 自有 C++ Pass（triton-shared 等）
 # ═══════════════════════════════════════════════════════════════════════
 add_subdirectory(csrc)
 
@@ -131,11 +131,13 @@ add_subdirectory(csrc)
 # 但下游的硬件后端插件（如 triton-sophgo-backend）需要引用这些方言的
 # TypeID 和 Op 方法。这里显式将它们的可见性恢复为 default。
 set(TRITON_ANCHOR_EXPORTED_TARGETS
-    LinalgExtDialect
-    LinalgExtInterface
-    MathExtDialect
-    AuxiliaryDialect
     TritonIR
+
+    # triton-shared: TTIR → Core Dialects 通用转换（tsingmicro 后端需要）
+    TritonArithToLinalg
+    StructuredToMemref
+    ConvertTritonPtr
+    ReconcilePtrCasts
 )
 foreach(target ${TRITON_ANCHOR_EXPORTED_TARGETS})
     if(TARGET ${target})
@@ -167,7 +169,6 @@ if(TRITON_BUILD_PYTHON_MODULE)
     ${PYTHON_SRC_PATH}/passes.cc
     ${PYTHON_SRC_PATH}/interpreter.cc
     ${PYTHON_SRC_PATH}/llvm.cc
-    csrc/bindings/triton_anchor_passes.cc
   )
 
   set(TRITON_LIBRARIES
@@ -204,24 +205,11 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRTensorDialect
     MLIRAffineDialect
 
-    # triton-anchor 本身的内部库
-    TritonLinalgAnalysis
-    TritonLinalgPipelines
-    TritonLinalgUtils
-    ArithToLinalg
-    MathToLinalg
-    TritonToLinalg
-    LinalgExtDialect
-    LinalgExtInterface
-    LinalgExtTransforms
-    MathExtDialect
-    AuxiliaryDialect
-    AuxiliaryTransforms
-    TritonTransformsExtend
-    TritonInterfaceExtend
-    TritonDialectUtils
-    DialectUtils
-    LinalgExtDialectUtils
+    # triton-shared: TTIR → Core Dialects 通用转换
+    TritonArithToLinalg
+    StructuredToMemref
+    ConvertTritonPtr
+    ReconcilePtrCasts
 
     # LLVM
     LLVMPasses

@@ -1,2 +1,2 @@
-add_subdirectory(include/triton-linalg)
+add_subdirectory(include/triton-shared)
 add_subdirectory(lib)
