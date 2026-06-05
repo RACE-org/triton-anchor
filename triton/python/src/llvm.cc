@@ -441,10 +441,11 @@ void init_triton_llvm(py::module &&m) {
       // 中缺少静态库的 RISC-V、AMDGPU 等 backend（TargetSelect.h 头文件
       // 声明了这些初始化函数，但实际 .a 库未包含在工具链里）。
       // 实际的 tsingmicro 硬件目标由 triton-tsingmicro-backend 自行注册。
+      // tsingmicro LLVM 工具链不含 X86Disassembler，因此不调用
+      // InitializeNativeTargetDisassembler()。
       llvm::InitializeNativeTarget();
       llvm::InitializeNativeTargetAsmParser();
       llvm::InitializeNativeTargetAsmPrinter();
-      llvm::InitializeNativeTargetDisassembler();
     });
   });
 
