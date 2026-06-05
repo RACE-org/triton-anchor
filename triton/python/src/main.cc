@@ -45,7 +45,9 @@ void init_triton_passes(pybind11::module &&m);
 void init_triton_stacktrace_hook(pybind11::module &m);
 // triton-anchor 扩展模块（注册 triton-shared 方言和通用 Pass）
 void init_triton_anchor(pybind11::module &&m);
-FOR_EACH_P(DECLARE_BACKEND, TRITON_BACKENDS_TUPLE)
+// triton-anchor 不编译任何后端到 libtriton.so 中 —— 后端通过独立包加载。
+// 当 TRITON_BACKENDS_TUPLE=() 时，FOR_EACH_P 的空展开会生成
+// init_triton_(pybind11::module&&) 这样的无效声明，因此不调用。
 
 PYBIND11_MODULE(libtriton, m) {
   m.doc() = "Python bindings to the C++ Triton API";
@@ -57,5 +59,6 @@ PYBIND11_MODULE(libtriton, m) {
   init_triton_llvm(m.def_submodule("llvm"));
   // 注册 triton-anchor 扩展（triton-shared 方言 + 通用 Pass）
   init_triton_anchor(m.def_submodule("anchor"));
-  FOR_EACH_P(INIT_BACKEND, TRITON_BACKENDS_TUPLE)
+  // triton-anchor 不内置任何硬件后端，后端初始化由外部插件完成。
+  // FOR_EACH_P(INIT_BACKEND, TRITON_BACKENDS_TUPLE) 已移除。
 }
