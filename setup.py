@@ -113,6 +113,12 @@ class CMakeBuild(build_ext):
                 "-DPYBIND11_INCLUDE_DIR=" + os.path.join(pybind11_syspath, "include"),
                 "-Dpybind11_DIR=" + os.path.join(pybind11_syspath, "share", "cmake", "pybind11"),
             ]
+        else:
+            try:
+                import pybind11
+                cmake_args += ["-Dpybind11_DIR=" + pybind11.get_cmake_dir()]
+            except ImportError:
+                pass
 
         # 构建类型
         cfg = get_build_type()
