@@ -537,7 +537,6 @@ LogicalResult MaskState::parseLoopIterArg(Value v, const Location loc,
       return failure();
     }
 
-#ifdef ANCHOR_BACKEND_TSINGMICRO
     if (llvm::isa_and_nonnull<arith::ConstantOp>(tritonValue.getDefiningOp())) {
       // It's accurately a size 1 tl.arange op
       auto constOp = tritonValue.getDefiningOp<arith::ConstantOp>();
@@ -547,7 +546,6 @@ LogicalResult MaskState::parseLoopIterArg(Value v, const Location loc,
       }
       return failure();
     }
-#endif
     // This is a bit of a hack!!
     //
     // The offsets and dimensions of a MaskState can now depend on a loop's
