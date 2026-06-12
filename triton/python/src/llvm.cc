@@ -437,12 +437,12 @@ void init_triton_llvm(py::module &&m) {
   m.def("init_targets", []() {
     static std::once_flag init_flag;
     std::call_once(init_flag, []() {
-      // 只初始化 Native（x86_64）目标，避免引用 tsingmicro LLVM 工具链
-      // 中缺少静态库的 RISC-V、AMDGPU 等 backend（TargetSelect.h 头文件
-      // 声明了这些初始化函数，但实际 .a 库未包含在工具链里）。
-      // 实际的 tsingmicro 硬件目标由 triton-tsingmicro-backend 自行注册。
-      // tsingmicro LLVM 工具链不含 X86Disassembler，因此不调用
-      // InitializeNativeTargetDisassembler()。
+      // 只初始化 Native 目标，避免由于特定定制/裁剪的 LLVM 工具链中
+      // 缺少对应后端静态库（例如 TargetSelect.h 头文件声明了初始化函数，
+      // 但实际对应的静态库未链接或未包含在工具链中）而导致构建/链接失败。
+      // 特定硬件的后端目标由外置的后端插件自行注册。
+      // 同时，为了兼容不包含反汇编器（Disassembler）的裁剪版工具链，
+      // 此处不调用 InitializeNativeTargetDisassembler()。
       llvm::InitializeNativeTarget();
       llvm::InitializeNativeTargetAsmParser();
       llvm::InitializeNativeTargetAsmPrinter();

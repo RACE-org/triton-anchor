@@ -4,13 +4,13 @@
 // 通过 pybind11 暴露给 Python 层（以 triton._C.libtriton.anchor 形式访问）。
 //
 // 架构：
-//   triton-anchor 只包含 flir 原生的、硬件无关的通用 Pass：
+//   triton-anchor 只包含原生的、硬件无关的通用 Pass：
 //     - TritonToLinalg
 //     - TritonToStructured / TritonToUnstructured
 //     - UnstructuredToMemref / TritonPtrToMemref
 //   以及基础方言：TritonStructured, TritonTilingExt
 //
-//   硬件专有 Pass（如 TritonToCoreDialects）由 triton-tsingmicro-backend 负责注册。
+//   硬件专有 Pass 由各硬件后端插件负责注册。
 
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
