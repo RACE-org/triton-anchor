@@ -6,7 +6,7 @@ include_directories(${TRITON_ANCHOR_CSRC_BINARY_DIR}/include)
 
 add_subdirectory(include)
 add_subdirectory(lib)
-add_subdirectory(tools/spine-triton-opt)
+add_subdirectory(tools/triton-shared-opt)
 
 function(triton_anchor_add_spine_plugin)
   add_triton_plugin(SpineTriton

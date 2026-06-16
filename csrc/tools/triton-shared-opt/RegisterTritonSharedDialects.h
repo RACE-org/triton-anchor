@@ -36,7 +36,7 @@
 
 #include "mlir/InitAllPasses.h"
 
-inline void registerSpineTritonDialects(mlir::DialectRegistry &registry) {
+inline void registerTritonSharedDialects(mlir::DialectRegistry &registry) {
   mlir::registerAllPasses();
   mlir::registerLinalgPasses();
   mlir::triton::registerTritonPasses();

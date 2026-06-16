@@ -5,14 +5,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "RegisterSpineTritonDialects.h"
+#include "RegisterTritonSharedDialects.h"
 
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 
 int main(int argc, char **argv) {
   mlir::DialectRegistry registry;
-  registerSpineTritonDialects(registry);
+  registerTritonSharedDialects(registry);
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(
-      argc, argv, "Spine-Triton test driver\n", registry));
+      argc, argv, "Triton Shared test driver\n", registry));
 }

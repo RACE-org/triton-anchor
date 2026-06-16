@@ -31,9 +31,9 @@ TRITON_PYTHON_ROOT = TRITON_PROJECT_DIR / "python"
 TRITON_ROOT = TRITON_PYTHON_ROOT / "triton"
 ANCHOR_PYTHON_ROOT = BASE_DIR / "python"
 DEFAULT_BUILD_SUBDIR = Path("build") / "cmake-wheel"
-CMAKE_BUILD_TARGETS = ("triton", "spine-triton-opt")
+CMAKE_BUILD_TARGETS = ("triton", "triton-shared-opt")
 PACKAGED_TRITON_SHARED_OPT_RELATIVE_PATH = (
-    Path("triton") / "csrc" / "tools" / "spine-triton-opt" / "triton-shared-opt"
+    Path("triton") / "csrc" / "tools" / "triton-shared-opt" / "triton-shared-opt"
 )
 
 
