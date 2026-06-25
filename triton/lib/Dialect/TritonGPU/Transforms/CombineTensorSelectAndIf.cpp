@@ -1,4 +1,6 @@
+#include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/Passes.h"
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
@@ -14,8 +16,52 @@ namespace gpu {
 #define GEN_PASS_DEF_TRITONGPUCOMBINETENSORSELECTANDIF
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h.inc"
 
-// Return true if the select could be merged into the If without breaking SSA
-// rules.
+/// The user of select maybe inside either the ThenRegion or ElseRegion of
+/// the scf.if. So, canonicalize user of select in scf.if first.
+static void canonicalizeSelectUsersInSCFIf(ModuleOp input) {
+  llvm::MapVector<std::pair<Value, Value>, SmallVector<Operation *>>
+      usersNeedreplaced;
+  input.walk([&](arith::SelectOp selectOp) {
+    auto *parentBlock = selectOp->getBlock();
+    Value condition = selectOp.getOperand(0);
+    Value trueVal = selectOp.getOperand(1);
+    Value falseVal = selectOp.getOperand(2);
+    Value resVal = selectOp.getResult();
+    for (auto *condUser : condition.getUsers()) {
+      if (!llvm::isa<scf::IfOp>(condUser))
+        continue;
+      scf::IfOp ifOp = llvm::cast<scf::IfOp>(condUser);
+      for (auto *resUser : resVal.getUsers()) {
+        if (ifOp->isProperAncestor(resUser)) {
+          if (ifOp.getThenRegion().findAncestorOpInRegion(*resUser) !=
+              nullptr) {
+            // The user is inside the ThenRegion of the scf.if.
+            usersNeedreplaced[std::make_pair(resVal, trueVal)].push_back(
+                resUser);
+          } else {
+            // The user is inside the ElseRegion of the scf.if.
+            usersNeedreplaced[std::make_pair(resVal, falseVal)].push_back(
+                resUser);
+          }
+        }
+      }
+    }
+  });
+
+  // Replace the operand of user.
+  for (auto [replacedSrcAndDst, users] :
+       llvm::make_early_inc_range(usersNeedreplaced)) {
+    Value srcVal = replacedSrcAndDst.first;
+    Value dstVal = replacedSrcAndDst.second;
+    for (Operation *user : llvm::make_early_inc_range(users)) {
+      srcVal.replaceUsesWithIf(
+          dstVal, [&](OpOperand &use) { return use.getOwner() == user; });
+    }
+  }
+}
+
+/// Return true if the select could be merged into the If without breaking SSA
+/// rules.
 static bool canMergeIntoIf(arith::SelectOp selectOp, scf::IfOp ifOp,
                            DominanceInfo &dom) {
   // If needs to be dominated by the select.
@@ -38,19 +84,24 @@ public:
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     ModuleOp m = getOperation();
-    DominanceInfo dom(m);
+    canonicalizeSelectUsersInSCFIf(m);
 
     // Go over the arith.select ops, look if there is an if
     // with the same condition.
+    DominanceInfo dom(m);
     llvm::MapVector<scf::IfOp, SmallVector<arith::SelectOp>> selectToIf;
     m.walk([&](arith::SelectOp selectOp) {
+      // Apply only to selects with a tensor result. Scalars are cheap enough to
+      // predicate.
+      if (!isa<RankedTensorType>(selectOp.getResult().getType()))
+        return;
       // Look if there is an if in the same block, with the same condition.
       auto *parentBlock = selectOp->getBlock();
       Value condition = selectOp.getOperand(0);
       SetVector<Operation *> conditionUsers(condition.getUsers().begin(),
                                             condition.getUsers().end());
       // sort the users in topological order.
-      conditionUsers = multiRootTopologicalSort(conditionUsers);
+      conditionUsers = mlir::topologicalSort(conditionUsers);
       // Get condition's users
       for (Operation *user : conditionUsers) {
         auto ifOp = dyn_cast<scf::IfOp>(user);
@@ -74,8 +125,8 @@ public:
       for (arith::SelectOp selectOp : selectOps) {
         newResultTypes.push_back(selectOp.getResult().getType());
       }
-      auto newIfOp = builder.create<scf::IfOp>(
-          loc, newResultTypes, ifOp.getCondition(), /*hasElse*/ true);
+      auto newIfOp = scf::IfOp::create(builder, loc, newResultTypes,
+                                       ifOp.getCondition(), /*hasElse*/ true);
       // Move the existing blocks to the new if.
       newIfOp.getThenRegion().takeBody(ifOp.getThenRegion());
 
@@ -83,7 +134,8 @@ public:
         newIfOp.getElseRegion().takeBody(ifOp.getElseRegion());
       } else {
         // Create an empty yield
-        auto yieldOp = newIfOp.getElseBodyBuilder().create<scf::YieldOp>(loc);
+        auto builder = newIfOp.getElseBodyBuilder();
+        auto yieldOp = scf::YieldOp::create(builder, loc);
       }
 
       SmallVector<Value> ifYieldOperands = newIfOp.thenYield().getOperands();
@@ -97,7 +149,7 @@ public:
       // Update yields
       auto updateYield = [&](scf::YieldOp yield, SmallVector<Value> &operands) {
         builder.setInsertionPoint(yield);
-        builder.create<scf::YieldOp>(loc, operands);
+        scf::YieldOp::create(builder, loc, operands);
         yield.erase();
       };
       updateYield(newIfOp.thenYield(), ifYieldOperands);

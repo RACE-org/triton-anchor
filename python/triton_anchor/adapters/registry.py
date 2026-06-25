@@ -8,6 +8,7 @@ Selection is driven by ``HWCapability.ptr_model`` and optional user override.
 Discovery order:
   1. Explicit registration via ``AdapterRegistry.register()``
   2. ``entry_points("triton.adapters")`` discovery (pip-installed adapters)
+
 """
 
 from __future__ import annotations
@@ -49,7 +50,6 @@ class AdapterRegistry:
         if name in cls._adapters:
             logger.warning(f"Adapter '{name}' already registered, overwriting")
         cls._adapters[name] = adapter
-        logger.debug(f"Registered adapter: {name}")
 
     @classmethod
     def discover(cls) -> None:
@@ -57,19 +57,15 @@ class AdapterRegistry:
         if cls._discovered:
             return
         cls._discovered = True
-
         try:
             eps = importlib.metadata.entry_points(group="triton.adapters")
         except TypeError:
             # Python 3.8/3.9 compatibility
             eps = importlib.metadata.entry_points().get("triton.adapters", [])
-
         for ep in eps:
             try:
                 adapter_cls = ep.load()
-                adapter = adapter_cls()
-                cls.register(adapter)
-                logger.info(f"Discovered adapter from entry_point: {ep.name}")
+                cls.register(adapter_cls())
             except Exception as e:
                 logger.warning(f"Failed to load adapter entry_point '{ep.name}': {e}")
 
@@ -101,7 +97,6 @@ class AdapterRegistry:
             AdapterNotFoundError: If no suitable adapter is found.
         """
         cls.discover()
-
         # 1. Explicit preference
         if hw.preferred_adapter:
             adapter = cls._adapters.get(hw.preferred_adapter)
@@ -111,29 +106,22 @@ class AdapterRegistry:
                 f"Preferred adapter '{hw.preferred_adapter}' not found. "
                 f"Available: {list(cls._adapters.keys())}"
             )
-
         # 2. Automatic selection by ptr_model
-        _model_to_adapter = {
+        model_to_adapter = {
             "structured": "triton-shared",
-            "axis_info": "triton-linalg",
-            "hybrid": "hybrid",
+            "axis_info": "triton-shared",
+            "hybrid": "triton-shared",
         }
-        adapter_name = _model_to_adapter.get(hw.ptr_model)
+        adapter_name = model_to_adapter.get(hw.ptr_model)
         if adapter_name and adapter_name in cls._adapters:
             return cls._adapters[adapter_name]
 
-        # 3. Fallback: return any available adapter
         if cls._adapters:
-            fallback = next(iter(cls._adapters.values()))
-            logger.warning(
-                f"No adapter matching ptr_model='{hw.ptr_model}', "
-                f"falling back to '{fallback.name()}'"
-            )
-            return fallback
+            return next(iter(cls._adapters.values()))
 
         raise AdapterNotFoundError(
             f"No adapters available for ptr_model='{hw.ptr_model}'. "
-            f"Install a Linalg adapter package."
+            f"Install the triton-anchor wheel with triton-shared support."
         )
 
     @classmethod
@@ -153,9 +141,6 @@ class AdapterNotFoundError(Exception):
     """Raised when no suitable adapter is found."""
 
     pass
-
-
-# ── Convenience function ─────────────────────────────────────────────
 
 
 def get_adapter(hw: HWCapability) -> ITritonToLinalgAdapter:

@@ -1,234 +1,78 @@
-//===- Utils.cpp - Dialect utils --------------------------------*- C++ -*-===//
-//
-// Copyright (C) [2022-2025] by Cambricon.
-//
-//===----------------------------------------------------------------------===//
+#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton-shared/Analysis/OpFoldResultUtils.h"
+#include "mlir/IR/PatternMatch.h"          // matchPattern, m_Zero
+#include "mlir/IR/BuiltinAttributes.h"     // IntegerAttr
+#include "mlir/Dialect/Arith/IR/Arith.h"   // arith::ConstantIndexOp
+#include "llvm/ADT/STLExtras.h"            // llvm::all_of
 
-#include "triton-linalg/Utils/Utils.h"
+namespace mlir {
+namespace triton {
+bool isPtrTypeLike(Type t) {
+  if (auto tensorType = dyn_cast<RankedTensorType>(t)) {
+    return isa<triton::PointerType>(tensorType.getElementType());
+  }
+  return isa<triton::PointerType>(t);
+}
 
-#include <algorithm>
-#include <assert.h>
-#include <optional>
+Value ensureIndexType(Location loc, Value value, PatternRewriter &rewriter) {
+    auto indexType = rewriter.getIndexType();
+    if (value.getType() == indexType) {
+      return value;
+    }
+    return arith::IndexCastOp::create(rewriter, loc, indexType, value);
+}
 
-#include "mlir/Dialect/Arith/IR/Arith.h"
-#include "mlir/Dialect/Utils/StaticValueUtils.h"
-#include "mlir/IR/Attributes.h"
-#include "mlir/IR/Builders.h"
-#include "mlir/IR/BuiltinAttributes.h"
-#include "mlir/IR/BuiltinTypes.h"
-#include "mlir/IR/Location.h"
-#include "mlir/IR/OpDefinition.h"
-#include "mlir/IR/Types.h"
-#include "mlir/IR/Value.h"
-#include "llvm/ADT/APInt.h"
-#include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Twine.h"
+Value ofrToIndexValue(const Location loc, const OpFoldResult ofr,
+                      PatternRewriter &rewriter) {
+  if (Value val = dyn_cast<Value>(ofr)) {
+    assert(val.getType().isIntOrIndex());
+    if (!val.getType().isIndex()) {
+      val = arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(), val);
+    }
+    return val;
+  }
 
-using namespace mlir;
-using namespace mlir::triton;
+  auto intVal = getIntAttr(ofr);
+  if (intVal.has_value()) {
+    return arith::ConstantOp::create(rewriter, loc, rewriter.getIndexAttr(intVal.value()));
+  }
+  llvm_unreachable("Unexpected OpFoldResult state");
+  return nullptr;
+}
 
-bool mlir::triton::createReassociationMaps(
-    OpBuilder &builder, llvm::ArrayRef<int64_t> expandedShape,
-    llvm::ArrayRef<int64_t> collapsedShape,
-    llvm::SmallVector<ReassociationExprs, 4> &reassociationMap) {
-  if (collapsedShape.empty()) {
-    reassociationMap = {};
+Value createCeilDivUI(PatternRewriter &rewriter, Location loc, Value dividend, Value divisor) {
+  auto indexType = rewriter.getIndexType();
+  Value dividendIndex = ensureIndexType(loc, dividend, rewriter);
+  Value divisorIndex = ensureIndexType(loc, divisor, rewriter);
+
+  auto one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  auto sum = arith::AddIOp::create(rewriter, loc, dividendIndex, divisorIndex);
+  auto numerator = arith::SubIOp::create(rewriter, loc, sum, one);
+  return arith::DivUIOp::create(rewriter, loc, numerator, divisorIndex);
+}
+
+bool isZeroOFR(mlir::OpFoldResult ofr) {
+  if (auto attr = llvm::dyn_cast<mlir::Attribute>(ofr)) {
+    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(attr))
+      return intAttr.getValue().isZero();
+    return false;
+  }
+
+  mlir::Value v = llvm::cast<mlir::Value>(ofr);
+
+  if (mlir::matchPattern(v, mlir::m_Zero()))
     return true;
-  }
 
-  // As tensor.expand_shape/tensor.collapse_shape expected rank
-  // expansion/reduction.
-  if (expandedShape.size() == collapsedShape.size())
-    return false;
-  if (ShapedType::isDynamicShape(expandedShape) ||
-      ShapedType::isDynamicShape(collapsedShape))
-    return false;
+  if (auto cstIdx = v.getDefiningOp<mlir::arith::ConstantIndexOp>())
+    return cstIdx.value() == 0;
 
-  reassociationMap.resize(collapsedShape.size());
-  unsigned currExpandDim = 0, currCollapseDim = 0;
-  while (currExpandDim < expandedShape.size() &&
-         currCollapseDim < collapsedShape.size()) {
-    int64_t dstSize = collapsedShape[currCollapseDim];
-    int64_t srcSize = expandedShape[currExpandDim];
-    while (srcSize < dstSize && currExpandDim < expandedShape.size()) {
-      reassociationMap[currCollapseDim].push_back(
-          builder.getAffineDimExpr(currExpandDim++));
-      srcSize *= expandedShape[currExpandDim];
-    }
-    if (srcSize == dstSize) {
-      reassociationMap[currCollapseDim].push_back(
-          builder.getAffineDimExpr(currExpandDim++));
-      // If the next dim in collapsedShape is not 1, treat subsequent dims in
-      // expandedShape which are 1 to be collapsed.
-      if (currCollapseDim == collapsedShape.size() - 1 ||
-          collapsedShape[currCollapseDim + 1] != 1) {
-        while (currExpandDim < expandedShape.size() &&
-               expandedShape[currExpandDim] == 1) {
-          reassociationMap[currCollapseDim].push_back(
-              builder.getAffineDimExpr(currExpandDim++));
-        }
-      }
-    }
-    // If the reassociationMap for the currCollapseDim is empty, clear all
-    // mappings and return false.
-    if (reassociationMap[currCollapseDim].empty()) {
-      reassociationMap.clear();
-      return false;
-    }
-    currCollapseDim++;
-  }
-  // If both iterators didn't reach the end, we have leftover dimentions which
-  // implies that we have a mismatch in shape.
-  return currExpandDim == expandedShape.size() &&
-         currCollapseDim == collapsedShape.size();
+  return false;
 }
 
-Value triton::castToIndexType(OpBuilder &b, Location loc, OpFoldResult ofr) {
-  if (auto value = dyn_cast<Value>(ofr)) {
-    if (!isa<IndexType>(value.getType()))
-      return b.createOrFold<arith::IndexCastOp>(loc, b.getIndexType(), value);
-    return value;
-  }
-  auto attr = dyn_cast<IntegerAttr>(dyn_cast<Attribute>(ofr));
-  assert(attr && "expect the op fold result casts to an integer attribute");
-  return b.create<arith::ConstantIndexOp>(loc, attr.getValue().getSExtValue())
-      .getResult();
+bool areAllZeroOFRs(mlir::ArrayRef<mlir::OpFoldResult> ofrs) {
+  return llvm::all_of(ofrs, [](mlir::OpFoldResult x) { return isZeroOFR(x); });
 }
 
-SmallVector<Value> triton::castToIndexType(OpBuilder &b, Location loc,
-                                           ArrayRef<OpFoldResult> ofrs) {
-  SmallVector<Value> ret;
-  for (auto ofr : ofrs) {
-    ret.push_back(castToIndexType(b, loc, ofr));
-  }
-  return ret;
-}
+} // namespace triton
 
-OpFoldResult triton::addOFRs(OpFoldResult lhs, OpFoldResult rhs, Location loc,
-                             OpBuilder &builder) {
-  auto lhsIntAttr = getConstantIntValue(lhs);
-  auto rhsIntAttr = getConstantIntValue(rhs);
-
-  // Shortcut for special cases.
-  if (!lhsIntAttr && rhsIntAttr && rhsIntAttr.value() == 0)
-    return lhs;
-  if (!rhsIntAttr && lhsIntAttr && lhsIntAttr.value() == 0)
-    return rhs;
-
-  // Both lhs and rhs are constants, return result directly.
-  if (lhsIntAttr && rhsIntAttr)
-    return builder.getIndexAttr(lhsIntAttr.value() + rhsIntAttr.value());
-
-  // Otherwise, need to create instructions to calculate new attribute value.
-  auto lhsValue = castToIndexType(builder, loc, lhs);
-  auto rhsValue = castToIndexType(builder, loc, rhs);
-  return builder.create<arith::AddIOp>(loc, lhsValue, rhsValue).getResult();
-}
-
-OpFoldResult triton::subOFRs(OpFoldResult lhs, OpFoldResult rhs, Location loc,
-                             OpBuilder &builder) {
-  auto lhsIntAttr = getConstantIntValue(lhs);
-  auto rhsIntAttr = getConstantIntValue(rhs);
-
-  // Shortcut for special cases.
-  if (!lhsIntAttr && rhsIntAttr && rhsIntAttr.value() == 0)
-    return lhs;
-
-  // Both lhs and rhs are constants, return result directly.
-  if (lhsIntAttr && rhsIntAttr)
-    return builder.getIndexAttr(lhsIntAttr.value() - rhsIntAttr.value());
-
-  // Otherwise, need to create instructions to calculate new attribute value.
-  auto lhsValue = castToIndexType(builder, loc, lhs);
-  auto rhsValue = castToIndexType(builder, loc, rhs);
-  return builder.create<arith::SubIOp>(loc, lhsValue, rhsValue).getResult();
-}
-
-OpFoldResult triton::minOFRs(OpFoldResult lhs, OpFoldResult rhs, Location loc,
-                             OpBuilder &builder) {
-  auto lhsIntAttr = getConstantIntValue(lhs);
-  auto rhsIntAttr = getConstantIntValue(rhs);
-
-  // Both lhs and rhs are constants, return result directly.
-  if (lhsIntAttr && rhsIntAttr)
-    return builder.getIndexAttr(
-        std::min(lhsIntAttr.value(), rhsIntAttr.value()));
-
-  // Otherwise, need to create instructions to calculate new attribute value.
-  auto lhsValue = castToIndexType(builder, loc, lhs);
-  auto rhsValue = castToIndexType(builder, loc, rhs);
-  return builder.create<arith::MinSIOp>(loc, lhsValue, rhsValue).getResult();
-}
-
-OpFoldResult triton::mulOFRs(OpFoldResult lhs, OpFoldResult rhs, Location loc,
-                             OpBuilder &builder) {
-  auto lhsIntAttr = getConstantIntValue(lhs);
-  auto rhsIntAttr = getConstantIntValue(rhs);
-
-  // Shortcuts for special cases.
-  if (lhsIntAttr) {
-    if (lhsIntAttr.value() == 0)
-      return lhs;
-    if (lhsIntAttr.value() == 1)
-      return rhs;
-  }
-  if (rhsIntAttr) {
-    if (rhsIntAttr.value() == 0)
-      return rhs;
-    if (rhsIntAttr == 1)
-      return lhs;
-  }
-
-  // Both lhs and rhs are constants.
-  if (lhsIntAttr && rhsIntAttr)
-    return builder.getIndexAttr(lhsIntAttr.value() * rhsIntAttr.value());
-
-  // Otherwise, need to create instructions to calculate new attribute value.
-  auto lhsValue = castToIndexType(builder, loc, lhs);
-  auto rhsValue = castToIndexType(builder, loc, rhs);
-  return builder.create<arith::MulIOp>(loc, lhsValue, rhsValue).getResult();
-}
-
-OpFoldResult triton::divOFRs(OpFoldResult lhs, OpFoldResult rhs, Location loc,
-                             OpBuilder &builder) {
-  auto lhsIntAttr = getConstantIntValue(lhs);
-  auto rhsIntAttr = getConstantIntValue(rhs);
-
-  // Shortcuts for special cases.
-  if (lhsIntAttr) {
-    if (lhsIntAttr.value() == 0)
-      return lhs;
-  }
-  if (rhsIntAttr) {
-    assert(rhsIntAttr.value() != 0 && "the divisor cannot be 0");
-    if (rhsIntAttr == 1)
-      return lhs;
-  }
-
-  // Both lhs and rhs are constants.
-  if (lhsIntAttr && rhsIntAttr)
-    return builder.getIndexAttr(lhsIntAttr.value() / rhsIntAttr.value());
-
-  // Otherwise, need to create instructions to calculate new attribute value.
-  auto lhsValue = castToIndexType(builder, loc, lhs);
-  auto rhsValue = castToIndexType(builder, loc, rhs);
-  return builder.create<arith::DivSIOp>(loc, lhsValue, rhsValue).getResult();
-}
-
-OpFoldResult triton::maxOFRs(OpFoldResult lhs, OpFoldResult rhs, Location loc,
-                             OpBuilder &builder) {
-  auto lhsIntAttr = getConstantIntValue(lhs);
-  auto rhsIntAttr = getConstantIntValue(rhs);
-
-  // Both lhs and rhs are constants, return result directly.
-  if (lhsIntAttr && rhsIntAttr)
-    return builder.getIndexAttr(
-        std::max(lhsIntAttr.value(), rhsIntAttr.value()));
-
-  // Otherwise, need to create instructions to calculate new attribute value.
-  auto lhsValue = castToIndexType(builder, loc, lhs);
-  auto rhsValue = castToIndexType(builder, loc, rhs);
-  return builder.create<arith::MaxSIOp>(loc, lhsValue, rhsValue).getResult();
-}
+} // namespace mlir

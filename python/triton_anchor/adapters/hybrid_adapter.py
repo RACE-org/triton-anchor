@@ -11,16 +11,18 @@ This provides the best of both worlds:
   - AxisInfo is a universal fallback
 
 Status: STUB
+
+At the moment triton-anchor uses a single triton-shared-based lowering path.
+The Hybrid adapter is therefore a thin alias over TritonSharedAdapter so call
+sites can keep using the symbolic "hybrid" mode.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Any, List
 
 from .base import ILinalgOptAdapter
-
-logger = logging.getLogger(__name__)
+from .triton_shared_adapter import TritonSharedAdapter
 
 
 class HybridAdapter(ILinalgOptAdapter):
@@ -46,19 +48,9 @@ class HybridAdapter(ILinalgOptAdapter):
         # except AdapterConversionError:
         #     logger.info("Structured analysis failed, falling back to AxisInfo")
 
-        from .triton_linalg_adapter import TritonLinalgAdapter
-
-        return TritonLinalgAdapter().convert(ttir_module, metadata, context)
+        return TritonSharedAdapter(mode="unstructured").convert(
+            ttir_module, metadata, context
+        )
 
     def get_output_dialects(self) -> List[str]:
-        return [
-            "linalg",
-            "linalg_ext",
-            "tensor",
-            "memref",
-            "arith",
-            "math",
-            "scf",
-            "func",
-            "aux",
-        ]
+        return TritonSharedAdapter(mode="unstructured").get_output_dialects()

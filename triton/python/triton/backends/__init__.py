@@ -1,51 +1,78 @@
+import importlib
+import os
+import inspect
 import sys
-import importlib.metadata
 from dataclasses import dataclass
+from typing import Type, TypeVar, Union
+from types import ModuleType
 from .driver import DriverBase
 from .compiler import BaseBackend
+
+if sys.version_info >= (3, 10):
+    from importlib.metadata import entry_points
+else:
+    from importlib_metadata import entry_points
+
+T = TypeVar("T", bound=Union[BaseBackend, DriverBase])
+
+
+def _find_concrete_subclasses(module: ModuleType, base_class: Type[T]) -> Type[T]:
+    ret: list[Type[T]] = []
+    for attr_name in dir(module):
+        attr = getattr(module, attr_name)
+        if (
+            isinstance(attr, type)
+            and issubclass(attr, base_class)
+            and not inspect.isabstract(attr)
+        ):
+            ret.append(attr)
+    if len(ret) == 0:
+        raise RuntimeError(
+            f"Found 0 concrete subclasses of {base_class} in {module}: {ret}"
+        )
+    if len(ret) > 1:
+        raise RuntimeError(
+            f"Found >1 concrete subclasses of {base_class} in {module}: {ret}"
+        )
+    return ret[0]
 
 
 @dataclass(frozen=True)
 class Backend:
-    compiler: BaseBackend = None
-    driver: DriverBase = None
+    compiler: Type[BaseBackend]
+    driver: Type[DriverBase]
 
 
-def _discover_backends():
-    """通过 entry_points 发现已安装的 out-of-tree 后端插件。
-
-    后端插件（如 triton-sophgo-backend）在 pyproject.toml 中声明:
-        [project.entry-points."triton.backends"]
-        sophgo = "triton_sophgo"
-    这样 `import triton` 时就能自动发现并注册该后端。
-    """
+def _discover_backends() -> dict[str, Backend]:
     backends = dict()
+    # Fast path: optionally skip entry point discovery (which can be slow) and
+    # discover only in-tree backends under the `triton.backends` namespace.
+    skip_entrypoints_env = os.environ.get("TRITON_BACKENDS_IN_TREE", "")
 
-    try:
-        eps = importlib.metadata.entry_points(group="triton.backends")
-    except TypeError:
-        # Python 3.9 兼容: entry_points() 不支持 group 参数
-        eps = importlib.metadata.entry_points().get("triton.backends", [])
+    if skip_entrypoints_env == "1":
+        root = os.path.dirname(__file__)
+        for name in os.listdir(root):
+            if not os.path.isdir(os.path.join(root, name)):
+                continue
+            if name.startswith("__"):
+                continue
+            compiler = importlib.import_module(f"triton.backends.{name}.compiler")
+            driver = importlib.import_module(f"triton.backends.{name}.driver")
+            backends[name] = Backend(
+                _find_concrete_subclasses(compiler, BaseBackend),
+                _find_concrete_subclasses(driver, DriverBase),
+            )
+        return backends
 
-    for ep in eps:
-        try:
-            plugin_obj = ep.load()
-
-            # 支持两种 entry_point 指向格式:
-            #   1. 类:   实例化后读取 compiler_cls / driver_cls
-            #   2. 模块: 直接读取模块级 compiler_cls / driver_cls
-            plugin = plugin_obj() if isinstance(plugin_obj, type) else plugin_obj
-
-            compiler_cls = getattr(plugin, 'compiler_cls', None)
-            driver_cls = getattr(plugin, 'driver_cls', None)
-
-            if compiler_cls and driver_cls:
-                backends[ep.name] = Backend(compiler=compiler_cls, driver=driver_cls)
-        except Exception as e:
-            print(f"Warning: Failed to load out-of-tree backend '{ep.name}': {e}",
-                  file=sys.stderr)
-
+    # Default path: discover via entry points for out-of-tree/downstream plugins.
+    for ep in entry_points().select(group="triton.backends"):
+        compiler = importlib.import_module(f"{ep.value}.compiler")
+        driver = importlib.import_module(f"{ep.value}.driver")
+        backends[ep.name] = Backend(
+            _find_concrete_subclasses(compiler, BaseBackend),  # type: ignore
+            _find_concrete_subclasses(driver, DriverBase),
+        )  # type: ignore
     return backends
 
 
-backends = _discover_backends()
+backends: dict[str, Backend] = _discover_backends()

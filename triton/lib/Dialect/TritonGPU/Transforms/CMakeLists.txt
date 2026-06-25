@@ -1,24 +1,17 @@
 add_triton_library(TritonGPUTransforms
-  AccelerateMatmul.cpp
-  Coalesce.cpp
-  F32DotTC.cpp
-  CombineTensorSelectAndIf.cpp
-  ReduceDataDuplication.cpp
-  OptimizeDotOperands.cpp
-  OptimizeThreadLocality.cpp
-  Pipeliner/MatmulLoopPipeline.cpp
-  Pipeliner/OuterLoopPipeline.cpp
-  Pipeliner/PipelineExpander.cpp
-  Pipeliner/SoftwarePipeliner.cpp
-  Pipeliner/TMAStoresPipeline.cpp
-  Pipeliner/PipeliningUtility.cpp
-  Prefetch.cpp
-  RemoveLayoutConversions.cpp
-  ReorderInstructions.cpp
+  CoalesceUtils.cpp
   Utility.cpp
 
   DEPENDS
-  TritonGPUTransformsIncGen
+  TritonTableGen
+  TritonGPUTableGen
+  TritonGPUCGAAttrIncGen
+  TritonGPUAttrDefsIncGen
+  TritonGPUTypeInterfacesIncGen
+  TritonGPUOpInterfacesIncGen
+  TritonNvidiaGPUTableGen
+  TritonNvidiaGPUAttrDefsIncGen
+  TritonNvidiaGPUOpInterfacesIncGen
 
   LINK_LIBS PUBLIC
   MLIRTransforms
@@ -27,5 +20,4 @@ add_triton_library(TritonGPUTransforms
   TritonIR
   TritonGPUIR
   TritonNvidiaGPUIR
-  MLIRTransformUtils
 )

@@ -1,18 +1,47 @@
 from __future__ import annotations, division
 import ast
+import copy
 import hashlib
 import inspect
 import itertools
-import os
+import threading
 import re
 import textwrap
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import cached_property
-from typing import Callable, Generic, Iterable, Optional, TypeVar, Union, overload, Dict, Any, Tuple
-from ..runtime.driver import driver
-from types import ModuleType
+from typing import (
+    Callable,
+    Generic,
+    Iterable,
+    Optional,
+    TypeVar,
+    overload,
+    Dict,
+    Any,
+    Tuple,
+)
 
-TRITON_MODULE = __name__[:-len(".runtime.jit")]
+from triton.backends import BaseBackend
+from types import ModuleType
+from .. import knobs
+from .driver import driver
+from . import _async_compile
+from .._utils import (
+    find_paths_if,
+    get_iterable_path,
+    type_canonicalisation_dict,
+    is_namedtuple,
+)
+from .cache import get_cache_key
+from triton._C.libtriton import (
+    get_cache_invalidating_env_vars,
+    native_specialize_impl,
+    ir,
+)
+
+TRITON_MODULE = "triton.language"
+GLUON_MODULE = "triton.experimental.gluon.language"
 
 T = TypeVar("T")
 
@@ -33,26 +62,33 @@ class DependenciesFinder(ast.NodeVisitor):
     otherwise we could recompile).
     """
 
-    def __init__(self, name, globals, src) -> None:
+    def __init__(self, name, globals, nonlocals, src) -> None:
         super().__init__()
         self.name = name
         self.hasher = hashlib.sha256(src.encode("utf-8"))
 
         # This function's __globals__ dict.
         self.globals = globals
+        self.nonlocals = nonlocals
 
         # Python builtins that can be accessed from Triton kernels.
         self.supported_python_builtins = {
-            'float',
-            'getattr',
-            'int',
-            'isinstance',
-            'len',
-            'list',
-            'max',
-            'min',
-            'print',
-            'range',
+            "float",
+            "getattr",
+            "int",
+            "isinstance",
+            "len",
+            "list",
+            "max",
+            "min",
+            "print",
+            "range",
+        }
+        self.supported_modules = {
+            GLUON_MODULE,
+            TRITON_MODULE,
+            "copy",
+            "math",
         }
 
         # used_global_vals tells us which global variables are used by this
@@ -73,34 +109,96 @@ class DependenciesFinder(ast.NodeVisitor):
     def ret(self):
         return self.hasher.hexdigest()
 
+    def _is_triton_builtin(self, node, func):
+        if inspect.isbuiltin(node.func):
+            return True
+        module = getattr(func, "__module__", "")
+        return module.startswith(TRITON_MODULE)
+
+    def _update_hash(self, func):
+        assert isinstance(func, JITCallable)
+        # Merge our used_global_vals with those of the called function,
+        # after checking that all overlapping values are consistent.
+        for k in self.used_global_vals.keys() & func.used_global_vals.keys():
+            var_name, _ = k
+            v1, _ = self.used_global_vals[k]
+            v2, _ = func.used_global_vals[k]
+            if v1 != v2:
+                raise RuntimeError(
+                    f"Global variable {var_name} has value {v1} when compiling {self.name}, but inner kernel {func.__name__} has conflicting value {v2} from when it was first compiled.  This is not allowed."
+                )
+        self.used_global_vals.update(func.used_global_vals)
+        # update hash
+        func_key = func.cache_key
+        func_key += str(getattr(func, "noinline", False))
+        self.hasher.update(func_key.encode("utf-8"))
+
+    def record_reference(self, val, var_dict=None, name=None):
+        from ..language.core import constexpr
+
+        # Only keep track of "interesting" global variables, that non-evil users
+        # might change.  Don't consider functions, modules, builtins, etc.  This
+        # helps keep the list of vars we have to check small.
+        if val is None or type(val) is ModuleType:
+            return
+
+        if getattr(val, "__triton_aggregate__", False):
+            for attr in val.hash_attrs:
+                self.record_reference(attr)
+            return
+
+        if getattr(val, "__triton_builtin__", False):
+            return
+
+        # Stubs that aren't real functions
+        if getattr(val, "__module__", "") == "triton.language.extra.libdevice":
+            return
+
+        if isinstance(val, JITCallable):
+            self._update_hash(val)
+            return
+
+        if (
+            callable(val)
+            and not isinstance(val, type)
+            and not isinstance(val, constexpr)
+        ):
+            raise RuntimeError(f"Unsupported function referenced: {val}")
+
+        # Python default arguments are resolved only once, when the
+        # function is defined.  So if you do `foo(a=A)` and the value of
+        # A changes, foo will still use the old value of A.
+        # It would be pretty evil if someone did `import x` and then
+        # `x = blah`.
+        if self.visiting_arg_default_value:
+            return
+
+        if var_dict is not None:
+            self.used_global_vals[(name, id(var_dict))] = (copy.deepcopy(val), var_dict)
+        return
+
     def visit_Name(self, node):
-        if type(node.ctx) == ast.Store:
+        if type(node.ctx) is ast.Store:
             return node.id
 
         if node.id in self.local_names:
             # The global name is hidden by the local name.
             return None
 
-        val = self.globals.get(node.id, None)
+        def name_lookup(name):
+            val = self.globals.get(name, None)
+            if val is not None:
+                return val, self.globals
+            val = self.nonlocals.get(name, None)
+            if val is not None:
+                return val, self.nonlocals
+            return None, None
 
-        # Only keep track of "interesting" global variables, that non-evil users
-        # might change.  Don't consider functions, modules, builtins, etc.  This
-        # helps keep the list of vars we have to check small.
-        if (val is not None  #
-                # Python default arguments are resolved only once, when the
-                # function is defined.  So if you do `foo(a=A)` and the value of
-                # A changes, foo will still use the old value of A.
-                and not self.visiting_arg_default_value
-                # It would be pretty evil if someone did `import x` and then
-                # `x = blah`.
-                and type(val) != ModuleType
-                # It would be pretty evil if we used function `foo` inside of
-                # `bar` and then someone did `foo = baz`.
-                and not isinstance(val, JITFunction) and not getattr(val, "__triton_builtin__", False)  #
-                and node.id not in self.supported_python_builtins  #
-            ):
-            self.used_global_vals[(node.id, id(self.globals))] = (val, self.globals)
+        val, var_dict = name_lookup(node.id)
+        if node.id in self.supported_python_builtins:
+            return val
 
+        self.record_reference(val, var_dict, node.id)
         return val
 
     def visit_Tuple(self, node):
@@ -112,54 +210,12 @@ class DependenciesFinder(ast.NodeVisitor):
         lhs = self.visit(node.value)
         while isinstance(lhs, ast.Attribute):
             lhs = self.visit(lhs.value)
-        if lhs is None or (getattr(lhs, "__name__", "") == TRITON_MODULE):
+        lhs_name = getattr(lhs, "__name__", "")
+        if lhs is None or lhs_name in self.supported_modules:
             return None
-        return getattr(lhs, node.attr)
-
-    def visit_Call(self, node):
-
-        def is_triton_builtin(func):
-            if inspect.isbuiltin(node.func):
-                return True
-            module = getattr(func, "__module__", "")
-            return module.startswith(TRITON_MODULE)
-
-        func = self.visit(node.func)
-        assert func is None or is_triton_builtin(func) or isinstance(
-            func, JITFunction
-        ), f'Function "{func.__name__}" is being called from a Triton function but is not a Triton function itself. Decorate it with @triton.jit to fix this'
-
-        # Traverse arguments as well as node.func so we can find JITFunctions
-        # passed to tl.reduce or tl.associative_scan as the combine_fn
-        for obj in itertools.chain(
-            (func, ),
-                map(self.visit, node.args),
-            (self.visit(kw.value) for kw in node.keywords),
-        ):
-            if not isinstance(obj, JITFunction):
-                continue
-            if is_triton_builtin(obj):
-                continue
-
-            func_cache_key = obj.cache_key
-
-            # Merge our used_global_vals with those of the called function,
-            # after checking that all overlapping values are consistent.
-            for k in self.used_global_vals.keys() & obj.used_global_vals.keys():
-                var_name, _ = k
-                v1, _ = self.used_global_vals[k]
-                v2, _ = obj.used_global_vals[k]
-                if v1 != v2:
-                    raise RuntimeError(
-                        f"Global variable {var_name} has value {v1} when compiling {self.name}, but inner kernel {func.__name__} has conflicting value {v2} from when it was first compiled.  This is not allowed."
-                    )
-
-            self.used_global_vals.update(obj.used_global_vals)
-
-            noinline = str(getattr(obj, "noinline", False))
-
-            key = func_cache_key + noinline
-            self.hasher.update(key.encode("utf-8"))
+        ret = getattr(lhs, node.attr)
+        self.record_reference(ret)
+        return ret
 
     def visit_FunctionDef(self, node):
         # Save the local name, which may hide the global name.
@@ -188,7 +244,12 @@ class DependenciesFinder(ast.NodeVisitor):
             finally:
                 self.visiting_arg_default_value = False
 
-        for arg in itertools.chain(node.posonlyargs, node.args, [node.vararg] if node.vararg else [], node.kwonlyargs):
+        for arg in itertools.chain(
+            node.posonlyargs,
+            node.args,
+            [node.vararg] if node.vararg else [],
+            node.kwonlyargs,
+        ):
             self.visit(arg)
 
         visit_defaults(node.kw_defaults)
@@ -239,40 +300,69 @@ class DependenciesFinder(ast.NodeVisitor):
 
 
 def _normalize_ty(ty) -> str:
-    if isinstance(ty, type):
-        return ty.__name__
-    elif isinstance(ty, str):
-        return ty
-    return repr(ty)
+    import triton.language.core as core
+
+    if isinstance(ty, str):
+        ty = ty.strip()
+        if ty.startswith("const "):
+            ty = ty.removeprefix("const")
+            ty = _normalize_ty(ty)
+            assert ty.startswith("*")
+            return "*k" + ty[1:]
+        if ty.endswith("*"):
+            return "*" + _normalize_ty(ty[:-1])
+        if ty.startswith("*"):
+            return "*" + _normalize_ty(ty[1:])
+        if ty.startswith("tl."):
+            return _normalize_ty(ty.removeprefix("tl."))
+    elif isinstance(ty, core.pointer_type):
+        return f"*{_normalize_ty(ty.element_ty)}"
+    elif isinstance(ty, core.dtype):
+        ty = ty.name
+    elif isinstance(ty, type):
+        ty = ty.__name__
+    else:
+        ty = str(ty)
+    return type_canonicalisation_dict.get(ty.replace("_t", ""), ty)
 
 
 class KernelParam:
     """Represents a parameter (name plus metadata) to a @jit'ed function."""
 
-    def __init__(self, num: int, param: inspect.Parameter, do_not_specialize: bool):
+    def __init__(
+        self,
+        num: int,
+        param: inspect.Parameter,
+        do_not_specialize: bool,
+        do_not_specialize_on_alignment: bool,
+    ):
         self.num = num
         self._param = param
         self.do_not_specialize = do_not_specialize
+        self.do_not_specialize_on_alignment = do_not_specialize_on_alignment
 
     @cached_property
     def name(self):
         return self._param.name
 
     @cached_property
-    def annotation(self):
-        if not self._param.annotation or self._param.annotation == inspect.Parameter.empty:
+    def annotation(self) -> str:
+        if (
+            not self._param.annotation
+            or self._param.annotation == inspect.Parameter.empty
+        ):
             return ""
         return _normalize_ty(self._param.annotation)
 
     @cached_property
-    def annotation_type(self):
-        annotation = self.annotation
-        for ty1, ty2 in [("uint", 'u'), ("int", 'i')]:
-            width = annotation[annotation.find(ty1) + len(ty1):]
-            if width and ty1 in annotation:
-                return f"{ty2}{width}"
-        if annotation == "bool":
-            return "u1"
+    def annotation_type(self) -> str:
+        a = self.annotation
+        if a.startswith("*k"):
+            a = a[2:]
+        elif a.startswith("*"):
+            a = a[1:]
+        if a in set(type_canonicalisation_dict.values()):
+            return self.annotation
         return ""
 
     @cached_property
@@ -281,7 +371,9 @@ class KernelParam:
 
     @cached_property
     def is_const(self):
-        return "const" in self.annotation and not self.is_constexpr
+        if self.is_constexpr:
+            return False
+        return "const" in self.annotation or self.annotation.startswith("*k")
 
     @property
     def default(self):
@@ -292,49 +384,22 @@ class KernelParam:
         return self._param.default != inspect.Parameter.empty
 
 
-def compute_spec_key(v):
-
-    if hasattr(v, "data_ptr") and (v.data_ptr() % 16 == 0):
-        return "D"
-    elif isinstance(v, int):
-        # bool is a subclass of int, so we don't check explicitly above.
-        if (v % 16 == 0):
-            return "D"
-        elif v == 1:
-            return "1"
-    return "N"
-
-
-dtype2str = {}
-
-
-def mangle_type(arg, is_const=False):
-
-    if arg is None:
-        return "none"
-    elif isinstance(arg, bool):
-        return "i1"
-    elif isinstance(arg, int):
-        if -(2**31) <= arg and arg <= 2**31 - 1:
-            return "i32"
-        elif 2**63 <= arg and arg <= 2**64 - 1:
-            return "u64"
-        else:
-            return "i64"
-    elif isinstance(arg, float):
-        return "fp32"
-    else:
-        # dtypes are hashable so we can memoize this mapping:
-        dsk = (arg.dtype, is_const)
-        res = dtype2str.get(dsk, None)
-        if res is None:
-            res = ("*k" if dsk[1] else "*") + type_canonicalisation_dict[str(dsk[0]).split('.')[-1]]
-            dtype2str[dsk] = res
-        return res
+def mangle_type(arg, specialize=False):
+    is_const = False
+    align = True
+    return native_specialize_impl(BaseBackend, arg, is_const, specialize, align)[0]
 
 
 class KernelInterface(Generic[T]):
     run: T
+
+    def warmup(self, *args, grid, **kwargs):
+        return self.run(
+            grid=grid, warmup=True, *map(MockTensor.wrap_dtype, args), **kwargs
+        )
+
+    def run(self, *args, grid, warmup, **kwargs):
+        raise NotImplementedError("run not implemented")
 
     def __getitem__(self, grid) -> T:
         """
@@ -342,68 +407,83 @@ class KernelInterface(Generic[T]):
         Hence JITFunction.__getitem__ returns a callable proxy that
         memorizes the grid.
         """
-        return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+        return lambda *args, **kwargs: self.run(
+            grid=grid, warmup=False, *args, **kwargs
+        )
         # return cast(T, functools.partial(cast(Callable, self.run), grid=grid))
 
 
 def serialize_specialization_data(name, signature, constants, attrs, options, key):
-    constants = {key: str(value) if value.__class__.__name__ == "dtype" else value for key, value in constants.items()}
+    constants = {
+        key: str(value)
+        if value.__class__.__name__ == "dtype"
+        else {"constexpr": value.value}
+        if value.__class__.__name__ == "constexpr"
+        else value
+        for key, value in constants.items()
+    }
+
     import json
+
     obj = {
-        'name': name, 'signature': signature, 'constants': constants, 'attrs': attrs.to_dict(), 'options':
-        options.__dict__, 'key': key
+        "name": name,
+        "signature": signature,
+        "constant_keys": [list(x) for x in constants.keys()],
+        "constant_vals": list(constants.values()),
+        "attrs_keys": [list(x) for x in attrs.keys()],
+        "attrs_vals": list(attrs.values()),
+        "options": options.__dict__,
+        "key": key,
     }
     serialized_obj = json.dumps(obj)
     return serialized_obj
 
 
-def create_function_from_signature(sig, kparams):
+def create_function_from_signature(sig, kparams, backend):
     """
     Equivalent to sig.bind followed by apply_defaults. This generates a
     native Python function (using exec) which can be memoized on a per-kernel
     basis to avoid having to run these expensive functions -- which constitute
     much of the kernel launch overhead -- every time we run the kernel.
     """
-
     assert len(sig.parameters) == len(kparams)
-
     # Create the function argument list and the dict entries for the return statement
-    func_args = []
-    dict_entries = []
-    constexpr_vals = []
-    non_constexpr_vals = []
-    signature_types = []
-    specialisations = []
-
-    for ((name, sp), kp) in zip(sig.parameters.items(), kparams):
-        if sp.default is inspect.Parameter.empty:
-            func_args.append(name)
-            dict_entries.append(f"'{name}': {name}")
-        else:
-            func_args.append(f"{name}=default_{name}")
-            dict_entries.append(f"'{name}': {name}")
+    specialization = []
+    # signature
+    for name, kp in zip(sig.parameters.keys(), kparams):
         if kp.is_constexpr:
-            constexpr_vals.append(name)
+            specialization.append(f'("constexpr", {name})')
         else:
-            non_constexpr_vals.append(name)
-            if not kp.do_not_specialize:
-                specialisations.append('compute_spec_key(%s)' % name)
+            is_const = "True" if kp.is_const else "False"
+            specialize = "False" if kp.do_not_specialize else "True"
+            align = "False" if kp.do_not_specialize_on_alignment else "True"
+            ret = f"specialize_impl(backend, {name}, {is_const}, {specialize}, {align})"
             if kp.annotation_type:
-                signature_types.append('"%s"' % kp.annotation_type)
+                if isinstance(kp.annotation_type, str):
+                    if kp.annotation_type == "u1" or kp.annotation_type[:2] in [
+                        "fp",
+                        "bf",
+                    ]:
+                        # we do not specialize non-constexpr floats and bools:
+                        specialize = False
+                if specialize:
+                    specialization.append(f'("{kp.annotation_type}",) + {ret}[1:]')
+                else:
+                    # skip runtime specialization:
+                    specialization.append(f'("{kp.annotation_type}", None)')
             else:
-                signature_types.append('mangle_type(%s, %s)' % (name, 'True' if kp.is_const else 'False'))
+                specialization.append(f"{ret}")
 
-    cache_key = ''.join([x + ', ' for x in signature_types + specialisations])
-    constexpr_vals = ''.join([x + ', ' for x in constexpr_vals])
-    non_constexpr_vals = ''.join([x + ', ' for x in non_constexpr_vals])
-
-    func_args.append('**excess_kwargs')
-
-    # Join all arguments into a function definition string
-    args_str = ', '.join(func_args)
-    dict_str = ', '.join(dict_entries)
-    func_body = "def dynamic_func(%s):\n    return {%s}, (%s), (%s), (%s), excess_kwargs" % (
-        args_str, dict_str, cache_key, constexpr_vals, non_constexpr_vals)
+    # compute argument string for a given parameter
+    arg = lambda x: (
+        x[0] if x[1].default is inspect.Parameter.empty else f"{x[0]}=default_{x[0]}"
+    )
+    func_body = f"""
+def dynamic_func({", ".join(list(map(arg, sig.parameters.items())) + ["**options"])}):
+    params = {{{", ".join([f"'{name}': {name}" for name in sig.parameters.keys()])}}}
+    specialization = [{",".join(specialization)}]
+    return params, specialization, options
+"""
 
     # Prepare defaults to be inserted into function namespace
     func_namespace = {
@@ -412,311 +492,37 @@ def create_function_from_signature(sig, kparams):
         if param.default is not inspect.Parameter.empty
     }
 
-    func_namespace['mangle_type'] = mangle_type
-    func_namespace['compute_spec_key'] = compute_spec_key
+    specialize_impl = native_specialize_impl
+    func_namespace["specialize_impl"] = specialize_impl
+    func_namespace["backend"] = backend
+    func_namespace["JITCallable"] = JITCallable
 
     # Execute the function string in func_namespace to create the function
     exec(func_body, func_namespace)
 
     # Extract the newly created function from the namespace
-    return func_namespace['dynamic_func']
+    return func_namespace["dynamic_func"]
 
 
-type_canonicalisation_dict = {
-    "bool": "i1",
-    "float8e4nv": "fp8e4nv",
-    "float8e5": "fp8e5",
-    "float8e4b15": "fp8e4b15",
-    "float8_e4m3fn": "fp8e4nv",
-    "float8e4b8": "fp8e4b8",
-    "float8_e4m3fnuz": "fp8e4b8",
-    "float8_e5m2": "fp8e5",
-    "float8e5b16": "fp8e5b16",
-    "float8_e5m2fnuz": "fp8e5b16",
-    "float16": "fp16",
-    "bfloat16": "bf16",
-    "float32": "fp32",
-    "float64": "fp64",
-    "int8": "i8",
-    "int16": "i16",
-    "int32": "i32",
-    "int64": "i64",
-    "uint8": "u8",
-    "uint16": "u16",
-    "uint32": "u32",
-    "uint64": "u64",
-}
-
-for v in list(type_canonicalisation_dict.values()):
-    type_canonicalisation_dict[v] = v
+def get_full_name(fn):
+    return f"{fn.__module__}.{fn.__qualname__}"
 
 
-class JITFunction(KernelInterface[T]):
-    # Hook for inspecting compiled functions and modules
-    cache_hook = None
-    divisibility = 16
-
-    @staticmethod
-    def _key_of(arg):
-        if hasattr(arg, "dtype"):
-            return arg.dtype
-        elif isinstance(arg, bool):
-            return "i1"
-        elif isinstance(arg, int):
-            if -(2**31) <= arg and arg <= 2**31 - 1:
-                return "i32"
-            elif 2**63 <= arg and arg <= 2**64 - 1:
-                return "u64"
-            else:
-                return "i64"
-        elif isinstance(arg, float):
-            return "fp32"
-        elif arg is None:
-            return None
-        else:
-            raise TypeError(f"Unsupported type {type(arg)} for {arg}")
-
-    @staticmethod
-    def _spec_of(arg):
-        if hasattr(arg, "data_ptr"):
-            return arg.data_ptr() % JITFunction.divisibility == 0
-        elif isinstance(arg, int):
-            return (arg % 16 == 0, arg == 1)
-        return (arg is None, )
-
-    def _get_config(self, *args):
-        from ..compiler import AttrsDescriptor
-
-        def is_divisible_by_16(x):
-            if hasattr(x, "data_ptr"):
-                return x.data_ptr() % JITFunction.divisibility == 0
-            elif isinstance(x, int):
-                return x % JITFunction.divisibility == 0
-            if x is None:
-                return True
-            return False
-
-        divisible_by_16 = {
-            param.num
-            for param, arg in zip(self.params, args)
-            if is_divisible_by_16(arg) and not param.do_not_specialize
-        }
-        equal_to_1 = {
-            param.num
-            for param, arg in zip(self.params, args)
-            if isinstance(arg, int) and not isinstance(arg, bool) and arg == 1 and not param.do_not_specialize
-        }
-        # folded equal_to_1 and None
-        # TODO: method to collect all folded args
-        return AttrsDescriptor(tuple(divisible_by_16), tuple(equal_to_1))
-        # return _triton.code_gen.instance_descriptor(divisible_by_16,
-        # equal_to_1)
-
-    @staticmethod
-    def _type_of(key, is_const=False):
-        # `None` is nullptr.  Implicitly convert to *i8.
-        if key is None:
-            return "*i8"
-        elif isinstance(key, str):
-            return key
-
-        dtype_str = str(key).split(".")[-1]
-        dtype_str = type_canonicalisation_dict[dtype_str]
-        const_str = "*k" if is_const else "*"
-        return const_str + dtype_str
-
-    def _make_constants(self, constexpr_key):
-        constants = dict(zip(self.constexprs, constexpr_key))
-        return constants
-
-    def _call_hook(
-        self,
-        key,
-        signature,
-        device,
-        constants,
-        options,
-        configs,
-    ):
-        if JITFunction.cache_hook is None:
-            return False
-
-        name = self.fn.__name__
-        module = self.fn.__module__
-        arg_reprs = ", ".join([f"{param.name}: {ty}" for param, ty in zip(self.params, key[1])])
-        repr = f"{name}[num_warps={options.num_warps}, num_ctas={options.num_ctas}, num_stages={options.num_stages}, enable_fp_fusion={options.enable_fp_fusion}]({arg_reprs})"
-
-        class JitFunctionInfo:
-
-            def __init__(self, module, name, jit_function):
-                self.module = module
-                self.name = name
-                self.jit_function = jit_function
-                pass
-
-        specialization_data = serialize_specialization_data(name, signature, constants, configs[0], options, key)
-
-        kwargs = {
-            'signature': signature,
-            'device': device,
-            'constants': constants,
-            'num_warps': options.num_warps,
-            'num_ctas': options.num_ctas,
-            'num_stages': options.num_stages,
-            'enable_fp_fusion': options.enable_fp_fusion,
-            'extern_libs': options.extern_libs,
-            'configs': configs,
-            'specialization_data': specialization_data,
-        }
-
-        return JITFunction.cache_hook(
-            key=key,
-            repr=repr,
-            fn=JitFunctionInfo(module, name, self),
-            compile={"key": key, **kwargs},
-            is_manual_warmup=False,
-            already_compiled=False,
-        )
-
-    def add_pre_run_hook(self, hook):
-        '''
-        Add a hook that will be executed prior to the execution of run
-        function with args and kwargs passed into the kernel
-        '''
-        assert callable(hook)
-        self.pre_run_hooks.append(hook)
-
-    def create_binder(self):
-        """
-        Precompute as much as possible.
-        """
-        from ..compiler import CompiledKernel, compile, ASTSource, make_backend
-        self.CompiledKernel = CompiledKernel
-        self.compile = compile
-        self.ASTSource = ASTSource
-        self.make_backend = make_backend
-        self.binder = create_function_from_signature(self.signature, self.params)
-        self.constexpr_indices = [i for (i, p) in enumerate(self.params) if p.is_constexpr]
-        self.non_constexpr_indices = [i for (i, p) in enumerate(self.params) if not p.is_constexpr]
-        self.specialised_indices = [
-            i for (i, p) in enumerate(self.params) if (not p.do_not_specialize) and (not p.is_constexpr)
-        ]
-
-    def run(self, *args, grid, warmup, **kwargs):
-        # parse options
-        device = driver.active.get_current_device()
-        stream = driver.active.get_current_stream(device)
-        kwargs["debug"] = self.debug
-
-        # Execute pre run hooks with args and kwargs
-        for hook in self.pre_run_hooks:
-            hook(*args, **kwargs)
-
-        if self.binder is None:
-            self.create_binder()
-
-        bound_args, sig_and_spec, constexpr_vals, non_constexpr_vals, excess_kwargs = self.binder(*args, **kwargs)
-
-        # compute cache key
-        key = ''.join(sig_and_spec) + str((constexpr_vals, excess_kwargs))
-        kernel = self.cache[device].get(key, None)
-
-        if kernel is None:
-            # Kernel is not cached; we have to compile.
-            target = driver.active.get_current_target()
-            backend = self.make_backend(target)
-            options = backend.parse_options(kwargs)
-
-            # deprecated arguments
-            assert "device_type" not in kwargs, "device_type option is deprecated; current target will be used"
-            assert "device" not in kwargs, "device option is deprecated; current device will be used"
-            assert "stream" not in kwargs, "stream option is deprecated; current stream will be used"
-            for k in excess_kwargs:
-                if k not in options.__dict__:
-                    raise KeyError("Keyword argument %s was specified but unrecognised" % k)
-
-            bound_vals = tuple(bound_args.values())
-
-            # `None` is nullptr. Implicitly convert to *i8. This needs to be
-            # done here rather than when we build the signature as otherwise
-            # the kernel cache key could not distinguish between byte pointers
-            # and None arguments, resulting in a downstream mismatch:
-            sigkeys = [self.params[i].name for i in self.non_constexpr_indices]
-            sigvals = sig_and_spec[:len(sigkeys)]
-            signature = {k: ('*i8' if (v == 'none') else v) for (k, v) in zip(sigkeys, sigvals)}
-
-            configs = (self._get_config(*bound_vals), )
-            constants = {
-                p.name: v
-                for (v, p) in zip(bound_vals, self.params)
-                if p.is_constexpr or p.num in configs[0].equal_to_1 or v is None
-            }
-            for i, arg in constants.items():
-                if callable(arg):
-                    raise TypeError(f"Callable constexpr at index {i} is not supported")
-
-            if self._call_hook(key, signature, device, constants, options, configs):
-                return None
-            # compile the kernel
-            src = self.ASTSource(self, signature, constants, configs[0])
-            kernel = self.compile(
-                src,
-                target=target,
-                options=options.__dict__,
-            )
-            self.cache[device][key] = kernel
-
-        # Check that used global values have not changed.
-        not_present = object()
-        for (name, globals_dict_id), (val, globals_dict) in self.used_global_vals.items():
-            if (newVal := globals_dict.get(name, not_present)) != val:
-                raise RuntimeError(
-                    f"Global variable {name} has changed since we compiled this kernel, from {val} to {newVal}")
-
-        if not warmup:
-            # canonicalize grid
-            assert grid is not None
-            if callable(grid):
-                # Arguments are passed as a dict to `grid`, by contract.
-                # TODO(jlebar): In the new launch API, pass the compiler flags as a
-                # second parameter to `grid`.
-                grid = grid(bound_args)
-            grid_size = len(grid)
-            grid_0 = grid[0]
-            grid_1 = grid[1] if grid_size > 1 else 1
-            grid_2 = grid[2] if grid_size > 2 else 1
-
-            # launch kernel
-            launch_metadata = kernel.launch_metadata(grid, stream, *non_constexpr_vals)
-            kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
-                       self.CompiledKernel.launch_enter_hook, self.CompiledKernel.launch_exit_hook, *non_constexpr_vals)
-        return kernel
-
-    def __init__(self, fn, version=None, do_not_specialize=None, debug=None, noinline=None, repr=None,
-                 launch_metadata=None):
-        do_not_specialize = do_not_specialize if do_not_specialize else []
-
+class JITCallable:
+    def __init__(self, fn):
         self.fn = fn
-        self.module = fn.__module__
-        self.version = version
         self.signature = inspect.signature(fn)
-        self.do_not_specialize = do_not_specialize
-        self.starting_line_number = inspect.getsourcelines(fn)[1]
-        self.repr = lambda _: fn.__name__ if repr is None else repr(_)
-        self.launch_metadata = launch_metadata
-
-        self.binder = None
-
-        self.params = []
-        for i, param in enumerate(self.signature.parameters.values()):
-            dns = do_not_specialize and (i in do_not_specialize or param.name in do_not_specialize)
-            self.params.append(KernelParam(i, param, dns))
+        try:
+            self.raw_src, self.starting_line_number = inspect.getsourcelines(fn)
+        except OSError as e:
+            raise ValueError("@jit functions should be defined in a Python file") from e
+        self._fn_name = get_full_name(fn)
+        self._hash_lock = threading.RLock()
 
         # function source code (without decorators)
-        self.src = textwrap.dedent(inspect.getsource(fn))
-        self.src = self.src[re.search(r"^def\s+\w+\s*\(", self.src, re.MULTILINE).start():]
-        # cache of just-in-time compiled kernels
-        self.cache = defaultdict(dict)
+        src = textwrap.dedent("".join(self.raw_src))
+        src = src[re.search(r"^def\s+\w+\s*\(", src, re.MULTILINE).start() :]
+        self._src = src
         self.hash = None
 
         # Map of global variables used by the function and any functions it
@@ -730,10 +536,372 @@ class JITFunction(KernelInterface[T]):
         # (value, __globals__).
         self.used_global_vals: Dict[Tuple[str, int], Tuple[Any, Dict[str, Any]]] = {}
 
+        # reuse docs of wrapped function
+        self.__doc__ = fn.__doc__
+        self.__name__ = fn.__name__
+        self.__qualname__ = fn.__qualname__
+        self.__globals__ = fn.__globals__
+        self.__module__ = fn.__module__
+
+    def get_capture_scope(self):
+        fn = self.fn
+        if fn.__closure__ is None:
+            return self.__globals__
+        nonlocals = {
+            name: cell.cell_contents
+            for name, cell in zip(fn.__code__.co_freevars, fn.__closure__)
+        }
+        return self.__globals__ | nonlocals
+
+    @property
+    def cache_key(self) -> str:
+        # TODO : hash should be attribute of `self`
+        with self._hash_lock:
+            if self.hash is not None:
+                return self.hash
+            # Set a placeholder hash to break recursion in case the function
+            # transitively calls itself. The full hash is set after.
+            self.hash = f"recursion:{self._fn_name}"
+            nonlocals = inspect.getclosurevars(self.fn).nonlocals
+            dependencies_finder = DependenciesFinder(
+                name=self._fn_name,
+                globals=self.__globals__,
+                nonlocals=nonlocals,
+                src=self.src,
+            )
+            dependencies_finder.visit(self.parse())
+            self.hash = dependencies_finder.ret + str(self.starting_line_number)
+            self.used_global_vals = dict(
+                sorted(dependencies_finder.used_global_vals.items())
+            )
+
+            from triton.language.core import constexpr
+
+            self.hash += str(
+                [
+                    (name, val)
+                    for (name, _), (val, _) in self.used_global_vals.items()
+                    if isinstance(val, constexpr)
+                ]
+            )
+            self.hash = hashlib.sha256(self.hash.encode("utf-8")).hexdigest()
+        return self.hash
+
+    def __hash__(self):
+        return hash(self.cache_key)
+
+    # we do not parse `src` in the constructor because
+    # the user might want to monkey-patch self.src dynamically.
+    # Our unit tests do this, for example.
+    def parse(self):
+        tree = ast.parse(self._src)
+        assert isinstance(tree, ast.Module)
+        assert len(tree.body) == 1
+        assert isinstance(tree.body[0], ast.FunctionDef)
+        return tree
+
+    @property
+    def type(self):
+        from triton.language.core import constexpr_type
+
+        return constexpr_type(self)
+
+    def _flatten_ir(self, handles: list[ir.value]) -> None:
+        pass
+
+    def _unsafe_update_src(self, new_src):
+        """
+        The only method allowed to modify src.
+        Bypasses the __setattr__ restriction by calling super().__setattr__ directly.
+
+        Note that it is the callers responsibility to make sure any triton functions that call this function have the `.hash` value reset to None.
+        """
+        self.hash = None
+        self._src = new_src
+
+    def _set_src(self):
+        raise AttributeError(
+            "Cannot set attribute 'src' directly. "
+            "Use '_unsafe_update_src()' and manually clear `.hash` of all callers"
+            "instead."
+        )
+
+    def _get_src(self):
+        return self._src
+
+    src = property(fget=_get_src, fset=_set_src)
+
+
+@dataclass
+class JitFunctionInfo:
+    module: ModuleType
+    name: str
+    jit_function: JITFunction
+
+
+def compute_cache_key(kernel_key_cache, specialization, options):
+    key = (tuple(specialization), str(options))
+    cache_key = kernel_key_cache.get(key, None)
+    if cache_key is not None:
+        return cache_key
+
+    # Replace JITCallable objects with their hash, so the cache key will change if the src is updated
+    def replace_callables(obj):
+        if isinstance(obj, list):
+            return [replace_callables(arg) for arg in obj]
+        elif is_namedtuple(obj):
+            results = [replace_callables(arg) for arg in obj]
+            return obj.__class__(*results)
+        elif isinstance(obj, tuple):
+            return tuple(replace_callables(arg) for arg in obj)
+        elif isinstance(obj, JITCallable):
+            return obj.cache_key
+        return obj
+
+    cache_key = str(replace_callables(specialization)) + str(options)
+    kernel_key_cache[key] = cache_key
+    return cache_key
+
+
+def convert_to_tuple_if_list(item):
+    # If the incoming item is a list, recursively iterate through it to convert all lists therein into tuples
+    if not isinstance(item, list):
+        return item
+
+    # The value must be a list at this point
+    for i, nested_value in enumerate(item):
+        item[i] = convert_to_tuple_if_list(nested_value)
+
+    return tuple(item)
+
+
+class JITFunction(JITCallable, KernelInterface[T]):
+    def is_gluon(self):
+        return False
+
+    def _call_hook(
+        self,
+        hook,
+        key,
+        signature,
+        device,
+        constants,
+        options,
+        configs,
+        is_warmup,
+    ) -> bool | None:
+        if not hook:
+            return None
+
+        name = self.fn.__qualname__
+        module = self.fn.__module__
+        arg_reprs = ", ".join(
+            [f"{param.name}: {ty}" for param, ty in zip(self.params, key[1])]
+        )
+        repr = f"{name}[num_warps={options.num_warps}, num_ctas={options.num_ctas}, num_stages={options.num_stages}, enable_fp_fusion={options.enable_fp_fusion}, launch_cooperative_grid={options.launch_cooperative_grid}]({arg_reprs})"
+        full_name = get_full_name(self.fn)
+
+        specialization_data = serialize_specialization_data(
+            full_name, signature, constants, configs[0], options, key
+        )
+
+        kwargs = {
+            "signature": signature,
+            "device": device,
+            "constants": constants,
+            "num_warps": options.num_warps,
+            "num_ctas": options.num_ctas,
+            "num_stages": options.num_stages,
+            "enable_fp_fusion": options.enable_fp_fusion,
+            "launch_cooperative_grid": options.launch_cooperative_grid,
+            "extern_libs": options.extern_libs,
+            "configs": configs,
+            "specialization_data": specialization_data,
+            "is_warmup": is_warmup,
+        }
+
+        return hook(
+            key=key,
+            repr=repr,
+            fn=JitFunctionInfo(module, name, self),
+            compile={"key": key, **kwargs},
+            is_manual_warmup=is_warmup,
+            already_compiled=False,
+        )
+
+    def add_pre_run_hook(self, hook):
+        """
+        Add a hook that will be executed prior to the execution of run
+        function with args and kwargs passed into the kernel
+        """
+        assert callable(hook)
+        self.pre_run_hooks.append(hook)
+
+    def create_binder(self):
+        """
+        Precompute as much as possible.
+        """
+        from ..compiler import CompiledKernel, compile, ASTSource, make_backend
+
+        target = driver.active.get_current_target()
+        backend = make_backend(target)
+        self.CompiledKernel = CompiledKernel
+        self.compile = compile
+        self.ASTSource = ASTSource
+        binder = create_function_from_signature(self.signature, self.params, backend)
+        return {}, {}, target, backend, binder
+
+    def _pack_args(self, backend, kwargs, bound_args, specialization, options):
+        # options
+        options = backend.parse_options(kwargs)
+        # signature
+        sigkeys = [x.name for x in self.params]
+        sigvals = [x[0] for x in specialization]
+        signature = {k: v for (k, v) in zip(sigkeys, sigvals)}
+        # check arguments
+        assert "device_type" not in kwargs, (
+            "device_type option is deprecated; current target will be used"
+        )
+        assert "device" not in kwargs, (
+            "device option is deprecated; current device will be used"
+        )
+        assert "stream" not in kwargs, (
+            "stream option is deprecated; current stream will be used"
+        )
+        for k in kwargs:
+            if k not in options.__dict__ and k not in sigkeys:
+                raise KeyError("Keyword argument %s was specified but unrecognised" % k)
+        # constexprs
+        constexprs = find_paths_if(sigvals, lambda _, val: val == "constexpr")
+        constexprs = {
+            path: get_iterable_path(list(bound_args.values()), path)
+            for path in constexprs
+        }
+        # attributes
+        attrvals = [x[1] for x in specialization]
+        attrs = find_paths_if(attrvals, lambda _, x: isinstance(x, str))
+        attrs = {k: backend.parse_attr(get_iterable_path(attrvals, k)) for k in attrs}
+
+        return options, signature, constexprs, attrs
+
+    def run(self, *args, grid, warmup, **kwargs):
+        kwargs["debug"] = kwargs.get("debug", self.debug) or knobs.runtime.debug
+        kwargs["instrumentation_mode"] = knobs.compilation.instrumentation_mode
+
+        # parse options
+        device = driver.active.get_current_device()
+        stream = driver.active.get_current_stream(device)
+
+        # Execute pre run hooks with args and kwargs
+        for hook in self.pre_run_hooks:
+            hook(*args, **kwargs)
+
+        kernel_cache, kernel_key_cache, target, backend, binder = self.device_caches[
+            device
+        ]
+        # specialization is list[tuple[str, Any]], where first element of tuple is
+        # the type and the second parameter is the 'specialization' value.
+        bound_args, specialization, options = binder(*args, **kwargs)
+
+        # add a cache field to the kernel specializations for kernel specific
+        # pass pipelines
+        if knobs.runtime.add_stages_inspection_hook is not None:
+            inspect_stages_key, inspect_stages_hash = (
+                knobs.runtime.add_stages_inspection_hook()
+            )
+            specialization.append(f'("custom_pipeline", {inspect_stages_hash})')
+
+        key = compute_cache_key(kernel_key_cache, specialization, options)
+        kernel = kernel_cache.get(key, None)
+
+        # Kernel is not cached; we have to compile.
+        if kernel is None:
+            options, signature, constexprs, attrs = self._pack_args(
+                backend, kwargs, bound_args, specialization, options
+            )
+
+            kernel = self._do_compile(
+                key, signature, device, constexprs, options, attrs, warmup
+            )
+            if kernel is None:
+                return None
+
+        # Check that used global values have not changed.
+        not_present = object()
+        for (name, _), (val, globals_dict) in self.used_global_vals.items():
+            if (newVal := globals_dict.get(name, not_present)) != val:
+                raise RuntimeError(
+                    f"Global variable {name} has changed since we compiled this kernel, from {val} to {newVal}"
+                )
+
+        if not warmup:
+            # canonicalize grid
+            assert grid is not None
+            if callable(grid):
+                grid = grid(bound_args)
+            grid_size = len(grid)
+            grid_0 = grid[0]
+            grid_1 = grid[1] if grid_size > 1 else 1
+            grid_2 = grid[2] if grid_size > 2 else 1
+            # launch kernel
+            launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+            kernel.run(
+                grid_0,
+                grid_1,
+                grid_2,
+                stream,
+                kernel.function,
+                kernel.packed_metadata,
+                launch_metadata,
+                knobs.runtime.launch_enter_hook,
+                knobs.runtime.launch_exit_hook,
+                *bound_args.values(),
+            )
+        return kernel
+
+    def repr(self, _):
+        return self._fn_name if self._repr is None else self._repr(_)
+
+    def __init__(
+        self,
+        fn,
+        version=None,
+        do_not_specialize=None,
+        do_not_specialize_on_alignment=None,
+        debug=None,
+        noinline=None,
+        repr=None,
+        launch_metadata=None,
+    ):
+        do_not_specialize = do_not_specialize if do_not_specialize else []
+        do_not_specialize_on_alignment = (
+            do_not_specialize_on_alignment if do_not_specialize_on_alignment else []
+        )
+
+        super().__init__(fn)
+        self.module = fn.__module__
+        self.version = version
+        self.do_not_specialize = do_not_specialize
+        self.do_not_specialize_on_alignment = do_not_specialize_on_alignment
+        self._repr = repr
+        self.launch_metadata = launch_metadata
+
+        self.params = []
+        for i, param in enumerate(self.signature.parameters.values()):
+            dns = i in do_not_specialize or param.name in do_not_specialize
+            dns_oa = (
+                i in do_not_specialize_on_alignment
+                or param.name in do_not_specialize_on_alignment
+            )
+            self.params.append(KernelParam(i, param, dns, dns_oa))
+
+        # cache of just-in-time compiled kernels
+        self.device_caches = defaultdict(self.create_binder)
+
         # JITFunction can be instantiated as kernel
         # when called with a grid using __getitem__
         self.kernel = None
-        self.debug = True if os.environ.get("TRITON_DEBUG", "0") == "1" else debug
+        self.debug = debug
         self.noinline = noinline
 
         # TODO(jlebar): Remove uses of these fields outside this file, then
@@ -744,71 +912,112 @@ class JITFunction(KernelInterface[T]):
         # Hooks that will be called prior to executing "run"
         self.pre_run_hooks = []
 
-        # reuse docs of wrapped function
-        self.__doc__ = fn.__doc__
-        self.__name__ = fn.__name__
-        self.__globals__ = fn.__globals__
-        self.__module__ = fn.__module__
-
-    @property
-    def cache_key(self):
-        # TODO : hash should be attribute of `self`
-        if self.hash is None:
-            dependencies_finder = DependenciesFinder(name=self.__name__, globals=self.__globals__, src=self.src)
-            dependencies_finder.visit(self.parse())
-            self.hash = dependencies_finder.ret + str(self.starting_line_number)
-            self.used_global_vals = dict(sorted(dependencies_finder.used_global_vals.items()))
-        return self.hash
-
-    def warmup(self, *args, grid, **kwargs):
-        return self.run(grid=grid, warmup=True, *map(MockTensor.wrap_dtype, args), **kwargs)
-
     def preload(self, specialization_data):
-        from ..compiler import AttrsDescriptor, compile, ASTSource
         import json
         import triton.language as tl
+
         device = driver.active.get_current_device()
         deserialized_obj = json.loads(specialization_data)
-        if deserialized_obj['name'] != self.fn.__name__:
+        if deserialized_obj["name"] != self._fn_name:
             raise RuntimeError(
-                f"Specialization data is for {deserialized_obj['name']} but trying to preload for {self.fn.__name__}")
-        constants = {
-            key: tl.dtype(value) if tl.dtype.is_dtype(value) else value
-            for key, value in deserialized_obj['constants'].items()
+                f"Specialization data is for {deserialized_obj['name']} but trying to preload for {self._fn_name}"
+            )
+        constant_keys = map(tuple, deserialized_obj["constant_keys"])
+        constant_vals = deserialized_obj["constant_vals"]
+        constexprs = {
+            key: tl.dtype(value)
+            if tl.dtype.is_dtype(value)
+            else tl.constexpr(value["constexpr"])
+            if isinstance(value, dict) and "constexpr" in value
+            else value
+            for key, value in zip(constant_keys, constant_vals)
         }
-        signature = dict(deserialized_obj['signature'].items())
-        src = ASTSource(self, signature, constants, AttrsDescriptor.from_dict(deserialized_obj['attrs']))
+        attrs_keys = map(tuple, deserialized_obj["attrs_keys"])
+        attrs_vals = deserialized_obj["attrs_vals"]
+        attrs = dict(zip(attrs_keys, attrs_vals))
+        # JSON serializes tuples as lists, so they need to be converted back;
+        # This can be done unconditionally, since lists are not accepted in Triton kernel signatures.
+        signature = {
+            key: convert_to_tuple_if_list(value)
+            for key, value in deserialized_obj["signature"].items()
+        }
         options = {
             key: tuple(value) if isinstance(value, list) else value
-            for key, value in deserialized_obj['options'].items()
+            for key, value in deserialized_obj["options"].items()
         }
-        key = deserialized_obj['key']
-        kernel = compile(src, None, options)
-        self.cache[device][key] = kernel
-        return kernel
+        key = deserialized_obj["key"]
+        _, _, _, backend, _ = self.device_caches[device]
+        options = backend.parse_options(options)
+        return self._do_compile(
+            key,
+            signature,
+            device,
+            constexprs,
+            options,
+            attrs,
+            warmup=True,
+        )
 
-    # we do not parse `src` in the constructor because
-    # the user might want to monkey-patch self.src dynamically.
-    # Our unit tests do this, for example.
-    def parse(self):
-        tree = ast.parse(self.src)
-        assert isinstance(tree, ast.Module)
-        assert len(tree.body) == 1
-        assert isinstance(tree.body[0], ast.FunctionDef)
-        return tree
+    def _do_compile(self, key, signature, device, constexprs, options, attrs, warmup):
+        kernel_cache, _, target, backend, _ = self.device_caches[device]
+
+        if self._call_hook(
+            knobs.runtime.jit_cache_hook,
+            key,
+            signature,
+            device,
+            constexprs,
+            options,
+            [attrs],
+            warmup,
+        ):
+            return None
+        src = self.ASTSource(self, signature, constexprs, attrs)
+
+        async_mode = _async_compile.active_mode.get()
+        if async_mode is not None:
+            env_vars = get_cache_invalidating_env_vars()
+            cache_key = get_cache_key(src, backend, options, env_vars)
+
+            def async_compile():
+                return self.compile(
+                    src, target=target, options=options.__dict__, _env_vars=env_vars
+                )
+
+            def finalize_compile(kernel):
+                kernel_cache[key] = kernel
+                self._call_hook(
+                    knobs.runtime.jit_post_compile_hook,
+                    key,
+                    signature,
+                    device,
+                    constexprs,
+                    options,
+                    [attrs],
+                    warmup,
+                )
+
+            kernel = async_mode.submit(cache_key, async_compile, finalize_compile)
+        else:
+            kernel = self.compile(src, target=target, options=options.__dict__)
+            kernel_cache[key] = kernel
+            self._call_hook(
+                knobs.runtime.jit_post_compile_hook,
+                key,
+                signature,
+                device,
+                constexprs,
+                options,
+                [attrs],
+                warmup,
+            )
+        return kernel
 
     def __call__(self, *args, **kwargs):
         raise RuntimeError("Cannot call @triton.jit'd outside of the scope of a kernel")
 
-    def __setattr__(self, name, value):
-        super(JITFunction, self).__setattr__(name, value)
-        # - when `.src` attribute is set, cache path needs
-        #   to be reinitialized
-        if name == "src":
-            self.hash = None
-
     def __repr__(self):
-        return f"JITFunction({self.module}:{self.fn.__name__})"
+        return f"JITFunction({self.module}:{self.fn.__qualname__})"
 
 
 # -----------------------------------------------------------------------------
@@ -817,8 +1026,7 @@ class JITFunction(KernelInterface[T]):
 
 
 @overload
-def jit(fn: T) -> JITFunction[T]:
-    ...
+def jit(fn: T) -> JITFunction[T]: ...
 
 
 @overload
@@ -827,11 +1035,11 @@ def jit(
     version=None,
     repr: Optional[Callable] = None,
     launch_metadata: Optional[Callable] = None,
-    do_not_specialize: Optional[Iterable[int]] = None,
+    do_not_specialize: Optional[Iterable[int | str]] = None,
+    do_not_specialize_on_alignment: Optional[Iterable[int | str]] = None,
     debug: Optional[bool] = None,
     noinline: Optional[bool] = None,
-) -> Callable[[T], JITFunction[T]]:
-    ...
+) -> Callable[[T], JITFunction[T]]: ...
 
 
 def jit(
@@ -840,10 +1048,11 @@ def jit(
     version=None,
     repr: Optional[Callable] = None,
     launch_metadata: Optional[Callable] = None,
-    do_not_specialize: Optional[Iterable[int]] = None,
+    do_not_specialize: Optional[Iterable[int | str]] = None,
+    do_not_specialize_on_alignment: Optional[Iterable[int | str]] = None,
     debug: Optional[bool] = None,
     noinline: Optional[bool] = None,
-) -> Union[JITFunction[T], Callable[[T], JITFunction[T]]]:
+) -> KernelInterface[T]:
     """
     Decorator for JIT-compiling a function using the Triton compiler.
 
@@ -864,14 +1073,25 @@ def jit(
 
     def decorator(fn: T) -> JITFunction[T]:
         assert callable(fn)
-        if os.getenv("TRITON_INTERPRET", "0") == "1":
+        if knobs.runtime.interpret:
             from .interpreter import InterpretedFunction
-            return InterpretedFunction(fn)
+
+            return InterpretedFunction(
+                fn,
+                version=version,
+                do_not_specialize=do_not_specialize,
+                do_not_specialize_on_alignment=do_not_specialize_on_alignment,
+                debug=debug,
+                noinline=noinline,
+                repr=repr,
+                launch_metadata=launch_metadata,
+            )
         else:
             return JITFunction(
                 fn,
                 version=version,
                 do_not_specialize=do_not_specialize,
+                do_not_specialize_on_alignment=do_not_specialize_on_alignment,
                 debug=debug,
                 noinline=noinline,
                 repr=repr,
@@ -902,16 +1122,28 @@ class MockTensor:
             return MockTensor(arg)
         return arg
 
-    def __init__(self, dtype):
+    def __init__(self, dtype, shape=None):
+        if shape is None:
+            shape = [1]
         self.dtype = dtype
+        self.shape = shape
+
+    def stride(self):
+        strides = [1]
+        for size in self.shape[1:]:
+            strides.append(strides[-1] * size)
+        return tuple(reversed(strides))
 
     @staticmethod
     def data_ptr():
         return 0  # optimistically assumes multiple of 16
 
+    @staticmethod
+    def ptr_range():
+        return 0  # optimistically assumes 32 bit pointer range
+
 
 class TensorWrapper:
-
     def __init__(self, base, dtype):
         self.dtype = dtype
         self.base = base
@@ -922,8 +1154,8 @@ class TensorWrapper:
     def data_ptr(self):
         return self.base.data_ptr()
 
-    def stride(self, i):
-        return self.base.stride(i)
+    def stride(self, *args):
+        return self.base.stride(*args)
 
     def __str__(self) -> str:
         return f"TensorWrapper[{self.dtype}]({self.base})"
@@ -937,8 +1169,14 @@ class TensorWrapper:
     def copy_(self, other):
         self.base.copy_(other.base)
 
+    def clone(self):
+        return TensorWrapper(self.base.clone(), self.dtype)
+
     def to(self, device):
         return TensorWrapper(self.base.to(device), self.dtype)
+
+    def new_empty(self, sizes):
+        return TensorWrapper(self.base.new_empty(sizes), self.dtype)
 
 
 def reinterpret(tensor, dtype):
@@ -954,3 +1192,73 @@ def reinterpret(tensor, dtype):
         return TensorWrapper(tensor, dtype)
     else:
         raise TypeError(f"Cannot reinterpret a {type(tensor)}.")
+
+
+def get_jit_fn_file_line(fn):
+    base_fn = fn
+    while not isinstance(base_fn, JITCallable):
+        base_fn = base_fn.fn
+    file_name = base_fn.fn.__code__.co_filename
+    begin_line = base_fn.starting_line_number
+    # Match the following pattern:
+    # @triton.autotune(...) <- foo.__code__.co_firstlineno
+    # @triton.heuristics(...)
+    # @triton.jit
+    # def foo(...): <- this line is the first line
+    for idx, line in enumerate(base_fn.raw_src):
+        if line.strip().startswith("def "):
+            begin_line += idx
+            break
+    return file_name, begin_line
+
+
+class BoundConstexprFunction(JITCallable):
+    def __init__(self, instance, fn):
+        self.__self__ = instance
+        self.__func__ = fn
+
+    @property
+    def cache_key(self):
+        return self.__func__.cache_key
+
+    def __call__(self, *args, **kwargs):
+        return self.__func__(self.__self__, *args, **kwargs)
+
+
+class ConstexprFunction(JITCallable):
+    def __init__(self, fn):
+        super().__init__(fn)
+
+    def __get__(self, obj, objclass):
+        # Create a bound function to support constexpr_function methods
+        if obj is not None:
+            return BoundConstexprFunction(obj, self)
+        return self
+
+    def __call__(self, *args, _semantic=None, **kwargs):
+        from triton.language.core import _unwrap_if_constexpr, constexpr
+
+        # de-constexpr arguments and discard the _semantic keyword argument:
+        args = [_unwrap_if_constexpr(x) for x in args]
+        kwargs = {k: _unwrap_if_constexpr(v) for (k, v) in kwargs.items()}
+
+        # call the raw Python function f:
+        res = self.fn(*args, **kwargs)
+
+        if _semantic is None:
+            # Not called by triton code generator, e.g. in host code, another constexpr function, or even an aggreate's __init__ function
+            return res
+
+        # convert result back to a Triton constexpr:
+        if knobs.runtime.interpret:
+            return res  # No constexpr in interpreter
+        return constexpr(res)
+
+
+def constexpr_function(fn):
+    """
+    Wraps an arbitrary Python function so that it can be called at
+    compile-time on constexpr arguments in a Triton function and
+    returns a constexpr result.
+    """
+    return ConstexprFunction(fn)

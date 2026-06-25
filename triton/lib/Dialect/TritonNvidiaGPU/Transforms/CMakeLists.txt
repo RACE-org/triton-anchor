@@ -1,15 +1,19 @@
 add_triton_library(TritonNvidiaGPUTransforms
-  FenceInsertion.cpp
-  PlanCTA.cpp
-  TMALowering.cpp
+  TMAUtilities.cpp
 
   DEPENDS
-  TritonNvidiaGPUTransformsIncGen
+  TritonTableGen
+  TritonGPUTableGen
+  TritonGPUCGAAttrIncGen
+  TritonGPUAttrDefsIncGen
+  TritonGPUTypeInterfacesIncGen
+  TritonGPUOpInterfacesIncGen
+  TritonNvidiaGPUTableGen
+  TritonNvidiaGPUAttrDefsIncGen
+  TritonNvidiaGPUOpInterfacesIncGen
 
   LINK_LIBS PUBLIC
   TritonIR
   TritonGPUIR
-  TritonGPUTransforms
   TritonNvidiaGPUIR
-  MLIRTransformUtils
 )

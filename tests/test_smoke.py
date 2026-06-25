@@ -5,7 +5,7 @@ triton-anchor 冒烟测试
 验证 triton-anchor 安装后的核心功能是否正常，不需要任何硬件后端。
 测试覆盖：
   1. Python 模块导入
-  2. C++ 绑定加载（libtriton.so + anchor passes）
+  2. C++ 绑定加载（libtriton.so + triton_shared plugin）
   3. MLIR Dialect 注册
   4. HWCapability 数据结构
   5. AnchorIR Validator
@@ -95,20 +95,21 @@ def test_libtriton_binding():
     print(f"  passes 模块: {libtriton.passes}")
 
 
-def test_anchor_passes_binding():
-    """验证 triton-anchor 的 C++ Pass 绑定是否注册"""
-    from triton._C.libtriton import anchor
+def test_triton_shared_plugin_binding():
+    """验证 triton_shared C++ plugin 绑定是否注册"""
+    from triton._C import libtriton
 
-    print(f"  anchor 绑定模块加载成功: {anchor}")
-
-    # 验证关键 API 存在
-    assert hasattr(anchor, "load_dialects"), "缺少 load_dialects"
-    print("  anchor.load_dialects ✓")
+    assert hasattr(libtriton, "triton_shared"), "libtriton 缺少 triton_shared plugin"
+    triton_shared = libtriton.triton_shared
+    print(f"  triton_shared 绑定模块加载成功: {triton_shared}")
+    assert hasattr(triton_shared, "load_dialects"), "缺少 load_dialects"
+    print("  triton_shared.load_dialects ✓")
 
 
 def test_mlir_context_and_dialects():
     """验证 MLIR Context 创建和 Dialect 注册"""
-    from triton._C.libtriton import ir, anchor
+    from triton._C import libtriton
+    from triton._C.libtriton import ir
 
     ctx = ir.context()
     assert ctx is not None, "MLIR Context 创建失败"
@@ -118,9 +119,9 @@ def test_mlir_context_and_dialects():
     ir.load_dialects(ctx)
     print("  Triton 方言加载成功 ✓")
 
-    # 加载 triton-anchor 方言（triton-linalg 扩展）
-    anchor.load_dialects(ctx)
-    print("  Anchor 方言加载成功 (linalg_ext, math_ext, aux) ✓")
+    # 加载 triton-shared 方言
+    libtriton.triton_shared.load_dialects(ctx)
+    print("  triton_shared 方言加载成功 (xsmt, tle, triton-shared) ✓")
 
 
 def test_hw_capability():
@@ -139,7 +140,7 @@ def test_hw_capability():
         arch_family="tpu",
         compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
         anchor_ir_track="linalg",
-        ptr_model="axis_info",
+        ptr_model="structured",
         tensor_cap=TensorCapability(num_cores=4),
     )
     assert hw_tpu.lowering_path == "linalg"
@@ -176,7 +177,7 @@ def test_hw_capability():
             arch_family="tpu",
             compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
             anchor_ir_track="linalg",
-            ptr_model="axis_info",
+            ptr_model="structured",
             # 故意不传 tensor_cap
         )
         raise AssertionError("应该抛出 ValueError，但没有")
@@ -244,12 +245,13 @@ def test_anchor_ir_validator():
 
 def test_ttir_pipeline():
     """验证 TTIR Pipeline 能够正常构建并执行"""
-    from triton._C.libtriton import ir, anchor
+    from triton._C import libtriton
+    from triton._C.libtriton import ir
     from triton_anchor.pipeline import build_ttir_pipeline
 
     ctx = ir.context()
     ir.load_dialects(ctx)
-    anchor.load_dialects(ctx)
+    libtriton.triton_shared.load_dialects(ctx)
 
     pm = ir.pass_manager(ctx)
     # 不传 hw 参数，仅构建 7 个 mandatory passes
@@ -269,11 +271,8 @@ def test_adapter_discovery():
     for name in adapters:
         print(f"    - {name}")
 
-    # triton-linalg 应该始终可用（通过 entry_points 注册）
-    if "triton-linalg" in adapters:
-        print("  triton-linalg adapter 已注册 ✓")
-    else:
-        print("  ⚠️  triton-linalg adapter 未发现（可能 entry_points 未安装）")
+    assert "triton-shared" in adapters, "triton-shared adapter 应该默认注册"
+    print("  triton-shared adapter 已注册 ✓")
 
 
 import triton  # noqa: E402
@@ -300,31 +299,50 @@ class _MinimalOptions:
         self.cluster_dims = (1, 1, 1)
         self.ptx_version = None
         self.enable_fp_fusion = True
+        self.extern_libs = None
+        self.debug = False
+        self.sanitize_overflow = True
+        self.arch = None
         self.supported_fp8_dtypes = ()
         self.deprecated_fp8_dtypes = ()
-        self.allowed_dot_input_precisions = ("ieee", "tf32", "tf32x3")
+        self.deprecated_fp8_dot_operand_dtypes = ()
+        self.default_dot_input_precision = "tf32"
+        self.allowed_dot_input_precisions = ("tf32", "tf32x3", "ieee")
         self.allow_fp8e4nv = False
-        self.max_num_imprecise_acc_default = False
-        self.debug = False
+        self.max_num_imprecise_acc_default = 0
+        self.backend_name = "smoke-test"
 
 
 def test_ttir_generation():
     """验证 Triton JIT 函数可以成功编译为 TTIR"""
-    from triton._C.libtriton import ir, anchor
+    from triton._C import libtriton
+    from triton._C.libtriton import ir
 
     # 构建 ASTSource
     src = triton.compiler.ASTSource(
         fn=_smoke_add_kernel,
-        signature={0: "*fp32", 1: "*fp32", 2: "*fp32", 3: "i32"},
-        constants={4: 256},
+        signature={
+            "x_ptr": "*fp32",
+            "y_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n": "i32",
+            "BLOCK": "constexpr",
+        },
+        constexprs={"BLOCK": 256},
     )
 
     # 创建 MLIR context 并加载方言
     ctx = ir.context()
     ir.load_dialects(ctx)
-    anchor.load_dialects(ctx)
+    libtriton.triton_shared.load_dialects(ctx)
 
-    ttir_module = src.make_ir(options=_MinimalOptions(), codegen_fns=None, context=ctx)
+    ttir_module = src.make_ir(
+        target=None,
+        options=_MinimalOptions(),
+        codegen_fns=None,
+        module_map={},
+        context=ctx,
+    )
     ir_text = str(ttir_module)
 
     assert "tt.func" in ir_text or "func.func" in ir_text, "TTIR 中应包含函数定义"
@@ -355,7 +373,7 @@ def main():
 
     # C++ 绑定测试
     run_test("libtriton C++ 绑定", test_libtriton_binding)
-    run_test("anchor passes 绑定", test_anchor_passes_binding)
+    run_test("triton_shared plugin 绑定", test_triton_shared_plugin_binding)
     run_test("MLIR Context 与 Dialect 注册", test_mlir_context_and_dialects)
 
     # 纯 Python 逻辑测试（不依赖 C++ 绑定）

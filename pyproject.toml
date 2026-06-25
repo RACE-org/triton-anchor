@@ -1,38 +1,30 @@
 [build-system]
-requires = ["setuptools>=64", "wheel", "pybind11"]
+requires = [
+  "setuptools>=68",
+  "wheel",
+  "cmake>=3.20,<4.0",
+  "ninja>=1.11.1",
+  "pybind11>=2.13.1",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "triton-anchor"
 version = "0.2.0"
-description = "Unified Triton Compilation Frontend — Converting Triton TTIR to hardware-aware Linalg IR"
+description = "Unified Triton frontend with triton-shared lowering"
 readme = "README.md"
 license = {text = "Apache 2.0"}
 requires-python = ">=3.10"
-authors = [
-    {name = "Triton Anchor Contributors"},
-]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Topic :: Software Development :: Compilers",
-    "License :: OSI Approved :: Apache 2.0",
-    "Programming Language :: Python :: 3",
-]
-
+authors = [{name = "Triton Anchor Contributors"}]
 dependencies = ["filelock"]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=7.0",
-    "pytest-cov",
-]
-sophgo = []
+dev = ["pytest>=7.0", "pytest-cov"]
 spacemit = []
 
-# ── Out-of-tree hardware backends will register here via entry_points ──
+[project.entry-points."triton.adapters"]
+triton-shared = "triton_anchor.adapters.triton_shared_adapter:TritonSharedAdapter"
+
 [project.entry-points."triton.backends"]
 
 [project.entry-points."triton.dsl_extensions"]
-
-[project.entry-points."triton.adapters"]

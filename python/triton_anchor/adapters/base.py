@@ -6,7 +6,7 @@ The adapter pattern allows the unified frontend to support two
 fundamentally different pointer analysis / lowering strategies:
 
   1. **triton-shared** — Structured/Unstructured dual-path pointer analysis
-     (used by spine-triton, from Microsoft)
+     (used by triton-shared, from Microsoft)
   2. **triton-linalg** — AxisInfo unified analysis
      (used by triton_race, from Cambricon)
 
@@ -123,7 +123,7 @@ class ILinalgOptAdapter(ITritonToLinalgAdapter, ABC):
       - Portable: works with any MLIR opt binary
       - Requires the opt tool to be installed and discoverable
 
-    Used by: TritonSharedAdapter (spine-triton / triton-shared)
+    Used by: TritonSharedAdapter (triton-shared / triton-shared)
     """
 
     pass

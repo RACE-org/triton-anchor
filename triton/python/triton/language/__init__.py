@@ -6,6 +6,7 @@ from . import extra
 from .standard import (
     argmax,
     argmin,
+    bitonic_merge,
     cdiv,
     cumprod,
     cumsum,
@@ -14,11 +15,15 @@ from .standard import (
     max,
     min,
     ravel,
+    reduce_or,
     sigmoid,
     softmax,
     sort,
+    squeeze,
     sum,
     swizzle2d,
+    topk,
+    unsqueeze,
     xor_sum,
     zeros,
     zeros_like,
@@ -26,11 +31,16 @@ from .standard import (
 from .core import (
     PropagateNan,
     TRITON_MAX_TENSOR_NUMEL,
-    _experimental_descriptor_load,
-    _experimental_descriptor_store,
+    load_tensor_descriptor,
+    store_tensor_descriptor,
+    make_tensor_descriptor,
+    tensor_descriptor,
+    tensor_descriptor_type,
+    add,
     advance,
     arange,
     associative_scan,
+    assume,
     atomic_add,
     atomic_and,
     atomic_cas,
@@ -46,13 +56,15 @@ from .core import (
     cat,
     cast,
     clamp,
+    condition,
     const,
-    const_pointer_type,
     constexpr,
+    constexpr_type,
     debug_barrier,
     device_assert,
     device_print,
     dot,
+    dot_scaled,
     dtype,
     expand_dims,
     float16,
@@ -64,7 +76,7 @@ from .core import (
     float8e5,
     float8e5b16,
     full,
-    function_type,
+    gather,
     histogram,
     inline_asm_elementwise,
     int1,
@@ -75,10 +87,12 @@ from .core import (
     join,
     load,
     make_block_ptr,
+    map_elementwise,
     max_constancy,
     max_contiguous,
     maximum,
     minimum,
+    mul,
     multiple_of,
     num_programs,
     permute,
@@ -88,13 +102,18 @@ from .core import (
     range,
     reduce,
     reshape,
+    slice,
     split,
     static_assert,
     static_print,
     static_range,
     store,
+    sub,
     tensor,
+    to_tensor,
     trans,
+    tuple,
+    tuple_type,
     uint16,
     uint32,
     uint64,
@@ -103,8 +122,25 @@ from .core import (
     void,
     where,
 )
-from .math import (umulhi, exp, exp2, fma, log, log2, cos, rsqrt, sin, sqrt, sqrt_rn, abs, fdiv, div_rn, erf, floor,
-                   ceil)
+from .math import (
+    umulhi,
+    exp,
+    exp2,
+    fma,
+    log,
+    log2,
+    cos,
+    rsqrt,
+    sin,
+    sqrt,
+    sqrt_rn,
+    abs,
+    fdiv,
+    div_rn,
+    erf,
+    floor,
+    ceil,
+)
 from .random import (
     pair_uniform_to_normal,
     philox,
@@ -117,18 +153,23 @@ from .random import (
     randn4x,
     uint_to_uniform_float,
 )
+from . import target_info
 
 __all__ = [
     "PropagateNan",
     "TRITON_MAX_TENSOR_NUMEL",
-    "_experimental_descriptor_load",
-    "_experimental_descriptor_store",
+    "load_tensor_descriptor",
+    "store_tensor_descriptor",
+    "make_tensor_descriptor",
+    "tensor_descriptor",
     "abs",
+    "add",
     "advance",
     "arange",
     "argmax",
     "argmin",
     "associative_scan",
+    "assume",
     "atomic_add",
     "atomic_and",
     "atomic_cas",
@@ -138,18 +179,19 @@ __all__ = [
     "atomic_xchg",
     "atomic_xor",
     "bfloat16",
+    "bitonic_merge",
     "block_type",
     "broadcast",
     "broadcast_to",
-    "builtin",
     "cat",
     "cast",
     "cdiv",
     "ceil",
     "clamp",
+    "condition",
     "const",
-    "const_pointer_type",
     "constexpr",
+    "constexpr_type",
     "cos",
     "cumprod",
     "cumsum",
@@ -158,6 +200,7 @@ __all__ = [
     "device_print",
     "div_rn",
     "dot",
+    "dot_scaled",
     "dtype",
     "erf",
     "exp",
@@ -177,7 +220,7 @@ __all__ = [
     "floor",
     "fma",
     "full",
-    "function_type",
+    "gather",
     "histogram",
     "inline_asm_elementwise",
     "interleave",
@@ -186,12 +229,12 @@ __all__ = [
     "int32",
     "int64",
     "int8",
-    "ir",
     "join",
     "load",
     "log",
     "log2",
     "make_block_ptr",
+    "map_elementwise",
     "math",
     "max",
     "max_constancy",
@@ -199,6 +242,7 @@ __all__ = [
     "maximum",
     "min",
     "minimum",
+    "mul",
     "multiple_of",
     "num_programs",
     "pair_uniform_to_normal",
@@ -217,8 +261,10 @@ __all__ = [
     "range",
     "ravel",
     "reduce",
+    "reduce_or",
     "reshape",
     "rsqrt",
+    "slice",
     "sigmoid",
     "sin",
     "softmax",
@@ -226,21 +272,27 @@ __all__ = [
     "split",
     "sqrt",
     "sqrt_rn",
+    "squeeze",
     "static_assert",
     "static_print",
     "static_range",
     "store",
+    "sub",
     "sum",
     "swizzle2d",
+    "target_info",
     "tensor",
+    "topk",
+    "to_tensor",
     "trans",
-    "triton",
+    "tuple",
     "uint16",
     "uint32",
     "uint64",
     "uint8",
     "uint_to_uniform_float",
     "umulhi",
+    "unsqueeze",
     "view",
     "void",
     "where",
@@ -250,15 +302,69 @@ __all__ = [
 ]
 
 
-def str_to_ty(name):
+def str_to_ty(name, c):
+    from builtins import tuple
+
+    if isinstance(name, tuple):
+        fields = type(name).__dict__.get("_fields", None)
+        return tuple_type([str_to_ty(x, c) for x in name], fields)
+
     if name[0] == "*":
         name = name[1:]
+        const = False
         if name[0] == "k":
             name = name[1:]
-            ty = str_to_ty(name)
-            return const_pointer_type(ty)
-        ty = str_to_ty(name)
-        return pointer_type(ty)
+            const = True
+        ty = str_to_ty(name, c)
+        return pointer_type(element_ty=ty, const=const)
+
+    if name.startswith("tensordesc"):
+        inner = name.split("<")[1].rstrip(">")
+        dtype, rest = inner.split("[", maxsplit=1)
+        block_shape, rest = rest.split("]", maxsplit=1)
+        block_shape = [int(s.strip()) for s in block_shape.rstrip("]").split(",")]
+        layout = rest.lstrip(",")
+        is_gluon = len(layout)
+        dtype = str_to_ty(dtype, None)
+        ndim = len(block_shape)
+        shape_type = tuple_type([int32] * ndim)
+        # FIXME: Last dim stride should be constexpr(1)
+        stride_type = tuple_type(([int64] * ndim))
+        block = block_type(dtype, block_shape)
+        if is_gluon:
+            from triton.experimental.gluon.language._layouts import (
+                NVMMASharedLayout,
+                PaddedSharedLayout,
+                SwizzledSharedLayout,
+            )
+            from triton.experimental.gluon.language.nvidia.hopper.tma import (
+                tensor_descriptor_type as nvidia_tensor_descriptor_type,
+            )
+            from triton.experimental.gluon.language.amd.gfx1250.tdm import (
+                tensor_descriptor_type as amd_tensor_descriptor_type,
+            )
+
+            layout = eval(
+                layout,
+                dict(
+                    NVMMASharedLayout=NVMMASharedLayout,
+                    PaddedSharedLayout=PaddedSharedLayout,
+                    SwizzledSharedLayout=SwizzledSharedLayout,
+                ),
+            )
+            if isinstance(layout, NVMMASharedLayout):
+                return nvidia_tensor_descriptor_type(
+                    block, shape_type, stride_type, layout
+                )
+            else:
+                return amd_tensor_descriptor_type(
+                    block, shape_type, stride_type, layout
+                )
+        return tensor_descriptor_type(block, shape_type, stride_type)
+
+    if name.startswith("constexpr"):
+        return constexpr_type(c)
+
     tys = {
         "fp8e4nv": float8e4nv,
         "fp8e4b8": float8e4b8,

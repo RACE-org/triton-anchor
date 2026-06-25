@@ -1,4 +1,4 @@
-from .autotuner import (Autotuner, Config, Heuristics, autotune, heuristics)
+from .autotuner import Autotuner, Config, Heuristics, autotune, heuristics
 from .cache import RedisRemoteCacheBackend, RemoteCacheBackend
 from .driver import driver
 from .jit import JITFunction, KernelInterface, MockTensor, TensorWrapper, reinterpret

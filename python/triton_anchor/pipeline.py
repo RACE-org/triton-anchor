@@ -3,7 +3,7 @@ Unified TTIR Pipeline
 ======================
 
 Extracts the 7 mandatory TTIR optimization passes that are 100% shared
-across all three projects (spine-triton, triton_race, fantasy-triton).
+across all three projects (triton-shared, triton_race, fantasy-triton).
 
 This is a **core invariant** — the pass list is append-only and
 synchronized with upstream Triton.
@@ -130,36 +130,53 @@ def make_ttir(mod, metadata: dict, hw: Optional[HWCapability] = None):
 
 
 def inject_hw_attributes(mod, hw: HWCapability, metadata: dict):
-    """将硬件能力信息注入 MLIR module 属性和编译元数据中。
+    """Inject hardware attributes into an MLIR module.
 
-    在 TTIR 优化之后、硬件感知 IR 降级之前调用。
-    后端插件可通过 ``on_ttir_ready()`` hook 注入额外属性。
+    Called after TTIR optimization, before lowering to hardware-aware IR.
+    Backend plugins can use ``on_ttir_ready()`` hook to inject additional
+    attributes.
 
     Args:
-        mod: MLIR module。
-        hw: 目标硬件能力描述。
-        metadata: 编译元数据 dict（就地更新）。
+        mod: An MLIR module.
+        hw: The target hardware capability.
+        metadata: Compilation metadata dict (updated in-place).
     """
     try:
         from triton._C.libtriton import ir
 
         builder = ir.builder(mod.context)
 
-        # 整型硬件属性注入到 MLIR module（供下游 C++ pass 使用）
+        mod.set_attr("hw.name", builder.get_string_attr(hw.name))
+        mod.set_attr("hw.paradigm", builder.get_string_attr(hw.compute_paradigm.value))
+        mod.set_attr("hw.arch_family", builder.get_string_attr(hw.arch_family))
+
         if hw.arch_family == "riscv" and hw.matrix_cap:
             mod.set_attr("hw.num_threads", builder.get_int32_attr(hw.num_cores))
         elif hw.arch_family == "tpu" and hw.tensor_cap:
             mod.set_attr("hw.core_num", builder.get_int32_attr(hw.tensor_cap.num_cores))
         elif hw.arch_family == "gpu" and hw.gpgpu_cap:
+            mod.set_attr("hw.num_warps", builder.get_int32_attr(hw.gpgpu_cap.num_warps))
+
+        if hw.anchor_ir_track.value == "linalg" and hw.ptr_model != "gpu":
+            num_threads = hw.num_threads or hw.num_cores
+            mod.set_attr("tt.num_threads", builder.get_int32_attr(num_threads))
             mod.set_attr(
-                "hw.num_warps",
-                builder.get_int32_attr(hw.gpgpu_cap.num_warps),
+                "tt.force_vector_interleave",
+                builder.get_int32_attr(hw.force_vector_interleave),
             )
+            if hw.arch_id:
+                mod.set_attr("tt.arch_id", builder.get_string_attr(hw.arch_id))
+            metadata["num_threads"] = num_threads
+            metadata["force_vector_interleave"] = hw.force_vector_interleave
+            if hw.arch_id:
+                metadata["arch_id"] = hw.arch_id
 
     except ImportError:
+        # Triton not installed — keep metadata-only path for pure Python tests.
         pass
 
-    # 硬件描述信息通过 metadata dict 传递给下游 Python 代码
+    metadata["hw"] = hw
+    metadata["hw_capability"] = hw
     metadata["hw_name"] = hw.name
     metadata["hw_paradigm"] = hw.compute_paradigm.value
     metadata["hw_arch_family"] = hw.arch_family

@@ -27,14 +27,15 @@ class KernelLinkerMeta:
 
 
 class HeaderParser:
-
     def __init__(self) -> None:
         import re
 
         # [kernel_name, c signature]
-        self.linker_directives = re.compile("//[\\s]*tt-linker:[\\s]*([\\w]+):(.+):(.+)")
+        self.linker_directives = re.compile(
+            "//[\\s]*tt-linker:[\\s]*([\\w]+):(.+):(.+)"
+        )
         # [name, hash, suffix]
-        self.kernel_name = re.compile("^([\\w]+)_([\\w]+)_([\\w]+)$")
+        self.kernel_name = re.compile("^([\\w]+)_([\\w]+)_([\\w]*)$")
         # [(type, name)]
         self.c_sig = re.compile("[\\s]*(\\w+)\\s(\\w+)[,]?")
         # [d|c]
@@ -88,22 +89,24 @@ class HeaderParser:
         s2i = {"c": 1, "d": 16}
         num_specs = 0
         sizes = []
-        # scan through suffix, first find the index,
-        # then see if it is followed by d or c
+        # scan through suffix, suffix only includes indexes followed by d or c.
         for i in range(len(args)):
-            pos = suffix.find(str(i))
-            if pos == -1:
-                raise LinkerError(f"{suffix} is not a valid kernel suffix")
+            pos = 0
+            idx_matched = suffix.startswith(str(i))
+            if not idx_matched:
+                continue
             pos += len(str(i))
             if self.arg_suffix.match(suffix, pos):
                 num_specs += 1
                 sizes.extend([None] * (i - len(sizes)))
                 sizes.append(s2i[suffix[pos]])
                 pos += 1
-            if i < len(args) - 1:
-                suffix = suffix[pos:]
-            else:
-                sizes.extend([None] * (len(args) - len(sizes)))
+            suffix = suffix[pos:]
+
+        if len(suffix) > 0:
+            raise Exception(f"Has invalid extra suffix: {suffix}")
+        sizes.extend([None] * (len(args) - len(sizes)))
+
         return num_specs, sizes
 
     def _add_kernel(self, name: str, ker: KernelLinkerMeta):
@@ -152,7 +155,9 @@ void unload_{meta.orig_kernel_name}();
 # generate dispatcher function for kernels with different meta-parameter and constant values
 def make_default_algo_kernel(meta: KernelLinkerMeta) -> str:
     src = f"CUresult {meta.orig_kernel_name}_default(CUstream stream, {gen_signature_with_full_args(meta)}){{\n"
-    src += (f"  return {meta.orig_kernel_name}(stream, {', '.join(meta.arg_names)}, 0);\n")
+    src += (
+        f"  return {meta.orig_kernel_name}(stream, {', '.join(meta.arg_names)}, 0);\n"
+    )
     src += "}\n"
     return src
 
@@ -164,22 +169,30 @@ def make_kernel_hints_dispatcher(name: str, metas: Sequence[KernelLinkerMeta]) -
         src += f"CUresult {meta.orig_kernel_name}_{meta.sig_hash}_{meta.suffix}(CUstream stream, {gen_signature(meta)});\n"
     src += "\n"
 
-    src += (f"CUresult {name}(CUstream stream, {gen_signature_with_full_args(metas[-1])}){{")
+    src += (
+        f"CUresult {name}(CUstream stream, {gen_signature_with_full_args(metas[-1])}){{"
+    )
     src += "\n"
     for meta in sorted(metas, key=lambda m: -m.num_specs):
         cond_fn = (  #
-            lambda val, hint: f"({val} % {hint} == 0)"  #
-            if hint == 16  #
-            else f"({val} == {hint})"  #
-            if hint == 1  #
-            else None)
-        conds = " && ".join([  #
-            cond_fn(val, hint)  #
-            for val, hint in zip(meta.arg_names, meta.sizes)  #
-            if hint is not None
-        ])
-        src += (f"  if ({conds})\n" if any(meta.sizes) else "if (1)\n"
-                )  # Edge case where no specializations hence no dispatching required
+            lambda val, hint: (
+                f"({val} % {hint} == 0)"  #
+                if hint == 16  #
+                else f"({val} == {hint})"  #
+                if hint == 1  #
+                else None
+            )
+        )
+        conds = " && ".join(
+            [  #
+                cond_fn(val, hint)  #
+                for val, hint in zip(meta.arg_names, meta.sizes)  #
+                if hint is not None
+            ]
+        )
+        src += (
+            f"  if ({conds})\n" if any(meta.sizes) else "if (1)\n"
+        )  # Edge case where no specializations hence no dispatching required
         arg_names = [arg for arg, hint in zip(meta.arg_names, meta.sizes) if hint != 1]
         src += f"    return {meta.orig_kernel_name}_{meta.sig_hash}_{meta.suffix}(stream, {', '.join(arg_names)});\n"
     src += "\n"
@@ -193,7 +206,9 @@ def make_kernel_hints_dispatcher(name: str, metas: Sequence[KernelLinkerMeta]) -
         src += f"void {mode}_{name}() {{"
         src += "\n"
         for meta in sorted(metas, key=lambda m: -m.num_specs):
-            src += (f"  {mode}_{meta.orig_kernel_name}_{meta.sig_hash}_{meta.suffix}();\n")
+            src += (
+                f"  {mode}_{meta.orig_kernel_name}_{meta.sig_hash}_{meta.suffix}();\n"
+            )
         src += "}\n"
     return src
 
@@ -295,7 +310,10 @@ if __name__ == "__main__":
         fp.write(out)
 
     # generate source
-    defs = [make_kernel_hints_dispatcher(name, meta) for name, meta in parser.kernels.items()]
+    defs = [
+        make_kernel_hints_dispatcher(name, meta)
+        for name, meta in parser.kernels.items()
+    ]
     names = [name for name in parser.kernels.keys()]
     func_pointers_def = make_func_pointers(names, meta)
     meta_const_def = make_kernel_meta_const_dispatcher(meta)

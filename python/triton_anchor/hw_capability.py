@@ -149,7 +149,12 @@ class HWCapability:
     ptr_model: Literal["structured", "axis_info", "hybrid", "gpu"]
 
     # ── Adapter Override ─────────────────────────────────────────────
-    preferred_adapter: Optional[str] = None  # e.g. "triton-shared", "triton-linalg"
+    preferred_adapter: Optional[str] = None  # e.g. "triton-shared"
+
+    # triton-shared lowering metadata for spine-style CPU/tensor backends.
+    arch_id: Optional[str] = None
+    force_vector_interleave: int = 2
+    num_threads: Optional[int] = None
 
     # ── Paradigm-Specific Capabilities (mutually exclusive) ──────────
     matrix_cap: Optional[MatrixCapability] = None  # AME

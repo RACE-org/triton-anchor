@@ -15,12 +15,12 @@
 //
 // %a: tensor<128x32xf16, #enc>
 // %a_tmp = tensor.subview %a[0, 0] [128, 16]
-// %a_prefetch = triton_gpu.local_load %a_tmp
+// %a_prefetch = ttg.local_load %a_tmp
 // scf.for %iv = ... iter_args(%a_buf = %a, ..., %a_prefetch_arg = %a_prefetch)
 // {
 //   %x = tt.dot %a_prefetch_arg, %b, %c
 //   %a_tmp_rem = tensor.subview %a_buf[0, 16] [128, 16]
-//   %a_prefetch_next = triton_gpu.local_load %a_tmp_rem
+//   %a_prefetch_next = ttg.local_load %a_tmp_rem
 //   ...
 //   scf.yield %next_a, ..., %a_prefetch_next
 // }
@@ -31,6 +31,11 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
+#include "llvm/Support/Debug.h"
+
+#define DEBUG_TYPE "tritongpu-prefetch"
+#define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
+#define LDBG(X) LLVM_DEBUG(DBGS() << X << "\n")
 
 namespace mlir {
 namespace triton {
@@ -114,13 +119,14 @@ Value Prefetcher::generatePrefetch(Value v, unsigned opIdx, bool isPrologue,
                                    std::optional<int64_t> offsetK,
                                    std::optional<int64_t> shapeK) {
   // opIdx: 0 => a, 1 => b
-  auto type = cast<triton::MemDescType>(v.getType());
+  auto type = cast<triton::gpu::MemDescType>(v.getType());
   SmallVector<int64_t> shape{type.getShape().begin(), type.getShape().end()};
-  SmallVector<int64_t> offset{0, 0};
+  auto rank = shape.size();
+  SmallVector<int32_t> offset(rank, 0);
   Type elementType = type.getElementType();
 
   // k => (prefetchWidth, k - prefetchWidth)
-  int64_t kIdx = opIdx == 0 ? 1 : 0;
+  int64_t kIdx = opIdx == 0 ? rank - 1 : rank - 2;
 
   offset[kIdx] = isPrologue ? 0 : prefetchWidth;
   shape[kIdx] = isPrologue ? prefetchWidth : (shape[kIdx] - prefetchWidth);
@@ -130,20 +136,18 @@ Value Prefetcher::generatePrefetch(Value v, unsigned opIdx, bool isPrologue,
   if (offsetK)
     offset[kIdx] = *offsetK;
 
-  SmallVector<Value> offsetsVal;
-  for (int64_t off : offset)
-    offsetsVal.push_back(
-        builder.create<arith::ConstantIntOp>(v.getLoc(), off, 32));
-  Value newSmem = builder.create<triton::gpu::MemDescSubviewOp>(
-      v.getLoc(),
-      triton::MemDescType::get(shape, elementType, type.getEncoding()), v,
-      offsetsVal);
+  Value newSmem = triton::gpu::MemDescSubsliceOp::create(
+      builder, v.getLoc(),
+      triton::gpu::MemDescType::get(
+          shape, elementType, type.getEncoding(), type.getMemorySpace(),
+          type.getMutableMemory(), type.getAllocShape()),
+      v, offset);
 
   auto dotOperandEnc = triton::gpu::DotOperandEncodingAttr::get(
       builder.getContext(), opIdx, dotEncoding, prefetchWidth / 8);
-  Value prefetchSlice = builder.create<triton::gpu::LocalLoadOp>(
-      v.getLoc(), RankedTensorType::get(shape, elementType, dotOperandEnc),
-      newSmem);
+  Value prefetchSlice = triton::gpu::LocalLoadOp::create(
+      builder, v.getLoc(),
+      RankedTensorType::get(shape, elementType, dotOperandEnc), newSmem);
 
   return prefetchSlice;
 }
@@ -158,10 +162,13 @@ LogicalResult Prefetcher::initialize() {
   SmallVector<triton::DotOp> dotsInFor;
   for (Operation &op : *loop)
     if (auto dotOp = dyn_cast<triton::DotOp>(op)) {
-      // bail out if there exist non v2 dots.
-      auto dstEnc =
+      // Only accepts dotOps encoded as Nvidia MMA v2 or AMD MFMA
+      auto dstMmaEnc =
           dyn_cast<NvidiaMmaEncodingAttr>(getEncoding(dotOp.getResult()));
-      if (!dstEnc || dstEnc.getVersionMajor() != 2)
+      auto dstMfmaEnc =
+          dyn_cast<AMDMfmaEncodingAttr>(getEncoding(dotOp.getResult()));
+      if (!dstMfmaEnc && (!dstMmaEnc || dstMmaEnc.getVersionMajor() != 2))
+        // Don't rewrite if any other type is found.
         return failure();
       dotsInFor.push_back(dotOp);
     }
@@ -175,14 +182,13 @@ LogicalResult Prefetcher::initialize() {
     return failure();
 
   // returns source of cvt
-
-  // returns source of cvt
   auto getPrefetchSrc = [](Value v) -> SmallVector<Value> {
     // walk back to conversion
     Operation *op = v.getDefiningOp();
     bool foundConvertFromShared = false;
     SmallVector<Value> rets;
     rets.push_back(op->getResult(0));
+    LDBG("Prefetch src: " << *op);
     while (op) {
       if (op->getNumOperands() != 1)
         break;
@@ -190,10 +196,15 @@ LogicalResult Prefetcher::initialize() {
         break;
       rets.push_back(op->getOperand(0));
       if (auto cvt = dyn_cast<triton::gpu::LocalLoadOp>(op)) {
-        foundConvertFromShared = true;
+        // NYI for other encodings, for example if we have transpose
+        // in the chain
+        if (isa<DotOperandEncodingAttr>(cvt.getType().getEncoding()))
+          foundConvertFromShared = true;
         break;
       }
       op = op->getOperand(0).getDefiningOp();
+      if (op)
+        LDBG("op: " << *op);
     }
     std::reverse(rets.begin(), rets.end());
 
@@ -209,7 +220,7 @@ LogicalResult Prefetcher::initialize() {
     return Value();
   };
 
-  auto getYieldOp = [this](Value v) -> Value {
+  auto getYieldOperand = [this](Value v) -> Value {
     auto arg = mlir::cast<BlockArgument>(v);
     unsigned yieldIdx = arg.getArgNumber() - forOp.getNumInductionVars();
     return yieldOp.getOperand(yieldIdx);
@@ -226,7 +237,7 @@ LogicalResult Prefetcher::initialize() {
     int bKWidth = bEnc.getKWidth();
     assert(aKWidth == bKWidth);
 
-    auto kSize = aType.getShape()[1];
+    auto kSize = aType.getShape().back();
 
     // works better with nvidia tensor cores
     unsigned elementWidth = aType.getElementTypeBitWidth();
@@ -255,8 +266,8 @@ LogicalResult Prefetcher::initialize() {
         dot2bHeaderDef[dot] = bHeaderDef;
         dot2aLoopArg[dot] = aSmem;
         dot2bLoopArg[dot] = bSmem;
-        dot2aYield[dot] = getYieldOp(aSmem);
-        dot2bYield[dot] = getYieldOp(bSmem);
+        dot2aYield[dot] = getYieldOperand(aSmem);
+        dot2bYield[dot] = getYieldOperand(bSmem);
       }
     }
   }
@@ -292,9 +303,9 @@ scf::ForOp Prefetcher::createNewForOp() {
     loopArgs.push_back(operand2headPrefetch[dot.getB()]);
   }
 
-  auto newForOp = builder.create<scf::ForOp>(
-      forOp.getLoc(), forOp.getLowerBound(), forOp.getUpperBound(),
-      forOp.getStep(), loopArgs);
+  auto newForOp =
+      scf::ForOp::create(builder, forOp.getLoc(), forOp.getLowerBound(),
+                         forOp.getUpperBound(), forOp.getStep(), loopArgs);
 
   builder.setInsertionPointToStart(newForOp.getBody());
   IRMapping mapping;
@@ -302,7 +313,31 @@ scf::ForOp Prefetcher::createNewForOp() {
     mapping.map(arg.value(), newForOp.getRegionIterArgs()[arg.index()]);
   mapping.map(forOp.getInductionVar(), newForOp.getInductionVar());
 
+  // The insertion point should be placed before the yield op
+  auto setInsertionPointBeforeYield = [](OpBuilder &builder,
+                                         scf::ForOp newForOp) {
+    if (newForOp.getBody()->mightHaveTerminator()) {
+      builder.setInsertionPoint(newForOp.getBody()->getTerminator());
+    } else {
+      builder.setInsertionPointToEnd(newForOp.getBody());
+    }
+  };
+
   for (Operation &op : forOp.getBody()->without_terminator()) {
+    // If we're currently trying to sink a prefetched dot, we need to stop
+    // sinking it (by resetting the insertion point to the end) if we find
+    // control flow, or anything that depends on the dot op.
+    if (op.getNumRegions() > 0) {
+      setInsertionPointBeforeYield(builder, newForOp);
+    }
+    for (auto operand : op.getOperands()) {
+      if (auto def = operand.getDefiningOp()) {
+        auto dot = dyn_cast<triton::DotOp>(def);
+        if (dot && dots.contains(dot)) {
+          setInsertionPointBeforeYield(builder, newForOp);
+        }
+      }
+    }
     Operation *newOp = builder.clone(op, mapping);
     auto dot = dyn_cast<triton::DotOp>(&op);
     if (dot && dots.contains(dot)) {
@@ -318,8 +353,16 @@ scf::ForOp Prefetcher::createNewForOp() {
 
       // remaining part
       int64_t kOff = prefetchWidth;
-      int64_t kRem = dot.getA().getType().getShape()[1] - prefetchWidth;
+      int64_t kRem = dot.getA().getType().getShape().back() - prefetchWidth;
       Operation *prevDot = firstDot;
+      if (kRem == 0) {
+        // There is only one dot while prefetchWidth == kSize so delay issuing
+        // it. Meanwhile, newOp should be set to firstDot to make sure the dot
+        // result is updated to yield.
+        builder.setInsertionPoint(prevDot);
+        newOp = firstDot;
+      }
+
       while (kRem != 0) {
         // int64_t kShape = largestPow2(kRem);
         int64_t kShape = prefetchWidth;
@@ -341,6 +384,13 @@ scf::ForOp Prefetcher::createNewForOp() {
         prevDot = newOp;
         kOff += kShape;
         kRem -= kShape;
+        if (kRem == 0) {
+          // We want to delay issuing the last dot as long as possible, ideally
+          // until after the prefetch.  To accomplish this, set the insertion
+          // point above the dot.  If we find anything dependent on the dot (at
+          // the top of this loop), we resume inserting after it.
+          builder.setInsertionPoint(prevDot);
+        }
       }
     }
     // update mapping of results
@@ -365,8 +415,9 @@ scf::ForOp Prefetcher::createNewForOp() {
     yieldValues.push_back(bToYield);
   }
   // Update ops of yield
+  builder.setInsertionPointToEnd(newForOp.getBody());
   if (!yieldValues.empty())
-    builder.create<scf::YieldOp>(yieldOp.getLoc(), yieldValues);
+    scf::YieldOp::create(builder, yieldOp.getLoc(), yieldValues);
   return newForOp;
 }
 
@@ -379,8 +430,7 @@ struct PrefetchPass : public impl::TritonGPUPrefetchBase<PrefetchPass> {
     RewritePatternSet cleanUpPatterns(&getContext());
     triton::gpu::ConvertLayoutOp::getCanonicalizationPatterns(cleanUpPatterns,
                                                               &getContext());
-    if (mlir::applyPatternsAndFoldGreedily(getOperation(),
-                                           std::move(cleanUpPatterns))
+    if (mlir::applyPatternsGreedily(getOperation(), std::move(cleanUpPatterns))
             .failed()) {
       signalPassFailure();
     }

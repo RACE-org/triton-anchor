@@ -1,10 +1,8 @@
-import os
-import re
-import subprocess
-
-from abc import ABCMeta, abstractmethod, abstractclassmethod
+from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Union
+from enum import Enum
+from typing import Dict, Union
+from types import ModuleType
 
 
 @dataclass(frozen=True)
@@ -16,30 +14,22 @@ class GPUTarget(object):
     warp_size: int
 
 
+class Language(Enum):
+    """The input language being compiled by the backend."""
+
+    TRITON = 0
+    GLUON = 1
+
+
 class BaseBackend(metaclass=ABCMeta):
+    supports_native_tensor_specialization = True
 
     def __init__(self, target: GPUTarget) -> None:
         self.target = target
         assert self.supports_target(target)
 
     @staticmethod
-    def _path_to_binary(binary: str):
-        base_dir = os.path.join(os.path.dirname(__file__), os.pardir)
-        paths = [
-            os.environ.get(f"TRITON_{binary.upper()}_PATH", ""),
-            os.path.join(base_dir, "third_party", "cuda", "bin", binary),
-        ]
-        for p in paths:
-            bin = p.split(" ")[0]
-            if os.path.exists(bin) and os.path.isfile(bin):
-                result = subprocess.check_output([bin, "--version"], stderr=subprocess.STDOUT)
-                if result is not None:
-                    version = re.search(r".*release (\d+\.\d+).*", result.decode("utf-8"), flags=re.MULTILINE)
-                    if version is not None:
-                        return p, version.group(1)
-        raise RuntimeError(f"Cannot find {binary}")
-
-    @abstractclassmethod
+    @abstractmethod
     def supports_target(target: GPUTarget):
         raise NotImplementedError
 
@@ -74,3 +64,30 @@ class BaseBackend(metaclass=ABCMeta):
         Load additional MLIR dialects into the provided `context`
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def get_module_map(self) -> Dict[str, ModuleType]:
+        """
+        Return a map of interface modules to their device-specific implementations
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def parse_attr(desc):
+        assert isinstance(desc, str)
+        ret = []
+        if "D" in desc:
+            ret += [["tt.divisibility", 16]]
+        return ret
+
+    @staticmethod
+    def get_int_specialization(arg, **kwargs):
+        if arg % 16 == 0 and kwargs.get("align", False):
+            return "D"
+        return ""
+
+    @staticmethod
+    def get_tensor_specialization(arg, **kwargs):
+        if arg.data_ptr() % 16 == 0 and kwargs.get("align", False):
+            return "D"
+        return ""

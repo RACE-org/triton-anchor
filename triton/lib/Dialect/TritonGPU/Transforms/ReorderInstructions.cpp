@@ -15,6 +15,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "triton/Analysis/Utility.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/TritonGPUConversion.h"
@@ -39,6 +40,36 @@ static bool willIncreaseRegisterPressure(Operation *op) {
   return false;
 }
 
+// Return true if it has side effects that are either unknown or writes.
+static bool hasWriteSideEffect(Operation *op) {
+  auto effects = getEffectsRecursively(op);
+  if (!effects)
+    return false;
+  return llvm::any_of(*effects, [](MemoryEffects::EffectInstance effect) {
+    return !isa<MemoryEffects::Read, MemoryEffects::Allocate,
+                MemoryEffects::Free>(effect.getEffect());
+  });
+}
+
+// Return true if there is a write side effect on any path between start and end
+// ops. This assumes start dominates end.
+static bool crossWriteSideEffectingOp(Operation *start, Operation *end) {
+  auto ancestor = start->getBlock()->findAncestorOpInBlock(*end);
+  // Couldn't find an ancestor in the same block, conservatively assume true.
+  if (!ancestor)
+    return true;
+  Operation *nextOp = start->getNextNode();
+  while (nextOp) {
+    if ((hasWriteSideEffect(nextOp)))
+      return true;
+    if (nextOp == ancestor)
+      return false;
+    nextOp = nextOp->getNextNode();
+  }
+  assert(false && "op doesn't dominate other");
+  return true;
+}
+
 class TritonGPUReorderInstructionsPass
     : public impl::TritonGPUReorderInstructionsBase<
           TritonGPUReorderInstructionsPass> {
@@ -51,10 +82,10 @@ public:
       if (Operation *ancestor = op->getBlock()->findAncestorOpInBlock(*user))
         users.push_back(ancestor);
     }
-    auto minOpIt = std::min_element(users.begin(), users.end(),
-                                    [](mlir::Operation *a, mlir::Operation *b) {
-                                      return a->isBeforeInBlock(b);
-                                    });
+    auto minOpIt =
+        llvm::min_element(users, [](mlir::Operation *a, mlir::Operation *b) {
+          return a->isBeforeInBlock(b);
+        });
     return minOpIt != users.end() ? *minOpIt : nullptr;
   }
 
@@ -65,7 +96,8 @@ public:
     // before the first use ancestor in its block
     m.walk([&](triton::gpu::ConvertLayoutOp op) {
       auto curr = mlir::Block::iterator(op);
-      for (; &*curr != getFirstUse(op); curr++)
+      auto end = op->getBlock()->end();
+      for (; curr != end && &*curr != getFirstUse(op); curr++)
         if (isa<triton::gpu::LocalDeallocOp>(&*curr))
           op->moveAfter(&*curr);
     });
@@ -96,11 +128,15 @@ public:
       Operation *argOp = op.getSrc().getDefiningOp();
       if (!argOp)
         return;
+      // Don't hoist alloc if the src is a scalar as this may increase smem
+      // pressure for no benefits.
+      if (isa<arith::ConstantOp, triton::SplatOp>(argOp))
+        return;
       moveAfter(op, argOp);
     });
     // Move transpositions just after their definition
     opToMove.clear();
-    m.walk([&](triton::TransOp op) {
+    m.walk([&](triton::TransposeOpInterface op) {
       Operation *argOp = op.getSrc().getDefiningOp();
       if (!argOp)
         return;
@@ -128,6 +164,8 @@ public:
       // Check that the conversion to OpIdx=1 happens before and can be moved
       // after the conversion to OpIdx=0.
       if (!dom.dominates(op.getOperation(), AOp.getOperation()))
+        return;
+      if (crossWriteSideEffectingOp(op, AOp))
         return;
       moveAfter(op, AOp);
     });

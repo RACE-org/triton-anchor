@@ -1,6 +1,7 @@
 #include "triton/Dialect/Triton/IR/Types.h"
 
 #include "mlir/IR/DialectImplementation.h" // required by `Types.cpp.inc`
+#include "mlir/IR/TypeUtilities.h"
 #include "mlir/Support/LLVM.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "llvm/ADT/TypeSwitch.h" // required by `Types.cpp.inc`
@@ -49,51 +50,6 @@ void PointerType::print(AsmPrinter &printer) const {
   }
 }
 
-static constexpr llvm::StringRef kMutableMemory = "mutable";
-
-Type MemDescType::parse(AsmParser &parser) {
-  if (parser.parseLess())
-    return Type();
-
-  SmallVector<int64_t> dimensions;
-  if (parser.parseDimensionList(dimensions, /*allowDynamic=*/false))
-    return Type();
-
-  // Parse the element type.
-  Type elementType;
-  if (parser.parseType(elementType))
-    return Type();
-
-  Attribute encoding;
-  if (succeeded(parser.parseOptionalComma())) {
-    if (parser.parseAttribute(encoding))
-      return Type();
-  }
-  bool mutableMemory = false;
-  if (succeeded(parser.parseOptionalComma())) {
-    if (parser.parseOptionalKeyword(kMutableMemory))
-      return Type();
-    mutableMemory = true;
-  }
-  if (parser.parseGreater())
-    return Type();
-
-  return MemDescType::get(parser.getContext(), dimensions, elementType,
-                          encoding, mutableMemory);
-}
-
-void MemDescType::print(AsmPrinter &printer) const {
-  printer << "<";
-  for (auto dim : getShape())
-    printer << dim << "x";
-  printer << getElementType();
-  if (getEncoding())
-    printer << ", " << getEncoding();
-  if (getMutableMemory())
-    printer << ", " << kMutableMemory;
-  printer << ">";
-}
-
 namespace mlir {
 
 namespace triton {
@@ -108,18 +64,16 @@ unsigned getPointeeBitWidth(Type type) {
 Type getI1SameShape(Type type) {
   auto i1Type = IntegerType::get(type.getContext(), 1);
   if (auto tensorTy = dyn_cast<RankedTensorType>(type))
-    return RankedTensorType::get(tensorTy.getShape(), i1Type,
-                                 tensorTy.getEncoding());
+    return tensorTy.clone(i1Type);
   return i1Type;
 }
 
 Type getPointeeType(Type type) {
   if (auto tensorTy = dyn_cast<RankedTensorType>(type)) {
     // Tensor of pointers
-    auto shape = tensorTy.getShape();
     auto ptrType = dyn_cast<PointerType>(tensorTy.getElementType());
     Type pointeeType = ptrType.getPointeeType();
-    return RankedTensorType::get(shape, pointeeType, tensorTy.getEncoding());
+    return tensorTy.clone(pointeeType);
   } else if (auto ptrType = dyn_cast<PointerType>(type)) {
     // scalar pointer
     Type pointeeType = ptrType.getPointeeType();
@@ -131,23 +85,36 @@ Type getPointeeType(Type type) {
 Type getI32SameShape(Type type) {
   auto i32Type = IntegerType::get(type.getContext(), 32);
   if (auto tensorTy = dyn_cast<RankedTensorType>(type))
-    return RankedTensorType::get(tensorTy.getShape(), i32Type,
-                                 tensorTy.getEncoding());
+    return tensorTy.clone(i32Type);
   return i32Type;
 }
 
 Type getPointerTypeSameShape(Type type) {
   if (auto tensorTy = dyn_cast<RankedTensorType>(type)) {
     Type elementType = tensorTy.getElementType();
-    auto shape = tensorTy.getShape();
     PointerType ptrType = PointerType::get(elementType, 1);
-    return RankedTensorType::get(shape, ptrType, tensorTy.getEncoding());
+    return tensorTy.clone(ptrType);
   } else {
     return PointerType::get(type, 1);
   }
 }
 
-Type getPointerType(Type type) { return PointerType::get(type, 1); }
+Type getPointerTypeToElement(Type type) {
+  Type elementType = getElementTypeOrSelf(type);
+  PointerType ptrType = PointerType::get(elementType, 1);
+  return ptrType;
+}
+
+// upstream Triton only uses address space 1 for Pointer Type
+Type getPointerType(Type type, int addressSpace) {
+  return PointerType::get(type, addressSpace);
+}
+
+int getAddressSpace(Type type) {
+  if (auto ptrType = dyn_cast<PointerType>(type))
+    return ptrType.getAddressSpace();
+  return 1;
+}
 
 bool isTensorPointerType(Type type) {
   if (auto ptrType = dyn_cast<PointerType>(type))

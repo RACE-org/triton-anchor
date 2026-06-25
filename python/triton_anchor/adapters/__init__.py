@@ -8,10 +8,9 @@ from .base import (
 )
 from .registry import AdapterRegistry as AdapterRegistry, get_adapter as get_adapter
 
-# 注册默认自带的 in-process adapter
 try:
-    from .triton_linalg_adapter import TritonLinalgAdapter
+    from .triton_shared_adapter import TritonSharedAdapter
 
-    AdapterRegistry.register(TritonLinalgAdapter())
+    AdapterRegistry.register(TritonSharedAdapter())
 except ImportError:
     pass

@@ -1,0 +1,36 @@
+#ifndef TRITON_CONVERSION_TRITONARITHTOLINALG_TRITONARITHTOLINALG_H
+#define TRITON_CONVERSION_TRITONARITHTOLINALG_TRITONARITHTOLINALG_H
+
+#include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/DialectConversion.h"
+
+#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "TypeConverter.hpp"
+
+namespace mlir {
+namespace triton {
+
+#define GEN_PASS_DECL
+#include "triton-shared/Conversion/TritonArithToLinalg/Passes.h.inc"
+
+void populateTritonArithToLinalgCanonicalizationPatterns(
+    RewritePatternSet &patterns);
+
+void populateTritonArithToLinalgConversionPatterns(bool pidsToFuncArgs,
+                                                   bool addptrToLinalg,
+                                                   bool assertToCf,
+                                                   RewritePatternSet &patterns,
+                                                   TritonLinalgTypeConverter &converter);
+
+// Expand the triton pointer ops operating on pointers to linalg
+void populateTritonTensorPtrConversionPatterns(RewritePatternSet &patterns);
+
+void normalReduceConversionPatterns(RewritePatternSet &patterns);
+
+std::unique_ptr<OperationPass<ModuleOp>>
+createTritonArithToLinalgPass(bool tensorPtrToLinalg = false);
+
+} // namespace triton
+} // namespace mlir
+
+#endif // TRITON_CONVERSION_TRITONARITHTOLINALG_TRITONARITHTOLINALG_H

@@ -1,18 +1,27 @@
+#===------------------------------------------------------------------------===#
+#
+# Copyright (c) Triton Project Contributors.
+#
+#===------------------------------------------------------------------------===#
+
 add_triton_library(TritonToLinalg
-  AtomicCASConversion.cpp
-  AtomicRmwConversion.cpp
-  LoadStoreConversion.cpp
-  TritonPointerConversion.cpp
   TritonToLinalg.cpp
-  TypeConverter.cpp
-  Utils.cpp
+  TritonToLinalgPass.cpp
 
   DEPENDS
-  TritonLinalgConverisonIncGen
-  TritonInterfacesExtendTableGen
+  TritonToLinalgConversionPassIncGen
 
   LINK_LIBS PUBLIC
-  LinalgExtDialectUtils
-  TritonInterfaceExtend
+  TritonTilingExtIR
+  MLIRArithDialect
+  MLIRDialectUtils
   MLIRIR
+  MLIRMathDialect
+  MLIRPass
+  MLIRTensorDialect
+  MLIRTransforms
+  MLIRSupport
+  TritonIR
+  TritonTransforms
+  TritonSharedAnalysis
 )

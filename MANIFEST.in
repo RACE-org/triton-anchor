@@ -1,5 +1,2 @@
 recursive-include triton *.h *.cpp *.cc *.td *.txt *.cmake
-recursive-include csrc *.h *.cpp *.cc *.td *.txt
 include triton/TRITON_VERSION
-include triton/tools/compile.h
-include triton/tools/compile.c

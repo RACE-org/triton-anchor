@@ -2,16 +2,16 @@
 triton-anchor: Unified Triton Compilation Frontend
 ===================================================
 
-A compilation frontend that converts Triton TTIR to hardware-aware Linalg IR,
-serving as the bridge between Triton core and out-of-tree hardware backends.
+A compilation frontend that keeps the triton_anchor orchestration layer while
+embedding the triton-shared frontend/core toolchain.
 
 Architecture:
-  Layer 1  — TTIR Pipeline       (core invariant: 7 mandatory passes)
-  Layer 2  — Linalg Adapters     (triton-shared / triton-linalg / hybrid)
-  Layer 2.5 — AnchorIR Spec      (core invariant: dual-track dialect whitelist)
+  Layer 1   — TTIR Pipeline       (core invariant: 7 mandatory passes)
+  Layer 2   — Linalg Adapter      (triton-shared subprocess integration)
+  Layer 2.5 — AnchorIR Spec       (dual-track dialect whitelist)
 """
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 from .hw_capability import (
     HWCapability as HWCapability,

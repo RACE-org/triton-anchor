@@ -13,6 +13,7 @@ def TT_CacheModifierAttr : I32EnumAttr<
         I32EnumAttrCase<"WB", 4, "wb">,
         I32EnumAttrCase<"CS", 5, "cs">,
         I32EnumAttrCase<"WT", 6, "wt">,
+        I32EnumAttrCase<"CV", 7, "cv">,
     ]> {
     let cppNamespace = "::mlir::triton";
 }
@@ -43,7 +44,9 @@ def TT_PaddingOptionAttr : I32EnumAttr<
     [
         I32EnumAttrCase<"PAD_ZERO", 1, "zero">,
         // We can not set the string value to "NAN" because it is a keyword in C++
-        I32EnumAttrCase<"PAD_NAN", 2, "nan">
+        I32EnumAttrCase<"PAD_NAN", 2, "nan">,
+        I32EnumAttrCase<"PAD_NEG_INF", 3, "neg_inf">,
+        I32EnumAttrCase<"PAD_INF", 4, "inf">
     ]> {
     let cppNamespace = "::mlir::triton";
 }
@@ -62,6 +65,21 @@ def TT_AtomicRMWAttr : I32EnumAttr<
         I32EnumAttrCase<"UMAX", 8, "umax">,
         I32EnumAttrCase<"UMIN", 9, "umin">,
         I32EnumAttrCase<"XCHG", 10, "exch">
+    ]> {
+    let cppNamespace = "::mlir::triton";
+}
+
+def TT_DescriptorReduceKindAttr : I32EnumAttr<
+    "DescriptorReduceKind", "",
+    [
+        I32EnumAttrCase<"ADD", 1, "add">,
+        I32EnumAttrCase<"MIN", 2, "min">,
+        I32EnumAttrCase<"MAX", 3, "max">,
+        I32EnumAttrCase<"INC", 4, "inc">,
+        I32EnumAttrCase<"DEC", 5, "dec">,
+        I32EnumAttrCase<"AND", 6, "and">,
+        I32EnumAttrCase<"OR", 7, "or">,
+        I32EnumAttrCase<"XOR", 8, "xor">,
     ]> {
     let cppNamespace = "::mlir::triton";
 }
@@ -113,7 +131,24 @@ def TT_InputPrecisionAttr : I32EnumAttr<
     [
       I32EnumAttrCase<"TF32", 0, "tf32">,
       I32EnumAttrCase<"TF32x3", 1, "tf32x3">,
-      I32EnumAttrCase<"IEEE", 2, "ieee">
+      I32EnumAttrCase<"IEEE", 2, "ieee">,
+      I32EnumAttrCase<"BF16x3", 3, "bf16x3">,
+      I32EnumAttrCase<"BF16x6", 4, "bf16x6">
+    ]>{
+  let cppNamespace = "::mlir::triton";
+}
+
+// Type for ScaleDotElemType kind of floats.
+def TT_ScaleDotElemTypeAttr : I32EnumAttr<
+    "ScaleDotElemType", "",
+    [
+      I32EnumAttrCase<"E4M3", 0, "e4m3">,
+      I32EnumAttrCase<"E5M2", 1, "e5m2">,
+      I32EnumAttrCase<"E2M3", 2, "e2m3">,
+      I32EnumAttrCase<"E3M2", 3, "e3m2">,
+      I32EnumAttrCase<"E2M1", 4, "e2m1">,
+      I32EnumAttrCase<"BF16", 5, "bf16">,
+      I32EnumAttrCase<"FP16", 6, "fp16">
     ]>{
   let cppNamespace = "::mlir::triton";
 }
