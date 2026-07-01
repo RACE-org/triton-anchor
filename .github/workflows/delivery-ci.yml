@@ -79,6 +79,7 @@ jobs:
       BACKEND_INSTALL_MODE: ${{ inputs.backend_install_mode }}
       LLVM_BUILD_DIR: ${{ vars.LLVM_BUILD_DIR }}
       PPL_ROOT: ${{ vars.PPL_ROOT }}
+      PREBUILT_DOWNLOAD_TOKEN: ${{ secrets.PREBUILT_DOWNLOAD_TOKEN }}
       PREBUILT_LLVM_URL: ${{ vars.PREBUILT_LLVM_URL }}
       PREBUILT_LLVM_SHA256: ${{ vars.PREBUILT_LLVM_SHA256 }}
       PREBUILT_LLVM_STRIP_COMPONENTS: ${{ vars.PREBUILT_LLVM_STRIP_COMPONENTS }}
@@ -109,6 +110,7 @@ jobs:
             -e LLVM_BUILD_DIR \
             -e PACKAGE_TOOL \
             -e PPL_ROOT \
+            -e PREBUILT_DOWNLOAD_TOKEN \
             -e PREBUILT_LLVM_SHA256 \
             -e PREBUILT_LLVM_STRIP_COMPONENTS \
             -e PREBUILT_LLVM_URL \

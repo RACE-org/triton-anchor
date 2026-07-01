@@ -10,8 +10,17 @@ REQUIRE_PREBUILT_DEPS="${REQUIRE_PREBUILT_DEPS:-0}"
 download_file() {
   local url="$1"
   local output="$2"
+  local curl_args=(-L --fail --retry 3 --output "${output}")
+
+  if [[ -n "${PREBUILT_DOWNLOAD_TOKEN:-}" ]]; then
+    curl_args+=(
+      -H "Authorization: Bearer ${PREBUILT_DOWNLOAD_TOKEN}"
+      -H "Accept: application/octet-stream"
+    )
+  fi
+
   echo "Downloading ${url}"
-  curl -L --fail --retry 3 --output "${output}" "${url}"
+  curl "${curl_args[@]}" "${url}"
 }
 
 verify_sha256() {
