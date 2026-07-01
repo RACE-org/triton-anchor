@@ -7,7 +7,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, jiwang-delivery-ci]
 
 # 同一分支上新的推送自动取消旧的运行
 concurrency:
