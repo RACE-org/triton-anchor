@@ -13,6 +13,12 @@ download_file() {
   local curl_args=(-L --fail --retry 3 --output "${output}")
 
   if [[ -n "${PREBUILT_DOWNLOAD_TOKEN:-}" ]]; then
+    echo "Using authenticated download token"
+  else
+    echo "No authenticated download token configured"
+  fi
+
+  if [[ -n "${PREBUILT_DOWNLOAD_TOKEN:-}" ]]; then
     curl_args+=(
       -H "Authorization: Bearer ${PREBUILT_DOWNLOAD_TOKEN}"
       -H "Accept: application/octet-stream"
