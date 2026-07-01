@@ -1,0 +1,136 @@
+name: Delivery CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      run_full_smoke:
+        description: "Run source build and delivery smoke inside the Docker build environment"
+        required: false
+        type: boolean
+        default: false
+      backend:
+        description: "Backend label recorded in delivery evidence"
+        required: false
+        default: "frontend-only"
+      expected_backend:
+        description: "Optional Triton backend name that must be discovered, for example sophgo"
+        required: false
+        default: ""
+      backend_repo_url:
+        description: "Optional out-of-tree backend repository URL"
+        required: false
+        default: ""
+      backend_ref:
+        description: "Optional backend branch, tag, or commit"
+        required: false
+        default: ""
+      backend_install_mode:
+        description: "Backend install mode: standard or editable"
+        required: false
+        default: "standard"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  delivery-precheck:
+    name: Delivery Scripts Precheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install test tools
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Check CI scripts
+        run: |
+          bash -n scripts/ci/setup_prebuilt_deps.sh
+          bash -n scripts/ci/build_frontend.sh
+          bash -n scripts/ci/install_backend.sh
+          bash -n scripts/ci/run_delivery_smoke.sh
+          python -m py_compile scripts/ci/collect_delivery_evidence.py
+          python -m py_compile tests/test_smoke.py
+
+      - name: Run pure Python frontend tests
+        run: pytest python/triton_anchor/tests -v --tb=short
+        env:
+          PYTHONPATH: python
+
+  delivery-full-smoke:
+    name: Delivery Full Smoke
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_smoke }}
+    env:
+      TRITON_ANCHOR_DELIVERY_BACKEND: ${{ inputs.backend }}
+      EXPECTED_TRITON_BACKEND: ${{ inputs.expected_backend }}
+      BACKEND_REPO_URL: ${{ inputs.backend_repo_url }}
+      BACKEND_REF: ${{ inputs.backend_ref }}
+      BACKEND_INSTALL_MODE: ${{ inputs.backend_install_mode }}
+      LLVM_BUILD_DIR: ${{ vars.LLVM_BUILD_DIR }}
+      PPL_ROOT: ${{ vars.PPL_ROOT }}
+      PREBUILT_LLVM_URL: ${{ vars.PREBUILT_LLVM_URL }}
+      PREBUILT_LLVM_SHA256: ${{ vars.PREBUILT_LLVM_SHA256 }}
+      PREBUILT_LLVM_STRIP_COMPONENTS: ${{ vars.PREBUILT_LLVM_STRIP_COMPONENTS }}
+      PREBUILT_PPL_URL: ${{ vars.PREBUILT_PPL_URL }}
+      PREBUILT_PPL_SHA256: ${{ vars.PREBUILT_PPL_SHA256 }}
+      PREBUILT_PPL_STRIP_COMPONENTS: ${{ vars.PREBUILT_PPL_STRIP_COMPONENTS }}
+      REQUIRE_PREBUILT_DEPS: "1"
+      DELIVERY_ARTIFACT_DIR: delivery-artifacts
+      PACKAGE_TOOL: uv
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build delivery Docker image
+        run: docker build -f docker/build-env.Dockerfile -t triton-anchor-build-env:ci .
+
+      - name: Run source build and delivery smoke
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace/triton-anchor" \
+            -w /workspace/triton-anchor \
+            -e BACKEND_INSTALL_MODE \
+            -e BACKEND_REF \
+            -e BACKEND_REPO_URL \
+            -e DELIVERY_ARTIFACT_DIR \
+            -e EXPECTED_TRITON_BACKEND \
+            -e LLVM_BUILD_DIR \
+            -e PACKAGE_TOOL \
+            -e PPL_ROOT \
+            -e PREBUILT_LLVM_SHA256 \
+            -e PREBUILT_LLVM_STRIP_COMPONENTS \
+            -e PREBUILT_LLVM_URL \
+            -e PREBUILT_PPL_SHA256 \
+            -e PREBUILT_PPL_STRIP_COMPONENTS \
+            -e PREBUILT_PPL_URL \
+            -e REQUIRE_PREBUILT_DEPS \
+            -e TRITON_ANCHOR_DELIVERY_BACKEND \
+            triton-anchor-build-env:ci \
+            bash -lc "\
+              bash scripts/ci/setup_prebuilt_deps.sh && \
+              bash scripts/ci/build_frontend.sh && \
+              bash scripts/ci/install_backend.sh && \
+              bash scripts/ci/run_delivery_smoke.sh && \
+              python3 scripts/ci/collect_delivery_evidence.py \
+                --backend \"${TRITON_ANCHOR_DELIVERY_BACKEND}\" \
+                --artifact-dir \"${DELIVERY_ARTIFACT_DIR}\" \
+                --output \"${DELIVERY_ARTIFACT_DIR}/delivery-evidence.json\""
+
+      - name: Upload delivery artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivery-artifacts-${{ inputs.backend }}
+          path: delivery-artifacts/
