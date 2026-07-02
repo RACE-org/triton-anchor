@@ -12,10 +12,19 @@ on:
         required: false
         type: boolean
         default: false
-      backend:
-        description: "Backend label recorded in delivery evidence"
-        required: false
+      backend_profile:
+        description: "Backend profile to run"
+        required: true
+        type: choice
         default: "frontend-only"
+        options:
+          - frontend-only
+          - sophgo-cmodel
+          - custom
+      backend:
+        description: "Optional backend label recorded in delivery evidence"
+        required: false
+        default: ""
       expected_backend:
         description: "Optional Triton backend name that must be discovered, for example sophgo"
         required: false
@@ -28,10 +37,38 @@ on:
         description: "Optional backend branch, tag, or commit"
         required: false
         default: ""
-      backend_install_mode:
-        description: "Backend install mode: standard or editable"
+      backend_envsetup:
+        description: "Optional backend envsetup path, relative to backend repo, for example envsetup.sh"
         required: false
-        default: "standard"
+        default: ""
+      backend_envsetup_args:
+        description: "Optional backend envsetup arguments, for example PIO_CMODEL"
+        required: false
+        default: ""
+      backend_test_command:
+        description: "Optional backend test command run from backend repo"
+        required: false
+        default: ""
+      backend_pip_packages:
+        description: "Optional backend Python packages installed before tests"
+        required: false
+        default: ""
+      backend_torch_version:
+        description: "Optional torch version for backend tests, for example 2.8.0"
+        required: false
+        default: ""
+      backend_torch_index_url:
+        description: "Optional torch package index URL"
+        required: false
+        default: ""
+      backend_torch_tpu_wheel_url:
+        description: "Optional torch_tpu runtime wheel URL"
+        required: false
+        default: ""
+      backend_torch_tpu_wheel_sha256:
+        description: "Optional sha256 for torch_tpu runtime wheel"
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -55,15 +92,17 @@ jobs:
 
       - name: Check CI scripts
         run: |
+          bash -n scripts/ci/configure_backend_profile.sh
           bash -n scripts/ci/setup_prebuilt_deps.sh
           bash -n scripts/ci/build_frontend.sh
           bash -n scripts/ci/install_backend.sh
+          bash -n scripts/ci/install_backend_deps.sh
           bash -n scripts/ci/run_delivery_smoke.sh
           python -m py_compile scripts/ci/collect_delivery_evidence.py
           python -m py_compile tests/test_smoke.py
 
       - name: Run pure Python frontend tests
-        run: pytest python/triton_anchor/tests -v --tb=short
+        run: python -m pytest python/triton_anchor/tests -v --tb=short
         env:
           PYTHONPATH: python
 
@@ -72,11 +111,19 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_smoke }}
     env:
+      BACKEND_PROFILE: ${{ inputs.backend_profile }}
       TRITON_ANCHOR_DELIVERY_BACKEND: ${{ inputs.backend }}
       EXPECTED_TRITON_BACKEND: ${{ inputs.expected_backend }}
       BACKEND_REPO_URL: ${{ inputs.backend_repo_url }}
       BACKEND_REF: ${{ inputs.backend_ref }}
-      BACKEND_INSTALL_MODE: ${{ inputs.backend_install_mode }}
+      BACKEND_ENVSETUP: ${{ inputs.backend_envsetup }}
+      BACKEND_ENVSETUP_ARGS: ${{ inputs.backend_envsetup_args }}
+      BACKEND_TEST_COMMAND: ${{ inputs.backend_test_command }}
+      BACKEND_PIP_PACKAGES: ${{ inputs.backend_pip_packages }}
+      BACKEND_TORCH_VERSION: ${{ inputs.backend_torch_version }}
+      BACKEND_TORCH_INDEX_URL: ${{ inputs.backend_torch_index_url }}
+      BACKEND_TORCH_TPU_WHEEL_URL: ${{ inputs.backend_torch_tpu_wheel_url }}
+      BACKEND_TORCH_TPU_WHEEL_SHA256: ${{ inputs.backend_torch_tpu_wheel_sha256 }}
       LLVM_BUILD_DIR: ${{ vars.LLVM_BUILD_DIR }}
       PPL_ROOT: ${{ vars.PPL_ROOT }}
       PREBUILT_DOWNLOAD_TOKEN: ${{ secrets.PREBUILT_DOWNLOAD_TOKEN }}
@@ -86,14 +133,26 @@ jobs:
       PREBUILT_PPL_URL: ${{ vars.PREBUILT_PPL_URL }}
       PREBUILT_PPL_SHA256: ${{ vars.PREBUILT_PPL_SHA256 }}
       PREBUILT_PPL_STRIP_COMPONENTS: ${{ vars.PREBUILT_PPL_STRIP_COMPONENTS }}
-      REQUIRE_PREBUILT_DEPS: "1"
+      SOPHGO_BACKEND_REPO_URL: ${{ vars.SOPHGO_BACKEND_REPO_URL }}
+      SOPHGO_BACKEND_REF: ${{ vars.SOPHGO_BACKEND_REF }}
+      SOPHGO_LLVM_URL: ${{ vars.SOPHGO_LLVM_URL }}
+      SOPHGO_LLVM_SHA256: ${{ vars.SOPHGO_LLVM_SHA256 }}
+      SOPHGO_LLVM_STRIP_COMPONENTS: ${{ vars.SOPHGO_LLVM_STRIP_COMPONENTS }}
+      SOPHGO_PPL_URL: ${{ vars.SOPHGO_PPL_URL }}
+      SOPHGO_PPL_SHA256: ${{ vars.SOPHGO_PPL_SHA256 }}
+      SOPHGO_PPL_STRIP_COMPONENTS: ${{ vars.SOPHGO_PPL_STRIP_COMPONENTS }}
+      SOPHGO_TORCH_TPU_WHEEL_URL: ${{ vars.SOPHGO_TORCH_TPU_WHEEL_URL }}
+      SOPHGO_TORCH_TPU_WHEEL_SHA256: ${{ vars.SOPHGO_TORCH_TPU_WHEEL_SHA256 }}
+      REQUIRE_PREBUILT_DEPS: "0"
       DELIVERY_ARTIFACT_DIR: delivery-artifacts
       PACKAGE_TOOL: uv
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Diagnose prebuilt download token
+        if: ${{ env.PREBUILT_DOWNLOAD_TOKEN != '' }}
         run: |
           status=$(curl -sS -o /tmp/repo.json -w "%{http_code}" \
             -H "Authorization: Bearer ${PREBUILT_DOWNLOAD_TOKEN}" \
@@ -113,9 +172,17 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}:/workspace/triton-anchor" \
             -w /workspace/triton-anchor \
-            -e BACKEND_INSTALL_MODE \
+            -e BACKEND_ENVSETUP \
+            -e BACKEND_ENVSETUP_ARGS \
+            -e BACKEND_PIP_PACKAGES \
+            -e BACKEND_PROFILE \
             -e BACKEND_REF \
             -e BACKEND_REPO_URL \
+            -e BACKEND_TEST_COMMAND \
+            -e BACKEND_TORCH_INDEX_URL \
+            -e BACKEND_TORCH_VERSION \
+            -e BACKEND_TORCH_TPU_WHEEL_SHA256 \
+            -e BACKEND_TORCH_TPU_WHEEL_URL \
             -e DELIVERY_ARTIFACT_DIR \
             -e EXPECTED_TRITON_BACKEND \
             -e LLVM_BUILD_DIR \
@@ -129,11 +196,23 @@ jobs:
             -e PREBUILT_PPL_STRIP_COMPONENTS \
             -e PREBUILT_PPL_URL \
             -e REQUIRE_PREBUILT_DEPS \
+            -e SOPHGO_BACKEND_REF \
+            -e SOPHGO_BACKEND_REPO_URL \
+            -e SOPHGO_LLVM_SHA256 \
+            -e SOPHGO_LLVM_STRIP_COMPONENTS \
+            -e SOPHGO_LLVM_URL \
+            -e SOPHGO_PPL_SHA256 \
+            -e SOPHGO_PPL_STRIP_COMPONENTS \
+            -e SOPHGO_PPL_URL \
+            -e SOPHGO_TORCH_TPU_WHEEL_SHA256 \
+            -e SOPHGO_TORCH_TPU_WHEEL_URL \
             -e TRITON_ANCHOR_DELIVERY_BACKEND \
             triton-anchor-build-env:ci \
             bash -lc "\
+              source scripts/ci/configure_backend_profile.sh && \
               bash scripts/ci/setup_prebuilt_deps.sh && \
               bash scripts/ci/build_frontend.sh && \
+              bash scripts/ci/install_backend_deps.sh && \
               bash scripts/ci/install_backend.sh && \
               bash scripts/ci/run_delivery_smoke.sh && \
               python3 scripts/ci/collect_delivery_evidence.py \
@@ -145,5 +224,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: delivery-artifacts-${{ inputs.backend }}
+          name: delivery-artifacts-${{ inputs.backend_profile }}
           path: delivery-artifacts/

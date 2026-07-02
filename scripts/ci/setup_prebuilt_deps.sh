@@ -6,6 +6,8 @@ WORKSPACE="${WORKSPACE:-/workspace}"
 LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-${WORKSPACE}/llvm-release}"
 PPL_ROOT="${PPL_ROOT:-${WORKSPACE}/ppl-release}"
 REQUIRE_PREBUILT_DEPS="${REQUIRE_PREBUILT_DEPS:-0}"
+REQUIRE_PREBUILT_LLVM="${REQUIRE_PREBUILT_LLVM:-${REQUIRE_PREBUILT_DEPS}}"
+REQUIRE_PREBUILT_PPL="${REQUIRE_PREBUILT_PPL:-${REQUIRE_PREBUILT_DEPS}}"
 
 url_decode() {
   python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))' "$1"
@@ -132,11 +134,16 @@ setup_package() {
   local url_var="$4"
   local sha_var="$5"
   local strip_var="$6"
+  local require_var="${7:-}"
 
   local archive="${!archive_var:-}"
   local url="${!url_var:-}"
   local sha="${!sha_var:-}"
   local strip_components="${!strip_var:-1}"
+  local required="${REQUIRE_PREBUILT_DEPS}"
+  if [[ -n "${require_var}" ]]; then
+    required="${!require_var:-${REQUIRE_PREBUILT_DEPS}}"
+  fi
 
   if [[ -d "${destination}" ]] && [[ -n "$(find "${destination}" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
     echo "${name} already exists at ${destination}"
@@ -162,7 +169,7 @@ setup_package() {
     return 0
   fi
 
-  if [[ "${REQUIRE_PREBUILT_DEPS}" == "1" ]]; then
+  if [[ "${required}" == "1" ]]; then
     echo "${name} is required but neither ${archive_var} nor ${url_var} was provided." >&2
     return 1
   fi
@@ -170,8 +177,8 @@ setup_package() {
   echo "::warning::${name} was not configured; continuing without it."
 }
 
-setup_package "llvm" "${LLVM_BUILD_DIR}" PREBUILT_LLVM_ARCHIVE PREBUILT_LLVM_URL PREBUILT_LLVM_SHA256 PREBUILT_LLVM_STRIP_COMPONENTS
-setup_package "ppl" "${PPL_ROOT}" PREBUILT_PPL_ARCHIVE PREBUILT_PPL_URL PREBUILT_PPL_SHA256 PREBUILT_PPL_STRIP_COMPONENTS
+setup_package "llvm" "${LLVM_BUILD_DIR}" PREBUILT_LLVM_ARCHIVE PREBUILT_LLVM_URL PREBUILT_LLVM_SHA256 PREBUILT_LLVM_STRIP_COMPONENTS REQUIRE_PREBUILT_LLVM
+setup_package "ppl" "${PPL_ROOT}" PREBUILT_PPL_ARCHIVE PREBUILT_PPL_URL PREBUILT_PPL_SHA256 PREBUILT_PPL_STRIP_COMPONENTS REQUIRE_PREBUILT_PPL
 
 echo "LLVM_BUILD_DIR=${LLVM_BUILD_DIR}"
 echo "PPL_ROOT=${PPL_ROOT}"

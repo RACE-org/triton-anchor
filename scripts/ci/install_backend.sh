@@ -4,11 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 BACKEND_INSTALL_ARGS="${BACKEND_INSTALL_ARGS:-}"
-BACKEND_INSTALL_MODE="${BACKEND_INSTALL_MODE:-standard}"
 BACKEND_CLONE_DIR="${BACKEND_CLONE_DIR:-/tmp/triton-anchor-backend}"
 BACKEND_CLONE_SUBMODULES="${BACKEND_CLONE_SUBMODULES:-0}"
 PACKAGE_TOOL="${PACKAGE_TOOL:-auto}"
 SOURCE_ENVSETUP="${SOURCE_ENVSETUP:-1}"
+BACKEND_ENVSETUP="${BACKEND_ENVSETUP:-}"
+BACKEND_ENVSETUP_ARGS="${BACKEND_ENVSETUP_ARGS:-}"
+BACKEND_SOURCE_ENVSETUP_BEFORE_INSTALL="${BACKEND_SOURCE_ENVSETUP_BEFORE_INSTALL:-1}"
 
 if [[ "${SOURCE_ENVSETUP}" == "1" ]]; then
   # Backends often compile or import against the same LLVM/Triton environment.
@@ -26,6 +28,28 @@ uv_pip() {
   else
     uv pip --system "$@"
   fi
+}
+
+source_backend_envsetup() {
+  local backend_dir="$1"
+  local setup_script="${BACKEND_ENVSETUP}"
+
+  if [[ "${BACKEND_SOURCE_ENVSETUP_BEFORE_INSTALL}" != "1" || -z "${setup_script}" ]]; then
+    return 0
+  fi
+
+  if [[ "${setup_script}" != /* ]]; then
+    setup_script="${backend_dir}/${setup_script}"
+  fi
+
+  if [[ ! -f "${setup_script}" ]]; then
+    echo "Backend envsetup script does not exist: ${setup_script}" >&2
+    exit 1
+  fi
+
+  echo "Sourcing backend envsetup before install: ${setup_script} ${BACKEND_ENVSETUP_ARGS}"
+  # shellcheck disable=SC1090,SC2086
+  source "${setup_script}" ${BACKEND_ENVSETUP_ARGS}
 }
 
 if [[ -n "${BACKEND_PATH:-}" ]]; then
@@ -58,17 +82,11 @@ if [[ ! -d "${backend_dir}" ]]; then
   exit 1
 fi
 
-echo "Installing backend from ${backend_dir}"
-install_target=("${backend_dir}")
-if [[ "${BACKEND_INSTALL_MODE}" == "editable" ]]; then
-  install_target=(-e "${backend_dir}")
-elif [[ "${BACKEND_INSTALL_MODE}" != "standard" ]]; then
-  echo "Unsupported BACKEND_INSTALL_MODE='${BACKEND_INSTALL_MODE}'. Use 'standard' or 'editable'." >&2
-  exit 1
-fi
+source_backend_envsetup "${backend_dir}"
 
+echo "Installing backend from ${backend_dir}"
 if use_uv; then
-  uv_pip install "${install_target[@]}" ${BACKEND_INSTALL_ARGS}
+  uv_pip install "${backend_dir}" ${BACKEND_INSTALL_ARGS}
 else
-  "${PYTHON_BIN}" -m pip install "${install_target[@]}" ${BACKEND_INSTALL_ARGS}
+  "${PYTHON_BIN}" -m pip install "${backend_dir}" ${BACKEND_INSTALL_ARGS}
 fi
