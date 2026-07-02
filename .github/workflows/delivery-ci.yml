@@ -93,6 +93,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Diagnose prebuilt download token
+        run: |
+          status=$(curl -sS -o /tmp/repo.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${PREBUILT_DOWNLOAD_TOKEN}" \
+            https://api.github.com/repos/RACE-org/triton_race)
+          echo "RACE-org/triton_race API status: ${status}"
+          if [ "${status}" != "200" ]; then
+            echo "Token cannot access RACE-org/triton_race. Check PAT repo scope, SSO authorization, and repository secret value."
+            cat /tmp/repo.json
+            exit 1
+          fi
 
       - name: Build delivery Docker image
         run: docker build -f docker/build-env.Dockerfile -t triton-anchor-build-env:ci .
