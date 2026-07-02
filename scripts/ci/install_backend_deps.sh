@@ -145,7 +145,8 @@ torch_tpu_wheel="${BACKEND_TORCH_TPU_WHEEL_ARCHIVE}"
 if [[ -z "${torch_tpu_wheel}" && -n "${BACKEND_TORCH_TPU_WHEEL_URL}" ]]; then
   wheel_name="${BACKEND_TORCH_TPU_WHEEL_URL%%\?*}"
   wheel_name="${wheel_name##*/}"
-  torch_tpu_wheel="$(mktemp "/tmp/torch-tpu-wheel.XXXXXX.${wheel_name}")"
+  wheel_dir="$(mktemp -d /tmp/torch-tpu-wheel.XXXXXX)"
+  torch_tpu_wheel="${wheel_dir}/${wheel_name}"
   download_file "${BACKEND_TORCH_TPU_WHEEL_URL}" "${torch_tpu_wheel}"
 fi
 
