@@ -2,7 +2,13 @@ name: Static Checks
 
 on:
   push:
+    paths-ignore:
+      - "triton"
+      - "triton/**"
   pull_request:
+    paths-ignore:
+      - "triton"
+      - "triton/**"
   workflow_dispatch:
 
 concurrency:
@@ -20,6 +26,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+
+      - name: Exclude root triton
+        run: rm -rf triton
 
       - name: Install actionlint
         env:
@@ -41,6 +50,9 @@ jobs:
         with:
           submodules: false
 
+      - name: Exclude root triton
+        run: rm -rf triton
+
       - name: Install shellcheck
         run: |
           sudo apt-get update
@@ -56,6 +68,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+
+      - name: Exclude root triton
+        run: rm -rf triton
 
       - uses: actions/setup-python@v5
         with:
@@ -84,6 +99,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+
+      - name: Exclude root triton
+        run: rm -rf triton
 
       - uses: actions/setup-python@v5
         with:
@@ -124,6 +142,8 @@ jobs:
               for match in link_re.finditer(text):
                   raw = match.group(1).strip()
                   target = raw.split()[0].strip("<>")
+                  if target == "triton" or target.startswith("triton/"):
+                      continue
                   if not target or target.startswith(ignored_prefixes):
                       continue
                   target = unquote(target.split("#", 1)[0])
@@ -151,6 +171,9 @@ jobs:
         with:
           submodules: false
 
+      - name: Exclude root triton
+        run: rm -rf triton
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -169,6 +192,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+
+      - name: Exclude root triton
+        run: rm -rf triton
 
       - uses: actions/setup-python@v5
         with:
@@ -189,6 +215,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: false
+
+      - name: Exclude root triton
+        run: rm -rf triton
 
       - uses: actions/setup-python@v5
         with:
@@ -228,7 +257,27 @@ jobs:
           submodules: false
           fetch-depth: 1
 
+      - name: Exclude root triton
+        run: rm -rf triton
+
+      - name: Write gitleaks allowlist
+        run: |
+          cat > .gitleaks.toml <<'EOF'
+          title = "Triton Anchor Gitleaks Config"
+
+          [extend]
+          useDefault = true
+
+          [[allowlists]]
+          description = "Ignore root triton file or directory"
+          paths = [
+            '''^triton$''',
+            '''^triton/''',
+          ]
+          EOF
+
       - name: Run gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
