@@ -1,0 +1,231 @@
+name: Static Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-lint:
+    name: "Workflow Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+        run: |
+          curl -sSfL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -version
+
+      - name: Run actionlint
+        run: ./actionlint
+
+  shell-lint:
+    name: "Shell Script Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        run: shellcheck --severity=error envsetup.sh
+
+  config-lint:
+    name: "Config Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install config lint tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install validate-pyproject yamllint
+
+      - name: Validate pyproject metadata
+        run: validate-pyproject pyproject.toml
+
+      - name: Lint GitHub issue templates
+        run: >
+          yamllint
+          -d "{extends: relaxed, rules: {line-length: disable, truthy: disable}}"
+          .github/ISSUE_TEMPLATE
+
+  docs-link-check:
+    name: "Docs Local Link Check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check local Markdown links
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.parse import unquote
+          import re
+          import sys
+
+          root = Path.cwd()
+          docs = [
+              root / "README.md",
+              root / "ROADMAP.md",
+              root / "SECURITY.md",
+              *sorted((root / "docs").glob("*.md")),
+          ]
+
+          link_re = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+          ignored_prefixes = (
+              "http://",
+              "https://",
+              "mailto:",
+              "tel:",
+              "#",
+              "../../",
+          )
+
+          errors = []
+          for doc in docs:
+              if not doc.exists():
+                  continue
+              text = doc.read_text(encoding="utf-8")
+              for match in link_re.finditer(text):
+                  raw = match.group(1).strip()
+                  target = raw.split()[0].strip("<>")
+                  if not target or target.startswith(ignored_prefixes):
+                      continue
+                  target = unquote(target.split("#", 1)[0])
+                  if not target:
+                      continue
+                  path = (doc.parent / target).resolve()
+                  try:
+                      path.relative_to(root)
+                  except ValueError:
+                      continue
+                  if not path.exists():
+                      errors.append(f"{doc.relative_to(root)}: broken local link: {raw}")
+
+          if errors:
+              print("\n".join(errors))
+              sys.exit(1)
+          print("All local Markdown links are valid.")
+          PY
+
+  docs-format-lint:
+    name: "Docs Format Lint"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install markdownlint
+        run: npm install -g markdownlint-cli2
+
+      - name: Run markdownlint
+        run: markdownlint-cli2 README.md ROADMAP.md SECURITY.md "docs/**/*.md"
+
+  python-security:
+    name: "Python Security Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bandit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install bandit
+
+      - name: Run bandit
+        run: bandit -r python -x python/triton_anchor/tests -ll
+
+  dependency-audit:
+    name: "Dependency Audit"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+
+      - name: Export declared Python dependencies
+        run: |
+          python - <<'PY' > audit-requirements.txt
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          project = data.get("project", {})
+          deps = list(project.get("dependencies", []))
+          optional = project.get("optional-dependencies", {})
+          deps.extend(optional.get("dev", []))
+
+          for dep in deps:
+              print(dep)
+          PY
+          cat audit-requirements.txt
+
+      - name: Run pip-audit
+        run: pip-audit -r audit-requirements.txt
+
+  secret-scan:
+    name: "Secret Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
