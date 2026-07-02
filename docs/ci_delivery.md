@@ -91,6 +91,7 @@ Configure these repository variables when running the full smoke job:
 - `PREBUILT_PPL_URL`: URL for the prebuilt PPL archive.
 - `PREBUILT_PPL_SHA256`: expected SHA256 for the PPL archive.
 - `PREBUILT_PPL_STRIP_COMPONENTS`: optional tar strip count, default `1`.
+- `PREBUILT_DOWNLOAD_TOKEN`: repository secret used to download private GitHub release assets. When a `PREBUILT_*_URL` has the form `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>`, the script resolves and downloads the asset through the GitHub Release Asset API.
 - `LLVM_BUILD_DIR`: optional LLVM extraction target, default
   `/workspace/llvm-release`.
 - `PPL_ROOT`: optional PPL extraction target, default `/workspace/ppl-release`.
