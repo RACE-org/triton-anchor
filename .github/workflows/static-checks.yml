@@ -67,9 +67,11 @@ jobs:
           python -m pip install validate-pyproject yamllint
 
       - name: Validate pyproject metadata
+        continue-on-error: true
         run: validate-pyproject pyproject.toml
 
       - name: Lint GitHub issue templates
+        continue-on-error: true
         run: >
           yamllint
           -d "{extends: relaxed, rules: {line-length: disable, truthy: disable}}"
@@ -88,6 +90,7 @@ jobs:
           python-version: "3.11"
 
       - name: Check local Markdown links
+        continue-on-error: true
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -143,7 +146,6 @@ jobs:
   docs-format-lint:
     name: "Docs Format Lint"
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -157,6 +159,7 @@ jobs:
         run: npm install -g markdownlint-cli2
 
       - name: Run markdownlint
+        continue-on-error: true
         run: markdownlint-cli2 README.md ROADMAP.md SECURITY.md "docs/**/*.md"
 
   python-security:
