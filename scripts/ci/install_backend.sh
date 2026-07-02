@@ -65,7 +65,14 @@ elif [[ -n "${BACKEND_REPO_URL:-}" ]]; then
   fi
 
   echo "Cloning backend repo ${BACKEND_REPO_URL}"
-  git clone "${clone_args[@]}" "${BACKEND_REPO_URL}" "${backend_dir}"
+  if [[ -n "${PREBUILT_DOWNLOAD_TOKEN:-}" && "${BACKEND_REPO_URL}" == https://github.com/* ]]; then
+    auth_header="$(printf 'x-access-token:%s' "${PREBUILT_DOWNLOAD_TOKEN}" | base64 | tr -d '\n')"
+    echo "Using PREBUILT_DOWNLOAD_TOKEN for authenticated GitHub backend clone."
+    git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+      clone "${clone_args[@]}" "${BACKEND_REPO_URL}" "${backend_dir}"
+  else
+    git clone "${clone_args[@]}" "${BACKEND_REPO_URL}" "${backend_dir}"
+  fi
 
   if [[ -n "${BACKEND_REF:-}" ]]; then
     git -C "${backend_dir}" checkout "${BACKEND_REF}"
