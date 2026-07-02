@@ -7,15 +7,19 @@ triton-anchor: 统一构建脚本
 3. 同时安装 triton 和 triton_anchor 两个包
 """
 import os
-import re
 import platform
 import shutil
 import subprocess
 import sys
 import sysconfig
+import warnings
 from pathlib import Path
 
-from setuptools import Extension, setup, find_packages
+# Suppress annoying setuptools warnings about C++ header directories looking like Python packages
+warnings.filterwarnings("ignore", message=".*is absent from the `packages` configuration.*")
+
+
+from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from distutils.command.clean import clean
@@ -95,7 +99,6 @@ class CMakeBuild(build_ext):
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + extdir,
             "-DTRITON_BUILD_PYTHON_MODULE=ON",
             "-DPython3_EXECUTABLE:FILEPATH=" + sys.executable,
-            "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON",
             "-DPYTHON_INCLUDE_DIRS=" + python_include_dir,
         ]
 
@@ -192,24 +195,17 @@ setup(
     author="Triton Anchor Contributors",
     description="Unified Triton Compilation Frontend for custom AI accelerators",
     long_description="",
+    license="Apache-2.0",
     package_dir={
         "": "python",
         "triton": "triton/python/triton",
     },
     packages=get_packages(),
-    install_requires=["filelock"],
+    install_requires=[],
     package_data={
         "triton.tools": ["compile.h", "compile.c"],
-        "triton": [
-            "include/**/*.h", "include/**/*.inc", "include/**/*.def",
-            "include/**/**/*.h", "include/**/**/*.inc", "include/**/**/*.def",
-            "include/**/**/**/*.h", "include/**/**/**/*.inc", "include/**/**/**/*.def",
-        ],
-        "triton_anchor": [
-            "include/**/*.h", "include/**/*.inc", "include/**/*.def",
-            "include/**/**/*.h", "include/**/**/*.inc", "include/**/**/*.def",
-            "include/**/**/**/*.h", "include/**/**/**/*.inc", "include/**/**/**/*.def",
-        ],
+        "triton": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
+        "triton_anchor": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
     },
     include_package_data=True,
     ext_modules=[CMakeExtension("triton", "triton/python/triton/_C/")],
@@ -229,7 +225,6 @@ setup(
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
         "Topic :: Software Development :: Compilers",
-        "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
     ],
     python_requires=">=3.8",
