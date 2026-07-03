@@ -56,7 +56,9 @@ source_backend_envsetup() {
 
   echo "Sourcing backend envsetup before smoke: ${setup_script} ${BACKEND_ENVSETUP_ARGS}"
   # shellcheck disable=SC1090,SC2086
+  set +u
   source "${setup_script}" ${BACKEND_ENVSETUP_ARGS}
+  set -u
 }
 
 run_with_log() {
