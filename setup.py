@@ -7,15 +7,19 @@ orchestration layer.
 """
 
 import os
-import re
 import shutil
+import re
 import subprocess
 import sys
 import sysconfig
+import warnings
 from pathlib import Path
 
+#Suppress annoying setuptools warnings about C++ header directories looking like Python packages
+warnings.filterwarnings("ignore", message=".*is absent from the `packages` configuration.*")
+
 import pybind11
-from setuptools import Extension, find_namespace_packages, setup
+from setuptools import Extension, setup, find_namespace_packages
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 
@@ -231,6 +235,7 @@ setup(
     version=read_version(),
     description="Triton Anchor with triton-shared frontend/core integration",
     long_description="Triton Anchor with triton-shared frontend/core integration",
+    license="Apache-2.0",
     author="Triton Anchor Contributors",
     python_requires=">=3.10",
     package_dir={"": "python", "triton": "triton/python/triton"},
@@ -240,7 +245,7 @@ setup(
             where="python", include=["triton_anchor", "triton_anchor.*"]
         )
     ),
-    install_requires=["filelock"],
+    install_requires=[],
     package_data={
         "triton": ["_C/libtriton/*.pyi"],
     },
