@@ -127,6 +127,24 @@ extract_archive() {
   esac
 }
 
+normalize_single_root_dir() {
+  local destination="$1"
+  local entries=()
+
+  shopt -s nullglob dotglob
+  entries=("${destination}"/*)
+  shopt -u nullglob dotglob
+
+  if [[ ${#entries[@]} -eq 1 && -d "${entries[0]}" ]]; then
+    local nested_root="${entries[0]}"
+    echo "Normalizing extracted root ${nested_root} into ${destination}"
+    shopt -s nullglob dotglob
+    mv "${nested_root}"/* "${destination}/"
+    shopt -u nullglob dotglob
+    rmdir "${nested_root}"
+  fi
+}
+
 setup_package() {
   local name="$1"
   local destination="$2"
@@ -154,6 +172,7 @@ setup_package() {
     echo "Using local ${name} archive: ${archive}"
     verify_sha256 "${archive}" "${sha}"
     extract_archive "${archive}" "${destination}" "${strip_components}"
+    normalize_single_root_dir "${destination}"
     return 0
   fi
 
@@ -166,6 +185,7 @@ setup_package() {
     download_file "${url}" "${tmp_archive}"
     verify_sha256 "${tmp_archive}" "${sha}"
     extract_archive "${tmp_archive}" "${destination}" "${strip_components}"
+    normalize_single_root_dir "${destination}"
     return 0
   fi
 
