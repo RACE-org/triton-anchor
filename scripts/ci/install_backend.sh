@@ -49,7 +49,9 @@ source_backend_envsetup() {
 
   echo "Sourcing backend envsetup before install: ${setup_script} ${BACKEND_ENVSETUP_ARGS}"
   # shellcheck disable=SC1090,SC2086
+  set +u
   source "${setup_script}" ${BACKEND_ENVSETUP_ARGS}
+  set -u
 }
 
 if [[ -n "${BACKEND_PATH:-}" ]]; then
