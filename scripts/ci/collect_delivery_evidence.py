@@ -149,6 +149,12 @@ def backend_repo_dir() -> Path | None:
     return None
 
 
+def flaggems_repo_dir() -> Path:
+    if env_value("FLAGGEMS_CLONE_DIR"):
+        return Path(env_value("FLAGGEMS_CLONE_DIR"))
+    return Path(env_value("WORKSPACE") or "/workspace") / "FlagGems"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", default=os.getenv("TRITON_ANCHOR_DELIVERY_BACKEND", "frontend-only"))
@@ -158,6 +164,7 @@ def main() -> int:
 
     artifact_dir = Path(args.artifact_dir)
     backend_dir = backend_repo_dir()
+    flaggems_dir = flaggems_repo_dir()
     evidence = {
         "schema_version": 2,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -187,6 +194,13 @@ def main() -> int:
             if backend_dir is None
             else {"configured": True, **git_info(backend_dir)}
         ),
+        "flaggems_repository": {
+            "enabled": env_value("RUN_FLAGGEMS_TESTS"),
+            "configured_url": env_value("FLAGGEMS_REPO_URL"),
+            "configured_ref": env_value("FLAGGEMS_REF"),
+            "test_command": env_value("FLAGGEMS_TEST_COMMAND"),
+            **git_info(flaggems_dir),
+        },
         "prebuilt_dependencies": {
             "llvm": prebuilt_dependency_info(
                 "llvm",

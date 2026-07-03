@@ -36,7 +36,7 @@ case "${BACKEND_PROFILE}" in
   sophgo-cmodel)
     ci_default TRITON_ANCHOR_DELIVERY_BACKEND "sophgo-cmodel"
     ci_default EXPECTED_TRITON_BACKEND "sophgo"
-    ci_default BACKEND_REPO_URL "${SOPHGO_BACKEND_REPO_URL:-}"
+    ci_default BACKEND_REPO_URL "${SOPHGO_BACKEND_REPO_URL:-https://github.com/RACE-org/triton-sophgo-backend.git}"
     ci_default BACKEND_REF "${SOPHGO_BACKEND_REF:-}"
     ci_default BACKEND_ENVSETUP "envsetup.sh"
     ci_default BACKEND_ENVSETUP_ARGS "PIO_CMODEL"
@@ -48,6 +48,10 @@ case "${BACKEND_PROFILE}" in
     ci_default BACKEND_TORCH_TPU_WHEEL_URL "${SOPHGO_TORCH_TPU_WHEEL_URL:-}"
     ci_default BACKEND_TORCH_TPU_WHEEL_SHA256 "${SOPHGO_TORCH_TPU_WHEEL_SHA256:-}"
     ci_default REQUIRE_BACKEND_TORCH_TPU_WHEEL "1"
+    ci_default FLAGGEMS_REPO_URL "${SOPHGO_FLAGGEMS_REPO_URL:-https://github.com/sophgo-yicong/FlagGems.git}"
+    ci_default FLAGGEMS_REF "${SOPHGO_FLAGGEMS_REF:-sophgo_backend}"
+    ci_default FLAGGEMS_PIP_PACKAGES "${SOPHGO_FLAGGEMS_PIP_PACKAGES:-scipy pytest}"
+    ci_default FLAGGEMS_TEST_COMMAND "${SOPHGO_FLAGGEMS_TEST_COMMAND:-python3 testop/batch_test_flaggems.py}"
     ci_override_if_set PREBUILT_LLVM_URL "${SOPHGO_LLVM_URL:-}"
     ci_override_if_set PREBUILT_LLVM_SHA256 "${SOPHGO_LLVM_SHA256:-}"
     ci_override_if_set PREBUILT_LLVM_STRIP_COMPONENTS "${SOPHGO_LLVM_STRIP_COMPONENTS:-}"
@@ -70,11 +74,22 @@ case "${BACKEND_PROFILE}" in
     ;;
 esac
 
+ci_override_if_set PREBUILT_LLVM_URL "${INPUT_PREBUILT_LLVM_URL:-}"
+ci_override_if_set PREBUILT_LLVM_SHA256 "${INPUT_PREBUILT_LLVM_SHA256:-}"
+ci_override_if_set PREBUILT_LLVM_STRIP_COMPONENTS "${INPUT_PREBUILT_LLVM_STRIP_COMPONENTS:-}"
+ci_override_if_set PREBUILT_PPL_URL "${INPUT_PREBUILT_PPL_URL:-}"
+ci_override_if_set PREBUILT_PPL_SHA256 "${INPUT_PREBUILT_PPL_SHA256:-}"
+ci_override_if_set PREBUILT_PPL_STRIP_COMPONENTS "${INPUT_PREBUILT_PPL_STRIP_COMPONENTS:-}"
+
 echo "Delivery backend profile: ${BACKEND_PROFILE}"
 echo "Delivery backend label: ${TRITON_ANCHOR_DELIVERY_BACKEND:-}"
 echo "Expected Triton backend: ${EXPECTED_TRITON_BACKEND:-<none>}"
 echo "Backend repo URL: ${BACKEND_REPO_URL:-<none>}"
 echo "Backend ref: ${BACKEND_REF:-<default>}"
 echo "Backend envsetup: ${BACKEND_ENVSETUP:-<none>} ${BACKEND_ENVSETUP_ARGS:-}"
+echo "Run FlagGems tests: ${RUN_FLAGGEMS_TESTS:-false}"
+echo "FlagGems repo URL: ${FLAGGEMS_REPO_URL:-<none>}"
+echo "FlagGems ref: ${FLAGGEMS_REF:-<default>}"
+echo "FlagGems test command: ${FLAGGEMS_TEST_COMMAND:-<none>}"
 echo "Require LLVM: ${REQUIRE_PREBUILT_LLVM:-${REQUIRE_PREBUILT_DEPS:-0}}"
 echo "Require PPL: ${REQUIRE_PREBUILT_PPL:-${REQUIRE_PREBUILT_DEPS:-0}}"

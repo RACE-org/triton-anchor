@@ -69,6 +69,51 @@ on:
         description: "Optional sha256 for torch_tpu runtime wheel"
         required: false
         default: ""
+      prebuilt_llvm_url:
+        description: "Optional prebuilt LLVM archive URL"
+        required: false
+        default: ""
+      prebuilt_llvm_sha256:
+        description: "Optional sha256 for prebuilt LLVM archive"
+        required: false
+        default: ""
+      prebuilt_llvm_strip_components:
+        description: "Optional tar strip-components for prebuilt LLVM"
+        required: false
+        default: ""
+      prebuilt_ppl_url:
+        description: "Optional prebuilt PPL archive URL"
+        required: false
+        default: ""
+      prebuilt_ppl_sha256:
+        description: "Optional sha256 for prebuilt PPL archive"
+        required: false
+        default: ""
+      prebuilt_ppl_strip_components:
+        description: "Optional tar strip-components for prebuilt PPL"
+        required: false
+        default: ""
+      run_flaggems_tests:
+        description: "Run backend FlagGems tests after delivery smoke"
+        required: false
+        type: boolean
+        default: false
+      flaggems_repo_url:
+        description: "Optional backend-adapted FlagGems repository URL"
+        required: false
+        default: ""
+      flaggems_ref:
+        description: "Optional FlagGems branch, tag, or commit"
+        required: false
+        default: ""
+      flaggems_pip_packages:
+        description: "Optional FlagGems test Python packages"
+        required: false
+        default: ""
+      flaggems_test_command:
+        description: "Optional FlagGems test command run from backend repo"
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -98,6 +143,7 @@ jobs:
           bash -n scripts/ci/install_backend.sh
           bash -n scripts/ci/install_backend_deps.sh
           bash -n scripts/ci/run_delivery_smoke.sh
+          bash -n scripts/ci/run_flaggems_tests.sh
           python -m py_compile scripts/ci/collect_delivery_evidence.py
           python -m py_compile tests/test_smoke.py
 
@@ -124,6 +170,17 @@ jobs:
       BACKEND_TORCH_INDEX_URL: ${{ inputs.backend_torch_index_url }}
       BACKEND_TORCH_TPU_WHEEL_URL: ${{ inputs.backend_torch_tpu_wheel_url }}
       BACKEND_TORCH_TPU_WHEEL_SHA256: ${{ inputs.backend_torch_tpu_wheel_sha256 }}
+      INPUT_PREBUILT_LLVM_URL: ${{ inputs.prebuilt_llvm_url }}
+      INPUT_PREBUILT_LLVM_SHA256: ${{ inputs.prebuilt_llvm_sha256 }}
+      INPUT_PREBUILT_LLVM_STRIP_COMPONENTS: ${{ inputs.prebuilt_llvm_strip_components }}
+      INPUT_PREBUILT_PPL_URL: ${{ inputs.prebuilt_ppl_url }}
+      INPUT_PREBUILT_PPL_SHA256: ${{ inputs.prebuilt_ppl_sha256 }}
+      INPUT_PREBUILT_PPL_STRIP_COMPONENTS: ${{ inputs.prebuilt_ppl_strip_components }}
+      RUN_FLAGGEMS_TESTS: ${{ inputs.run_flaggems_tests }}
+      FLAGGEMS_REPO_URL: ${{ inputs.flaggems_repo_url }}
+      FLAGGEMS_REF: ${{ inputs.flaggems_ref }}
+      FLAGGEMS_PIP_PACKAGES: ${{ inputs.flaggems_pip_packages }}
+      FLAGGEMS_TEST_COMMAND: ${{ inputs.flaggems_test_command }}
       LLVM_BUILD_DIR: ${{ vars.LLVM_BUILD_DIR }}
       PPL_ROOT: ${{ vars.PPL_ROOT }}
       PREBUILT_DOWNLOAD_TOKEN: ${{ secrets.PREBUILT_DOWNLOAD_TOKEN }}
@@ -143,6 +200,10 @@ jobs:
       SOPHGO_PPL_STRIP_COMPONENTS: ${{ vars.SOPHGO_PPL_STRIP_COMPONENTS }}
       SOPHGO_TORCH_TPU_WHEEL_URL: ${{ vars.SOPHGO_TORCH_TPU_WHEEL_URL }}
       SOPHGO_TORCH_TPU_WHEEL_SHA256: ${{ vars.SOPHGO_TORCH_TPU_WHEEL_SHA256 }}
+      SOPHGO_FLAGGEMS_REPO_URL: ${{ vars.SOPHGO_FLAGGEMS_REPO_URL }}
+      SOPHGO_FLAGGEMS_REF: ${{ vars.SOPHGO_FLAGGEMS_REF }}
+      SOPHGO_FLAGGEMS_PIP_PACKAGES: ${{ vars.SOPHGO_FLAGGEMS_PIP_PACKAGES }}
+      SOPHGO_FLAGGEMS_TEST_COMMAND: ${{ vars.SOPHGO_FLAGGEMS_TEST_COMMAND }}
       REQUIRE_PREBUILT_DEPS: "0"
       DELIVERY_ARTIFACT_DIR: delivery-artifacts
       PACKAGE_TOOL: uv
@@ -185,6 +246,16 @@ jobs:
             -e BACKEND_TORCH_TPU_WHEEL_URL \
             -e DELIVERY_ARTIFACT_DIR \
             -e EXPECTED_TRITON_BACKEND \
+            -e FLAGGEMS_PIP_PACKAGES \
+            -e FLAGGEMS_REF \
+            -e FLAGGEMS_REPO_URL \
+            -e FLAGGEMS_TEST_COMMAND \
+            -e INPUT_PREBUILT_LLVM_SHA256 \
+            -e INPUT_PREBUILT_LLVM_STRIP_COMPONENTS \
+            -e INPUT_PREBUILT_LLVM_URL \
+            -e INPUT_PREBUILT_PPL_SHA256 \
+            -e INPUT_PREBUILT_PPL_STRIP_COMPONENTS \
+            -e INPUT_PREBUILT_PPL_URL \
             -e LLVM_BUILD_DIR \
             -e PACKAGE_TOOL \
             -e PPL_ROOT \
@@ -196,8 +267,13 @@ jobs:
             -e PREBUILT_PPL_STRIP_COMPONENTS \
             -e PREBUILT_PPL_URL \
             -e REQUIRE_PREBUILT_DEPS \
+            -e RUN_FLAGGEMS_TESTS \
             -e SOPHGO_BACKEND_REF \
             -e SOPHGO_BACKEND_REPO_URL \
+            -e SOPHGO_FLAGGEMS_PIP_PACKAGES \
+            -e SOPHGO_FLAGGEMS_REF \
+            -e SOPHGO_FLAGGEMS_REPO_URL \
+            -e SOPHGO_FLAGGEMS_TEST_COMMAND \
             -e SOPHGO_LLVM_SHA256 \
             -e SOPHGO_LLVM_STRIP_COMPONENTS \
             -e SOPHGO_LLVM_URL \
@@ -215,6 +291,9 @@ jobs:
               bash scripts/ci/install_backend_deps.sh && \
               bash scripts/ci/install_backend.sh && \
               bash scripts/ci/run_delivery_smoke.sh && \
+              if [[ "${RUN_FLAGGEMS_TESTS}" == "true" ]]; then \
+                bash scripts/ci/run_flaggems_tests.sh; \
+              fi && \
               python3 scripts/ci/collect_delivery_evidence.py \
                 --backend \"${TRITON_ANCHOR_DELIVERY_BACKEND}\" \
                 --artifact-dir \"${DELIVERY_ARTIFACT_DIR}\" \
