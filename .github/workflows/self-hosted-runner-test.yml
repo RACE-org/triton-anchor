@@ -1,0 +1,20 @@
+name: Self-hosted Runner Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, x64, backend-test]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check runner
+        run: |
+          pwd
+          uname -a
+          git --version
+          docker version
+          docker compose version
+
