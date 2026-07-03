@@ -46,7 +46,8 @@ def memory_space(input, space, _builder=None):
     """
     space = tl._unwrap_if_constexpr(space)
     if _builder is not None and hasattr(input, 'handle') and hasattr(input.handle, 'set_attr'):
-        input.handle.set_attr("tt.memory_space", _builder.get_string_attr(str(space)))
+        input.handle.set_attr("tt.memory_space",
+                              _builder.get_string_attr(str(space)))
     return input
 
 
@@ -80,7 +81,7 @@ def alloc(
     if _builder is None:
         raise ValueError("alloc must be used inside @triton.jit")
     if layout is not None:
-        raise ValueError("alloc(): layout parameter is not yet support for DSA backend")
+        raise ValueError(f"alloc(): layout parameter is not yet support for DSA backend")
 
     # --- Validate inputs via semantic layer ---
     unwrapped_shape = DSASemantic.validate_alloc_shape(shape)
@@ -147,7 +148,8 @@ def copy(
     # ---- Case 2: tl.tensor (GM ptr) -> buffered_tensor (SPM) ----
     if not src_is_buf and dst_is_buf:
         if not isinstance(src, tl.tensor):
-            raise ValueError(f"copy src must be tl.tensor (pointer) or buffered_tensor, got {type(src)}")
+            raise ValueError(
+                f"copy src must be tl.tensor (pointer) or buffered_tensor, got {type(src)}")
         # Validate element type compatibility
         src_ptr_dtype = src.dtype
         if hasattr(src_ptr_dtype, 'element_ty'):
@@ -156,8 +158,9 @@ def copy(
             src_elem_dtype = src_ptr_dtype
         dst_elem_dtype = dst.type.element_ty
         if src_elem_dtype != dst_elem_dtype:
-            raise ValueError(f"copy element type mismatch: src has {src_elem_dtype}, "
-                             f"dst has {dst_elem_dtype}")
+            raise ValueError(
+                f"copy element type mismatch: src has {src_elem_dtype}, "
+                f"dst has {dst_elem_dtype}")
         if not hasattr(_builder, "create_dsa_copy"):
             raise RuntimeError("builder missing create_dsa_copy for DSA copy")
         _builder.create_dsa_copy(src.handle, dst.handle)
@@ -166,7 +169,8 @@ def copy(
     # ---- Case 3: buffered_tensor (SPM) -> tl.tensor (GM ptr) ----
     if src_is_buf and not dst_is_buf:
         if not isinstance(dst, tl.tensor):
-            raise ValueError(f"copy dst must be tl.tensor (pointer) or buffered_tensor, got {type(dst)}")
+            raise ValueError(
+                f"copy dst must be tl.tensor (pointer) or buffered_tensor, got {type(dst)}")
         dst_ptr_dtype = dst.dtype
         if hasattr(dst_ptr_dtype, 'element_ty'):
             dst_elem_dtype = dst_ptr_dtype.element_ty
@@ -174,16 +178,19 @@ def copy(
             dst_elem_dtype = dst_ptr_dtype
         src_elem_dtype = src.type.element_ty
         if src_elem_dtype != dst_elem_dtype:
-            raise ValueError(f"copy element type mismatch: src has {src_elem_dtype}, "
-                             f"dst has {dst_elem_dtype}")
+            raise ValueError(
+                f"copy element type mismatch: src has {src_elem_dtype}, "
+                f"dst has {dst_elem_dtype}")
         if not hasattr(_builder, "create_dsa_copy"):
             raise RuntimeError("builder missing create_dsa_copy for DSA copy")
         _builder.create_dsa_copy(src.handle, dst.handle)
         return None
 
     # ---- Unsupported combination ----
-    raise ValueError("copy requires at least one operand to be a buffered_tensor. "
-                     f"Got src={type(src).__name__}, dst={type(dst).__name__}")
+    raise ValueError(
+        "copy requires at least one operand to be a buffered_tensor. "
+        f"Got src={type(src).__name__}, dst={type(dst).__name__}"
+    )
 
 
 def _expand_index_to_shape(index: tl.tensor, shape: Sequence[int], axis: int, _builder) -> tl.tensor:
@@ -233,10 +240,10 @@ def local_ptr(
     # Preferred metadata source: buffered_tensor.type (survives JIT value
     # reconstruction). Keep value attrs as backward-compatibility fallback.
     remote_shard_id = getattr(buffer.type, "_tle_remote_shard_id", None)
-    _ = getattr(buffer.type, "_tle_remote_scope", None)
+    remote_scope = getattr(buffer.type, "_tle_remote_scope", None)
     if remote_shard_id is None:
         remote_shard_id = getattr(buffer, "_tle_remote_shard_id", None)
-        _ = getattr(buffer, "_tle_remote_scope", None)
+        remote_scope = getattr(buffer, "_tle_remote_scope", None)
     remote_buffer_marker = remote_shard_id is not None
 
     indices = tl._unwrap_if_constexpr(indices)
@@ -302,9 +309,77 @@ def local_ptr(
             raise ValueError("local_ptr does not yet support scalar indices on remote buffers")
         if not hasattr(_builder, "create_dsa_remote_pointers"):
             raise RuntimeError("builder missing create_dsa_remote_pointers for remote buffers")
-        shard_val = (remote_shard_id.handle if isinstance(remote_shard_id, tl.tensor) else semantic.to_tensor(
-            remote_shard_id, _builder).handle)
-        remote_op = _builder.create_dsa_remote_pointers(result_ir, result_tensor.handle, shard_val)
+        shard_val = (
+            remote_shard_id.handle
+            if isinstance(remote_shard_id, tl.tensor)
+            else semantic.to_tensor(remote_shard_id, _builder).handle
+        )
+        remote_op = _builder.create_dsa_remote_pointers(
+            result_ir, result_tensor.handle, shard_val,
+            scope=remote_scope,
+        )
         result_tensor = tl.tensor(remote_op.get_result(0), result_ty)
 
     return result_tensor
+
+
+def _tle_pick_sum_dtype(in_dtype, dtype):
+    if dtype is not None:
+        return dtype
+    if in_dtype.is_int_signed():
+        return tl.int32 if in_dtype.int_bitwidth < 32 else None
+    if in_dtype.is_int_unsigned():
+        return tl.uint32 if in_dtype.int_bitwidth < 32 else None
+    return None
+
+@tl.builtin
+def cumsum(input, axis=0, reverse=False, dtype: tl.constexpr = None, _builder=None, _semantic=None, _generator=None):
+    """
+    Compute exclusive cumulative sum and total sum along ``axis``.
+
+    Returns ``(exclusive_sum, total_sum)``.  The Tsingmicro lowering in this
+    branch supports forward scan along the last block dimension.
+    """
+    axis = tl._unwrap_if_constexpr(axis)
+    reverse = tl._unwrap_if_constexpr(reverse)
+    dtype = tl._unwrap_if_constexpr(dtype)
+
+    if reverse:
+        raise NotImplementedError("tle.cumsum(reverse=True) is not supported on Tsingmicro yet")
+
+    builder = _builder if _builder is not None else _semantic.builder
+    if not isinstance(input, tl.tensor):
+        input = tl.to_tensor(input, _builder=builder)
+    input = tl._promote_bfloat16_to_float32(input, _builder=builder)
+    if input.dtype.is_bool():
+        raise TypeError("tle.cumsum does not support bool input on Tsingmicro")
+    out_dtype: tl.constexpr = _tle_pick_sum_dtype(input.dtype, dtype)
+    if out_dtype is not None:
+        input = input.to(out_dtype, _builder=builder)
+
+    input_ty = input.type
+    if not input_ty.is_block():
+        zero = tl.full((), 0, input.dtype, _builder=builder)
+        return zero, input
+
+    shape = tuple(int(tl._unwrap_if_constexpr(dim)) for dim in input_ty.shape)
+    rank = len(shape)
+    normalized_axis = axis + rank if axis < 0 else axis
+    if normalized_axis != rank - 1:
+        raise NotImplementedError("tle.cumsum currently supports only the last block dimension on Tsingmicro")
+
+    exclusive_ty = input_ty
+    total_ty = input_ty.scalar if rank == 1 else tl.block_type(input_ty.scalar, list(shape[:-1]))
+    pad = shape[-1] * 2
+    cumsum_op = builder.create_dsa_cumsum(
+        exclusive_ty.to_ir(builder),
+        total_ty.to_ir(builder),
+        input.handle,
+        int(normalized_axis),
+        bool(reverse),
+        list(shape),
+        int(pad),
+    )
+    exclusive_sum = tl.tensor(cumsum_op.get_result(0), exclusive_ty)
+    total_sum = tl.tensor(cumsum_op.get_result(1), total_ty)
+    return exclusive_sum, total_sum

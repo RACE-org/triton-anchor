@@ -897,7 +897,13 @@ def get_jit_fn_file_line(fn):
     while not isinstance(base_fn, JITFunction):
         base_fn = base_fn.fn
     file_name = base_fn.fn.__code__.co_filename
-    lines, begin_line = inspect.getsourcelines(base_fn.fn)
+    try:
+        lines, begin_line = inspect.getsourcelines(base_fn.fn)
+    except (OSError, IOError):
+        # inspect may fail under heavy I/O (e.g. multi-process pytest)
+        with open(file_name) as f:
+            lines = f.readlines()
+        begin_line = base_fn.fn.__code__.co_firstlineno
     # Match the following pattern:
     # @triton.autotune(...) <- foo.__code__.co_firstlineno
     # @triton.heuristics(...)

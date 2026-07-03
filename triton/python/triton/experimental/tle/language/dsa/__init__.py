@@ -5,6 +5,7 @@ from .core import (
     copy,
     memory_space,
     local_ptr,
+    cumsum
 )
 from .types import (
     scope,
@@ -16,6 +17,7 @@ from .types import (
 from .semantic import DSASemantic, DSASemanticError
 
 __all__ = [
+    "cumsum",
     "pipeline",
     "alloc",
     "copy",

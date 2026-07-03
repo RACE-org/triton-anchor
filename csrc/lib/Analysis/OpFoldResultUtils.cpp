@@ -15,14 +15,12 @@
 
 namespace mlir {
 
-#ifndef __FLIR_BUILD_INCUBATED__
 std::optional<int64_t> getIntAttr(const OpFoldResult ofr) {
   if (isa<Attribute>(ofr) && isa<IntegerAttr>(cast<Attribute>(ofr)))
     return dyn_cast<IntegerAttr>(cast<Attribute>(ofr)).getInt();
 
   return std::nullopt;
 }
-#endif
 
 bool hasConstZero(const OpFoldResult ofr) {
   auto intAttr = getIntAttr(ofr);
@@ -48,6 +46,26 @@ bool hasConstZero(const OpFoldResult ofr) {
   }
 
   return false;
+}
+
+std::optional<int64_t> getConstValue(const OpFoldResult ofr) {
+  auto intAttr = getIntAttr(ofr);
+  if (intAttr.has_value()) {
+    return intAttr.value();
+  }
+
+  auto val = dyn_cast<Value>(ofr);
+  assert(val);
+  auto constOp = val.getDefiningOp<arith::ConstantOp>();
+  if (!constOp)
+    return std::nullopt;
+
+  intAttr = getIntAttr(constOp.getValue());
+  if (intAttr.has_value()) {
+    return intAttr.value();
+  } else {
+    return std::nullopt;
+  }
 }
 
 Value ofrToIndexValue(const OpFoldResult ofr, const Location loc,

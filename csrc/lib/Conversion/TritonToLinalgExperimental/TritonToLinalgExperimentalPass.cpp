@@ -7,8 +7,6 @@
 #include "mlir/Dialect/Ptr/IR/PtrDialect.h"
 #include "mlir-ext/Dialect/MathExt/IR/MathExt.h"
 #include "triton-shared/Conversion/StructuredToMemref/StructuredToMemref.h"
-#include "triton-shared/Conversion/MemrefCopyToDMA_FlagTree/MemrefCopyToDMAFlagTree.h"
-#include "triton-shared/Conversion/NoBufferize_FlagTree/NoBufferizeFlagTree.h"
 #include "triton-shared/Conversion/TritonArithToLinalg/TritonArithToLinalg.h"
 #include "triton-shared/Conversion/TritonPtrToMemref/TritonPtrToMemref.h"
 #include "triton-shared/Conversion/ReconcilePtrCasts/ReconcilePtrCasts.h"

@@ -167,6 +167,17 @@ class Autotuner(KernelInterface):
             self.post_hook(full_nargs, exception=None)
 
         try:
+            if QUICK_MODE := os.getenv("TRITON_QUICK_MODE", "0") == "1":
+                print("============= Quick mode ============")
+                print(config, flush=True)
+                print("\n", flush=True)
+                start_time = time.time()
+                kernel_call()
+                elapsed_time = (time.time() - start_time)*1000
+                return [float(elapsed_time), float(elapsed_time), float(elapsed_time)]
+            print("============= tuner mode ============")   
+            print(config, flush=True)
+            print("\n", flush=True)
             return self.do_bench(kernel_call, quantiles=(0.5, 0.2, 0.8))
         except (OutOfResources, CompileTimeAssertionFailure, PTXASError) as e:
             if verbose:

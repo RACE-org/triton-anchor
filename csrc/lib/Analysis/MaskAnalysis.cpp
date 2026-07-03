@@ -38,6 +38,23 @@ void dimInfo::dump() const {
     });
 };
 
+static Value structuredMaskToUnstructuredMask(OpBuilder &builder, Location loc,
+                                              uint32_t size, uint32_t maskDim) {
+
+  if (maskDim == size) {
+    // Full mask.
+    return Value();
+  }
+
+  auto i32TensorType = RankedTensorType::get({size}, builder.getI32Type());
+  Value range =
+      builder.create<triton::MakeRangeOp>(loc, i32TensorType, 0, size);
+  Value v = builder.create<arith::ConstantIndexOp>(loc, maskDim);
+  v = builder.create<arith::IndexCastUIOp>(loc, builder.getI32Type(), v);
+  v = builder.create<triton::SplatOp>(loc, i32TensorType, v).getResult();
+  return builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, range,
+                                       v);
+};
 
 /////////////ascend
 LogicalResult MaskState::parse(Value operand, const Location loc,
@@ -79,6 +96,14 @@ LogicalResult MaskState::parse(Value operand, const Location loc,
       return failure();
   }   
   else {
+    auto resultType = operand.getType();
+    if (isa<RankedTensorType>(resultType) &&
+        cast<RankedTensorType>(resultType).getRank() == 1) {
+      assert(isEmpty());
+      dims.push_back(operand);
+      nonContinuousDim.push_back(0);
+      return success();
+    }
     return failure();
   }
 }
@@ -372,6 +397,12 @@ LogicalResult MaskState::parseAdd(arith::AddIOp addOp, const Location loc,
   if (failed(rhsState.parse(addOp.getRhs(), loc, builder)))
     return failure();
 
+  // WORKAROUND: avoid other non-structured cases. Since mask analysis is not
+  // consistent with noncontinuous dims now
+  if (lhsState.hasNonContinuousDim() || rhsState.hasNonContinuousDim()) {
+    return failure();
+  }
+
   return this->addStates(lhsState, rhsState, loc, builder);
 }
 
@@ -386,6 +417,12 @@ LogicalResult MaskState::parseSub(arith::SubIOp subOp, const Location loc,
   MaskState rhsState;
   if (failed(rhsState.parse(subOp.getRhs(), loc, builder)))
     return failure();
+
+  // WORKAROUND: avoid other non-structured cases. Since mask analysis is not
+  // consistent with noncontinuous dims now
+  if (lhsState.hasNonContinuousDim() || rhsState.hasNonContinuousDim()) {
+    return failure();
+  }
 
   return this->subStates(lhsState, rhsState, loc, builder);
 }
@@ -402,6 +439,51 @@ LogicalResult MaskState::parseAnd(arith::AndIOp andOp, const Location loc,
   if (failed(rhsState.parse(andOp.getRhs(), loc, builder)))
     return failure();
 
+  if (lhsState.hasNonContinuousDim() || rhsState.hasNonContinuousDim()) {
+
+    auto lhsNonContinuousDim = lhsState.getNonContinuousDim();
+    auto rhsNonContinuousDim = rhsState.getNonContinuousDim();
+    assert(
+        !(lhsNonContinuousDim.has_value() && rhsNonContinuousDim.has_value()) &&
+        "Cannot have both non continuous dims");
+    auto [lhs, rhs] =
+        lhsNonContinuousDim.has_value()
+            ? std::tuple<MaskState *, MaskState *>(&lhsState, &rhsState)
+            : std::tuple<MaskState *, MaskState *>(&rhsState, &lhsState);
+
+    auto nonContinuousDim = lhs->getNonContinuousDim().value();
+    auto rhsDim = rhs->dims[nonContinuousDim];
+    auto rhsDimInt = getIntAttr(rhsDim);
+    assert(rhsDimInt.has_value() && "Unexpected case where rhs dim is not int");
+
+    auto tensorType = cast<RankedTensorType>(andOp.getType());
+    assert(tensorType.getElementTypeBitWidth() == 1 &&
+           "Unexpected case where type is not i1");
+
+    for (uint32_t i = 0; i < lhsState.getRank(); i++) {
+      if (i == nonContinuousDim) {
+        Value rhsDimValue = structuredMaskToUnstructuredMask(
+            builder, loc, tensorType.getShape()[nonContinuousDim],
+            rhsDimInt.value());
+
+        dims.push_back(
+            rhsDimValue
+                ? builder
+                      .create<arith::AndIOp>(
+                          loc, dyn_cast<Value>(lhs->dims[nonContinuousDim]),
+                          rhsDimValue)
+                      .getResult()
+                : lhs->dims[nonContinuousDim]);
+        continue;
+      }
+
+      auto lhsDim = lhsState.dims[i];
+      auto rhsDim = rhsState.dims[i];
+      dims.push_back(minOFRs(lhsDim, rhsDim, loc, builder));
+    }
+    this->nonContinuousDim = lhs->nonContinuousDim;
+    return success();
+  }
   // TODO(FLIR): should be isMask()
   if(!lhsState.isMaskWithoutScalar() || !rhsState.isMaskWithoutScalar()) {
     return this->minStateScalar(lhsState, rhsState, loc, builder);
@@ -444,6 +526,10 @@ LogicalResult MaskState::parseCmp(arith::CmpIOp cmpOp, const Location loc,
     return failure();
   }
 
+  // This cmpDim is used to determine which dimension contains the actual
+  // data range (i.e., the dimension with a size greater than 1)
+  // Because mask analysis assumes that only one dimension can have an actual
+  // range
   int32_t cmpDim = lhsState.scalar && rhsState.scalar ? 0 : -1;
   for (int32_t i = 0; i < lhsState.getRank(); i++) {
     auto dimIntAttr = getIntAttr(lhsState.dims[i]);
@@ -461,7 +547,25 @@ LogicalResult MaskState::parseCmp(arith::CmpIOp cmpOp, const Location loc,
          "Unexpected case where no dimension has size larger than 1");
 
   OpFoldResult newDim;
-  if (lhsState.scalar) {
+  if (lhsState.hasNonContinuousDim()) {
+    assert(rhsState.scalar && "Unexpected case where rhs is not a scalar");
+    assert(cmpDim == lhsState.getNonContinuousDim());
+    auto lhsValue = dyn_cast<Value>(lhsState.dims[cmpDim]);
+    auto tensorType = cast<RankedTensorType>(lhsValue.getType());
+
+    auto rhsValue = builder.create<arith::IndexCastOp>(
+        loc, tensorType.getElementType(),
+        ofrToIndexValue(rhsState.scalar, loc, builder));
+    auto rhsTensorValue =
+        builder.create<triton::SplatOp>(loc, tensorType, rhsValue);
+
+    newDim = builder
+                 .create<arith::CmpIOp>(loc, cmpOp.getPredicate(), lhsValue,
+                                        rhsTensorValue)
+                 ->getResult(0);
+
+    nonContinuousDim = lhsState.nonContinuousDim;
+  } else if (lhsState.scalar) {
     assert(rhsState.scalar && "Unexpected case where rhs is not a scalar");
     // If both lhs and rhs are scalars, we can't just derive the dimension of
     // the mask as the minimum value: lhs/rhs could be 0 and then we don't
@@ -489,6 +593,7 @@ LogicalResult MaskState::parseCmp(arith::CmpIOp cmpOp, const Location loc,
     // The correct formula is to optionally move `newDim` back to `start` using
     // max(newEnd, start).
     auto newEnd = minOFRs(lhsState.end, rhsState.scalar, loc, builder);
+    // Avoid minus dim. ([5, 10] < 3: 3 - 5 = -2��
     newEnd = maxOFRs(newEnd, lhsState.start, loc, builder);
     newDim = subOFRs(newEnd, lhsState.start, loc, builder);
   } else {
@@ -664,6 +769,10 @@ LogicalResult MaskState::parseExpandDims(triton::ExpandDimsOp expandDimsOp,
          "expect changed dimension to be 1 in expand_dims");
   this->dims.insert(this->dims.begin() + axis, builder.getIndexAttr(1));
 
+  if (hasNonContinuousDim()) {
+    assert(dstShape.size() == 2);
+    this->nonContinuousDim[0] = 1 - axis;
+  }
   return success();
 }
 ////////ASCEND

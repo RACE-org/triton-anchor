@@ -125,6 +125,9 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     Benchmark the runtime of the provided function. By default, return the median runtime of :code:`fn` along with
     the 20-th and 80-th performance percentile.
 
+    When TSM_PROFILER_EN=1 is set, device-side kernel time replaces GPU event time
+    automatically — no extra parameter needed.
+
     :param fn: Function to benchmark
     :type fn: Callable
     :param warmup: Warmup time (in ms)
@@ -140,32 +143,39 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
     """
     assert return_mode in ["min", "max", "mean", "median", "all"]
 
-    di = runtime.driver.active.get_device_interface()
-
+    drv = runtime.driver.active
+    di = drv.get_device_interface()
+    device = drv.get_current_device()
     fn()
-    di.synchronize()
+    di.synchronize(device)
 
-    cache = runtime.driver.active.get_empty_cache_for_benchmark()
+    cache = drv.get_empty_cache_for_benchmark()
 
     # Estimate the runtime of the function
     start_event = di.Event(enable_timing=True)
     end_event = di.Event(enable_timing=True)
     start_event.record()
-    for _ in range(5):
-        runtime.driver.active.clear_cache(cache)
+    range_time = 1
+    for _ in range(range_time):
+        drv.clear_cache(cache)
         fn()
     end_event.record()
-    di.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
+    di.synchronize(device)
+    estimate_ms = start_event.elapsed_time(end_event) / range_time
 
     # compute number of warmup and repeat
     n_warmup = max(1, int(warmup / estimate_ms))
     n_repeat = max(1, int(rep / estimate_ms))
     start_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
     end_event = [di.Event(enable_timing=True) for i in range(n_repeat)]
+
+    _has_kernel_time = os.environ.get("TSM_PROFILER_EN") == "1" and hasattr(drv, 'get_last_launch_res')
+    kernel_times = []
+    ap_times = []
+
     # Warm-up
-    for _ in range(n_warmup):
-        fn()
+    # for _ in range(n_warmup):
+    #     fn()
     # Benchmark
     for i in range(n_repeat):
         # we don't want `fn` to accumulate gradient values
@@ -175,15 +185,26 @@ def do_bench(fn, warmup=25, rep=100, grad_to_none=None, quantiles=None, return_m
             for x in grad_to_none:
                 x.grad = None
         # we clear the L2 cache before each run
-        runtime.driver.active.clear_cache(cache)
+        drv.clear_cache(cache)
         # record time of `fn`
         start_event[i].record()
         fn()
         end_event[i].record()
+        if _has_kernel_time:
+            res = drv.get_last_launch_res()
+            if res is not None and res.kernel_time_ns > 0:
+                kernel_times.append(res.kernel_time_ns / 1e6)
+                ap_times.append(res.ap_duration_ns / 1e6)
     # Record clocks
-    di.synchronize()
+    di.synchronize(device)
     times = [s.elapsed_time(e) for s, e in zip(start_event, end_event)]
-    return _summarize_statistics(times, quantiles, return_mode)
+    result = _summarize_statistics(times, quantiles, return_mode)
+
+    # When profiler is active, replace event time with device-side kernel time
+    if kernel_times:
+        result = _summarize_statistics(kernel_times, quantiles, return_mode)
+
+    return result
 
 
 def assert_close(x, y, atol=None, rtol=None, err_msg=''):
