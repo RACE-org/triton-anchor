@@ -21,4 +21,5 @@ from .anchor_ir import (
     AnchorIRTrack as AnchorIRTrack,
     AnchorIRValidator as AnchorIRValidator,
 )
+from .diagnostics import PassDiagnostic as PassDiagnostic
 from .pipeline import build_ttir_pipeline as build_ttir_pipeline
