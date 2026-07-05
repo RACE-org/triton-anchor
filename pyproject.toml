@@ -22,6 +22,9 @@ classifiers = [
 
 dependencies = ["filelock"]
 
+[project.scripts]
+triton-anchor-diagnose = "triton_anchor.diagnose:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",

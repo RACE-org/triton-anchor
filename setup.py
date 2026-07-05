@@ -220,6 +220,9 @@ setup(
     },
     zip_safe=False,
     entry_points={
+        "console_scripts": [
+            "triton-anchor-diagnose = triton_anchor.diagnose:main",
+        ],
         "triton.adapters": [
             "triton-linalg = triton_anchor.adapters.triton_linalg_adapter:TritonLinalgAdapter",
         ]
