@@ -206,6 +206,27 @@ if(TRITON_BUILD_PYTHON_MODULE)
       "LLVM codegen/ASM parser libs: unsupported host architecture (${CMAKE_SYSTEM_PROCESSOR}).")
   endif()
 
+  # 交叉编译额外 target（与 host 架构正交，需显式 opt-in）：
+  # 从 x86 host 交叉编译到 SpacemiT RISC-V 时，InitializeAllTargets/AsmParsers
+  # 会引用 LLVM 构建启用的所有 target 的初始化符号，需一并链接对应 CodeGen/
+  # AsmParser 库，否则运行时 dlopen libtriton.so 报 undefined symbol:
+  # LLVMInitialize*。默认为空，不影响本机 x86 构建；交叉编译时显式指定，例如
+  #   -DTRITON_EXTRA_LLVM_TARGETS="RISCV"
+  set(TRITON_EXTRA_LLVM_TARGETS "" CACHE STRING
+    "Additional LLVM targets (e.g. RISCV) to link for cross-compilation.")
+  foreach(_extra_target ${TRITON_EXTRA_LLVM_TARGETS})
+    if(TARGET LLVM${_extra_target}CodeGen)
+      list(APPEND TRITON_LIBRARIES LLVM${_extra_target}CodeGen)
+    else()
+      message(FATAL_ERROR
+        "TRITON_EXTRA_LLVM_TARGETS: LLVM${_extra_target}CodeGen not found; "
+        "ensure LLVM was built with ${_extra_target} in LLVM_TARGETS_TO_BUILD.")
+    endif()
+    if(TARGET LLVM${_extra_target}AsmParser)
+      list(APPEND TRITON_LIBRARIES LLVM${_extra_target}AsmParser)
+    endif()
+  endforeach()
+
   if(TRITON_PLUGIN_NAMES)
     string(JOIN "," TRITON_BACKENDS_TUPLE ${TRITON_PLUGIN_NAMES})
     set(TRITON_BACKENDS_TUPLE "(${TRITON_BACKENDS_TUPLE})")
