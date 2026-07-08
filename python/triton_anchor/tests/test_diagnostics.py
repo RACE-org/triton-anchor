@@ -94,9 +94,7 @@ def test_pass_diagnostic_extracts_mlir_location_and_operation(tmp_path, monkeypa
             )
 
     def pass_fail(mod: FakeModule) -> None:
-        raise RuntimeError(
-            "<stdin>:2:8: error: failed to legalize operation 'tt.load'"
-        )
+        raise RuntimeError("<stdin>:2:8: error: failed to legalize operation 'tt.load'")
 
     descriptors = [
         PassDescriptor("ttir.combine", lambda pm: pm.passes.append(pass_fail)),
@@ -312,3 +310,91 @@ def test_cli_help_loads_without_libtriton(capsys):
     assert "triton-anchor-diagnose" in captured.out
     assert "triton-linalg" in captured.out
     assert "--python" in captured.out
+
+
+# ── T2.5 observability metrics tests ─────────────────────────────────────────
+
+
+def test_pass_diagnostic_records_timing_and_ir_sizes(tmp_path, monkeypatch):
+    """T2.5: verify per-pass timing, IR size tracking, and aggregate metrics."""
+    _install_fake_libtriton(monkeypatch)
+
+    def pass_a(mod):
+        pass
+
+    def pass_b(mod):
+        pass
+
+    descriptors = [
+        PassDescriptor("pass.a", lambda pm: pm.passes.append(pass_a)),
+        PassDescriptor("pass.b", lambda pm: pm.passes.append(pass_b)),
+    ]
+
+    monkeypatch.setattr(
+        "triton_anchor.diagnostics.build_ttir_pass_descriptors",
+        lambda hw=None: descriptors,
+    )
+
+    result = PassDiagnostic(output_dir=tmp_path).diagnose_ttir(FakeModule())
+
+    assert result.ok
+    assert result.executed_passes == 2
+
+    # T2.5 aggregate metrics
+    assert result.total_duration_ms >= 0.0
+    assert result.input_ir_bytes > 0
+    assert result.output_ir_bytes > 0
+    assert result.peak_rss_bytes >= 0  # may be 0 on some platforms
+
+    # T2.5 per-pass metrics
+    for rec in result.records:
+        assert rec.duration_ms >= 0.0
+        assert rec.before_ir_bytes > 0
+        assert rec.after_ir_bytes > 0
+        assert rec.ir_delta_bytes == rec.after_ir_bytes - rec.before_ir_bytes
+        assert rec.peak_rss_bytes >= 0
+
+    # T2.5 slowest_pass property
+    slowest = result.slowest_pass
+    assert slowest is not None
+    assert slowest.duration_ms == max(r.duration_ms for r in result.records)
+
+
+def test_pass_diagnostic_metrics_on_failure(tmp_path, monkeypatch):
+    """T2.5: verify metrics are captured even when a pass fails."""
+    _install_fake_libtriton(monkeypatch)
+
+    def pass_ok(mod):
+        pass
+
+    def pass_fail(mod):
+        raise RuntimeError("deliberate failure")
+
+    descriptors = [
+        PassDescriptor("pass.ok", lambda pm: pm.passes.append(pass_ok)),
+        PassDescriptor("pass.fail", lambda pm: pm.passes.append(pass_fail)),
+    ]
+
+    monkeypatch.setattr(
+        "triton_anchor.diagnostics.build_ttir_pass_descriptors",
+        lambda hw=None: descriptors,
+    )
+
+    result = PassDiagnostic(output_dir=tmp_path).diagnose_ttir(FakeModule())
+
+    assert not result.ok
+    assert result.executed_passes == 2
+
+    # T2.5: metrics captured up to failure point
+    assert result.total_duration_ms >= 0.0
+    assert result.input_ir_bytes > 0
+    # output_ir_bytes is last known good (before the failed pass)
+    assert result.output_ir_bytes > 0
+
+    # The failed pass should have timing even though it failed
+    failed = result.failed_record
+    assert failed is not None
+    assert failed.duration_ms >= 0.0
+    assert failed.before_ir_bytes > 0
+    assert failed.after_ir_bytes == 0  # pass failed, no output
+    assert failed.ir_delta_bytes == 0

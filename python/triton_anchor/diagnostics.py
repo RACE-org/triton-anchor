@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -40,6 +41,17 @@ class PassRunRecord:
     diagnostic_text: Optional[str] = None
     mlir_location: Optional["MLIRDiagnosticLocation"] = None
     traceback: Optional[str] = None
+    # ── T2.5 adapter-layer observability metrics ──────────────────────────
+    duration_ms: float = 0.0
+    """Wall-clock time for this single pass in milliseconds."""
+    before_ir_bytes: int = 0
+    """UTF-8 byte size of the IR before this pass ran."""
+    after_ir_bytes: int = 0
+    """UTF-8 byte size of the IR after this pass ran (0 if the pass failed)."""
+    ir_delta_bytes: int = 0
+    """``after_ir_bytes - before_ir_bytes`` (0 if the pass failed)."""
+    peak_rss_bytes: int = 0
+    """Process peak resident set size sampled right after this pass (0 if unknown)."""
 
 
 @dataclass
@@ -69,10 +81,26 @@ class PassDiagnosticResult:
     error: Optional[str] = None
     mlir_location: Optional[MLIRDiagnosticLocation] = None
     summary_path: Optional[Path] = None
+    # ── T2.5 adapter-layer observability metrics ──────────────────────────
+    total_duration_ms: float = 0.0
+    """Sum of wall-clock time across all executed passes, in milliseconds."""
+    input_ir_bytes: int = 0
+    """UTF-8 byte size of the IR fed into the pipeline."""
+    output_ir_bytes: int = 0
+    """UTF-8 byte size of the IR after the last executed pass."""
+    peak_rss_bytes: int = 0
+    """Highest process RSS observed across the run (0 if unknown)."""
 
     @property
     def executed_passes(self) -> int:
         return len(self.records)
+
+    @property
+    def slowest_pass(self) -> Optional[PassRunRecord]:
+        """The executed pass with the largest ``duration_ms`` (None if empty)."""
+        if not self.records:
+            return None
+        return max(self.records, key=lambda r: r.duration_ms)
 
     @property
     def failed_record(self) -> Optional[PassRunRecord]:
@@ -136,6 +164,43 @@ class PassDiagnostic:
             descriptors=list(build_triton_linalg_pass_descriptors()),
         )
 
+    # ── T2.5 helper functions ────────────────────────────────────────────────
+
+    def _ir_bytes(self, ir_text_or_module: Any) -> int:
+        """Return UTF-8 byte count of the IR (0 on error)."""
+        try:
+            text = (
+                ir_text_or_module
+                if isinstance(ir_text_or_module, str)
+                else str(ir_text_or_module)
+            )
+            return len(text.encode("utf-8"))
+        except Exception:
+            return 0
+
+    def _sample_peak_rss_bytes(self) -> int:
+        """Sample the current process peak RSS in bytes (0 if unavailable).
+
+        Note: For pybind adapters, this samples the entire Python process RSS,
+        not just the pass execution. For subprocess adapters, each subprocess
+        would need separate tracking (not covered here).
+        """
+        try:
+            import resource
+
+            rusage = resource.getrusage(resource.RUSAGE_SELF)
+            # Linux: ru_maxrss is in KB; macOS: in bytes
+            import sys
+
+            if sys.platform == "darwin":
+                return rusage.ru_maxrss
+            else:
+                return rusage.ru_maxrss * 1024
+        except Exception:
+            return 0
+
+    # ──────────────────────────────────────────────────────────────────────────
+
     def _diagnose_pipeline(
         self,
         mod: Any,
@@ -154,17 +219,28 @@ class PassDiagnostic:
             records=records,
         )
 
+        # T2.5: capture input IR size
+        result.input_ir_bytes = self._ir_bytes(mod)
+
         for index, descriptor in enumerate(descriptors, start=1):
             before_ir_text = str(mod)
             before_path = self._write_ir(index, descriptor.name, "before", mod)
+
+            # T2.5: measure before IR size
+            before_ir_bytes = self._ir_bytes(before_ir_text)
+
             pm = ir.pass_manager(mod.context)
             if self.enable_debug:
                 pm.enable_debug()
             descriptor.add_to_pass_manager(pm)
 
+            # T2.5: time the pass execution
+            t0 = time.monotonic()
             try:
                 diagnostic_text = self._run_pass(pm, mod)
             except Exception as exc:
+                duration_ms = (time.monotonic() - t0) * 1000.0
+                peak_rss = self._sample_peak_rss_bytes()
                 diagnostic_text = getattr(exc, "diagnostic_text", "")
                 original_exc = getattr(exc, "original", exc)
                 error = str(original_exc)
@@ -199,6 +275,12 @@ class PassDiagnostic:
                     diagnostic_text=diagnostic_text or None,
                     mlir_location=mlir_location,
                     traceback=tb,
+                    # T2.5 metrics: failure case
+                    duration_ms=duration_ms,
+                    before_ir_bytes=before_ir_bytes,
+                    after_ir_bytes=0,
+                    ir_delta_bytes=0,
+                    peak_rss_bytes=peak_rss,
                 )
                 records.append(record)
                 result.ok = False
@@ -206,8 +288,19 @@ class PassDiagnostic:
                 result.failed_index = index
                 result.error = error
                 result.mlir_location = mlir_location
+                # T2.5: aggregate metrics on failure
+                result.total_duration_ms = sum(r.duration_ms for r in records)
+                result.output_ir_bytes = before_ir_bytes  # last known good
+                result.peak_rss_bytes = max(
+                    (r.peak_rss_bytes for r in records), default=0
+                )
                 self._write_summary(result)
                 return result
+
+            # T2.5: pass succeeded, measure duration and after-IR size
+            duration_ms = (time.monotonic() - t0) * 1000.0
+            after_ir_bytes = self._ir_bytes(mod)
+            peak_rss = self._sample_peak_rss_bytes()
 
             after_path = None
             if self.save_success_snapshots:
@@ -219,9 +312,19 @@ class PassDiagnostic:
                     ok=True,
                     before_ir=before_path,
                     after_ir=after_path,
+                    # T2.5 metrics: success case
+                    duration_ms=duration_ms,
+                    before_ir_bytes=before_ir_bytes,
+                    after_ir_bytes=after_ir_bytes,
+                    ir_delta_bytes=after_ir_bytes - before_ir_bytes,
+                    peak_rss_bytes=peak_rss,
                 )
             )
 
+        # T2.5: finalize aggregate metrics on full success
+        result.total_duration_ms = sum(r.duration_ms for r in records)
+        result.output_ir_bytes = self._ir_bytes(mod)
+        result.peak_rss_bytes = max((r.peak_rss_bytes for r in records), default=0)
         self._write_summary(result)
         return result
 
@@ -255,7 +358,9 @@ class PassDiagnostic:
         tb: str,
         mlir_location: Optional[MLIRDiagnosticLocation],
     ) -> Path:
-        path = self.output_dir / f"{index:02d}-{_safe_filename(pass_name)}.diagnostic.txt"
+        path = (
+            self.output_dir / f"{index:02d}-{_safe_filename(pass_name)}.diagnostic.txt"
+        )
         parts = [
             f"pass: {pass_name}",
             f"error: {error}",
@@ -326,7 +431,9 @@ def build_ttir_pass_descriptors(
     if hw.enable_loop_unroll:
         optional = _optional_pass_adder(passes.ttir, "add_loop_unroll")
         if optional is not None:
-            descriptors.append(PassDescriptor("ttir.loop_unroll", optional, optional=True))
+            descriptors.append(
+                PassDescriptor("ttir.loop_unroll", optional, optional=True)
+            )
 
     optional = _optional_pass_adder(passes.ttir, "add_expression_restructing")
     if optional is not None:
@@ -373,7 +480,9 @@ def build_triton_linalg_pass_descriptors() -> Iterable[PassDescriptor]:
             "triton_linalg.extract_like_move_backward",
             _require_pass_adder(tl, "add_extract_like_move_backward"),
         ),
-        PassDescriptor("common.canonicalizer.post_conversion", common.add_canonicalizer),
+        PassDescriptor(
+            "common.canonicalizer.post_conversion", common.add_canonicalizer
+        ),
         PassDescriptor(
             "triton_linalg.arith_to_linalg",
             _require_pass_adder(tl, "add_arith_to_linalg"),
@@ -487,8 +596,8 @@ def _find_location_match(text: str) -> Optional[re.Match[str]]:
     patterns = [
         r'loc\("(?P<file>[^"]+)":(?P<line>\d+):(?P<column>\d+)\)',
         r'(?P<file>[^\s:"\']+\.m?lir):(?P<line>\d+):(?P<column>\d+)',
-        r'(?P<file><[^>]+>):(?P<line>\d+):(?P<column>\d+)',
-        r'(?P<line>\d+):(?P<column>\d+)',
+        r"(?P<file><[^>]+>):(?P<line>\d+):(?P<column>\d+)",
+        r"(?P<line>\d+):(?P<column>\d+)",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)

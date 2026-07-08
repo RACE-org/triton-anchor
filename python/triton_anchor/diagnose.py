@@ -534,6 +534,18 @@ def _print_result(result: PassDiagnosticResult, *, quiet: bool = False) -> None:
         )
         if quiet:
             return
+        # T2.5: print aggregate metrics
+        print(f"total duration: {result.total_duration_ms:.2f} ms")
+        print(f"input IR: {result.input_ir_bytes} bytes")
+        print(f"output IR: {result.output_ir_bytes} bytes")
+        if result.peak_rss_bytes > 0:
+            print(f"peak RSS: {result.peak_rss_bytes / (1024 * 1024):.2f} MB")
+        # T2.5: show slowest pass
+        slowest = result.slowest_pass
+        if slowest:
+            print(
+                f"slowest pass: #{slowest.index} {slowest.name} ({slowest.duration_ms:.2f} ms)"
+            )
         print(f"diagnostic output: {result.output_dir}")
         if result.summary_path is not None:
             print(f"summary: {result.summary_path}")
@@ -551,6 +563,14 @@ def _print_result(result: PassDiagnosticResult, *, quiet: bool = False) -> None:
         print(f"before IR: {failed.before_ir}")
         if failed.diagnostic_path is not None:
             print(f"diagnostic detail: {failed.diagnostic_path}")
+        # T2.5: print metrics for the failed pass
+        print(f"pass duration: {failed.duration_ms:.2f} ms")
+        print(f"before IR: {failed.before_ir_bytes} bytes")
+    # T2.5: print aggregate metrics on failure
+    if result.total_duration_ms > 0:
+        print(f"total duration (up to failure): {result.total_duration_ms:.2f} ms")
+    if result.peak_rss_bytes > 0:
+        print(f"peak RSS: {result.peak_rss_bytes / (1024 * 1024):.2f} MB")
     if result.mlir_location is not None:
         location = result.mlir_location
         if location.line is not None and location.column is not None:
