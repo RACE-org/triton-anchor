@@ -189,3 +189,6 @@ htmlcov/
 
 # temp
 ./docs/*triton/include/
+
+# Test data dump
+test_data_dump/
