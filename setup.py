@@ -50,6 +50,10 @@ def get_env_with_keys(keys):
     return ""
 
 
+def is_ttgpu_enabled():
+    return "TTGPU" in os.environ
+
+
 class CMakeClean(clean):
     def initialize_options(self):
         clean.initialize_options(self)
@@ -206,6 +210,9 @@ setup(
         "triton.tools": ["compile.h", "compile.c"],
         "triton": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
         "triton_anchor": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
+    },
+    exclude_package_data={
+        "triton_anchor": [] if is_ttgpu_enabled() else ["include/ttgpu/*", "include/ttgpu/**/*"],
     },
     include_package_data=True,
     ext_modules=[CMakeExtension("triton", "triton/python/triton/_C/")],
