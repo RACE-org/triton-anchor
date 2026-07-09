@@ -42,12 +42,15 @@ EXPECTED_TRITON_BACKEND="sophgo"
 BACKEND_PATH="/workspace/triton-sophgo-backend"
 BACKEND_ENVSETUP_ARGS="PIO_CMODEL"
 BACKEND_TEST_COMMAND="python3 tests/test_smoke.py && python3 tests/test_jit.py"
+PYTHON_VENV_ACTIVATE="/opt/venv/bin/activate"
 RUN_FLAGGEMS_TESTS="false"
 FLAGGEMS_PIP_PACKAGES="scipy pytest"
 FLAGGEMS_TEST_COMMAND="python3 testop/batch_test_flaggems.py"
 ```
 
 Set GITEE_TOKEN only if commit status should be posted back to Gitee.
+
+The runner activates /opt/venv/bin/activate before running uv build or uv pip install. Set PYTHON_VENV_ACTIVATE to another path, or empty, if a different container layout is used.
 
 Set RUN_FLAGGEMS_TESTS=true for full FlagGems validation.
 Change FLAGGEMS_TEST_COMMAND if a backend uses a different FlagGems test script.

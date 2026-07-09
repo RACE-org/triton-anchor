@@ -33,6 +33,7 @@ LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-${WORKSPACE}/llvm-release}"
 PPL_ROOT="${PPL_ROOT:-${WORKSPACE}/ppl-release}"
 PACKAGE_TOOL="${PACKAGE_TOOL:-auto}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_VENV_ACTIVATE="${PYTHON_VENV_ACTIVATE:-/opt/venv/bin/activate}"
 SOURCE_ENVSETUP="${SOURCE_ENVSETUP:-1}"
 FRONTEND_BUILD_COMMAND="${FRONTEND_BUILD_COMMAND:-}"
 LOCAL_CI_ARTIFACT_ROOT="${LOCAL_CI_ARTIFACT_ROOT:-${WORKSPACE}/local-ci-artifacts}"
@@ -42,7 +43,7 @@ DELIVERY_ARTIFACT_DIR="${DELIVERY_ARTIFACT_DIR:-${LOCAL_CI_ARTIFACT_ROOT}/${run_
 export WORKSPACE ANCHOR_DIR BACKEND_PROFILE EXPECTED_TRITON_BACKEND BACKEND_PATH
 export BACKEND_ENVSETUP BACKEND_ENVSETUP_ARGS BACKEND_TEST_COMMAND
 export RUN_FLAGGEMS_TESTS FLAGGEMS_CLONE_DIR FLAGGEMS_REF FLAGGEMS_PIP_PACKAGES FLAGGEMS_TEST_COMMAND
-export LLVM_BUILD_DIR PPL_ROOT PYTHON_BIN GITHUB_SHA="${target_sha}" GITHUB_REF="refs/heads/${GITEE_BRANCH}"
+export LLVM_BUILD_DIR PPL_ROOT PYTHON_BIN PYTHON_VENV_ACTIVATE GITHUB_SHA="${target_sha}" GITHUB_REF="refs/heads/${GITEE_BRANCH}"
 
 mkdir -p "${DELIVERY_ARTIFACT_DIR}"
 
@@ -56,6 +57,21 @@ run_logged() {
   local log_file="${DELIVERY_ARTIFACT_DIR}/${name}.log"
   echo "Running ${name}; log: ${log_file}"
   "$@" 2>&1 | tee "${log_file}"
+}
+
+source_python_venv() {
+  if [[ -z "${PYTHON_VENV_ACTIVATE}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${PYTHON_VENV_ACTIVATE}" ]]; then
+    echo "Python venv activate script does not exist: ${PYTHON_VENV_ACTIVATE}" >&2
+    exit 1
+  fi
+  echo "Sourcing Python venv: ${PYTHON_VENV_ACTIVATE}"
+  set +u
+  # shellcheck disable=SC1090
+  source "${PYTHON_VENV_ACTIVATE}"
+  set -u
 }
 
 source_anchor_env() {
@@ -144,6 +160,7 @@ Run FlagGems: ${RUN_FLAGGEMS_TESTS}
 Artifact dir: ${DELIVERY_ARTIFACT_DIR}
 EOF
 
+source_python_venv
 source_anchor_env
 
 if [[ -z "${FRONTEND_BUILD_COMMAND}" ]]; then
@@ -166,6 +183,7 @@ else
   run_logged frontend-install "${PYTHON_BIN}" -m pip install --force-reinstall "${wheel_path}"
 fi
 
+source_python_venv
 source_anchor_env
 source_backend_env
 
