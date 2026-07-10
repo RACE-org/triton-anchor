@@ -88,13 +88,14 @@ run_once() {
   status=${PIPESTATUS[0]}
   set -e
 
-  echo "${sha}" > "${last_file}"
-
   if [[ ${status} -eq 0 ]]; then
+    echo "${sha}" > "${last_file}"
     post_status "${sha}" "success" "local-ci passed" || true
   else
+    echo "local-ci failed; ${sha} was not marked processed and will be retried." >&2
     post_status "${sha}" "failure" "local-ci failed with exit code ${status}" || true
   fi
+
 
   echo "{\"sha\":\"${sha}\",\"status\":${status},\"run_dir\":\"${run_dir}\"}" > "${run_dir}/result.json"
   return "${status}"
