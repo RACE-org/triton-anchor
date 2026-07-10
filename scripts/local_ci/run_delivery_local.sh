@@ -170,6 +170,10 @@ if [[ -z "${FRONTEND_BUILD_COMMAND}" ]]; then
     FRONTEND_BUILD_COMMAND="${PYTHON_BIN} -m build --wheel --no-isolation"
   fi
 fi
+mkdir -p "${ANCHOR_DIR}/dist"
+echo "Cleaning old frontend wheels under ${ANCHOR_DIR}/dist"
+rm -f "${ANCHOR_DIR}"/dist/*.whl
+
 run_logged frontend-build bash -lc "${FRONTEND_BUILD_COMMAND}"
 
 wheel_path="$(find "${ANCHOR_DIR}/dist" -maxdepth 1 -name '*.whl' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {print $2}')"
@@ -177,6 +181,11 @@ if [[ -z "${wheel_path}" ]]; then
   echo "No built wheel found under ${ANCHOR_DIR}/dist" >&2
   exit 1
 fi
+{
+  echo "Built frontend wheel: ${wheel_path}"
+  ls -lh "${wheel_path}"
+  sha256sum "${wheel_path}"
+} | tee "${DELIVERY_ARTIFACT_DIR}/frontend-wheel-info.log"
 if use_uv; then
   run_logged frontend-install uv pip install --force-reinstall "${wheel_path}"
 else

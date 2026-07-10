@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -32,10 +33,10 @@ def main() -> int:
     path_owner = urllib.parse.quote(args.owner, safe="")
     path_repo = urllib.parse.quote(args.repo, safe="")
     path_sha = urllib.parse.quote(args.sha, safe="")
-    url = f"https://gitee.com/api/v5/repos/{path_owner}/{path_repo}/statuses/{path_sha}"
+    base_url = f"https://gitee.com/api/v5/repos/{path_owner}/{path_repo}/statuses/{path_sha}"
+    url = f"{base_url}?{urllib.parse.urlencode({'access_token': token})}"
 
     payload = {
-        "access_token": token,
         "state": args.state,
         "context": args.context,
         "description": args.description[:140],
@@ -44,13 +45,27 @@ def main() -> int:
         payload["target_url"] = args.target_url
 
     data = urllib.parse.urlencode(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, method="POST")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={"Accept": "application/json"},
+    )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             body = response.read().decode("utf-8", errors="replace")
             print(f"Posted Gitee status {args.state} for {args.sha}: HTTP {response.status}")
             if body:
                 print(body[:1000])
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        print(
+            f"Failed to post Gitee status: HTTP {exc.code} {exc.reason}; url={base_url}",
+            file=sys.stderr,
+        )
+        if body:
+            print(body[:2000], file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"Failed to post Gitee status: {exc}", file=sys.stderr)
         return 1
