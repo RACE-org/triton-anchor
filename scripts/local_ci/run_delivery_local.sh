@@ -242,11 +242,6 @@ if [[ "${RUN_FLAGGEMS_TESTS}" == "true" ]]; then
   source_backend_env
   (cd "${BACKEND_PATH}" && run_logged flaggems bash -lc "${FLAGGEMS_TEST_COMMAND}")
 
-  mkdir -p "${DELIVERY_ARTIFACT_DIR}/flaggems"
-  cp -f "${BACKEND_PATH}"/testop/batch_test_results_flaggems_*.csv "${DELIVERY_ARTIFACT_DIR}/flaggems/" 2>/dev/null || true
-  if [[ -d "${BACKEND_PATH}/testop/logs" ]]; then
-    cp -a "${BACKEND_PATH}/testop/logs" "${DELIVERY_ARTIFACT_DIR}/flaggems/" 2>/dev/null || true
-  fi
 fi
 
 echo "Local CI finished successfully. Artifacts are in ${DELIVERY_ARTIFACT_DIR}"

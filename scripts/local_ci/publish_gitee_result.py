@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
@@ -98,38 +97,35 @@ def map_container_path(path_text: str) -> Path | None:
     return None
 
 
-def copy_results(run_dir: Path, target_dir: Path) -> Path | None:
-    target_dir.mkdir(parents=True, exist_ok=True)
-    runner_dir = target_dir / "runner"
-    if runner_dir.exists():
-        shutil.rmtree(runner_dir)
-    shutil.copytree(run_dir, runner_dir)
+PUBLISHED_ARTIFACT_FILES = (
+    "delivery-summary.txt",
+    "frontend-install.log",
+    "backend-smoke-jit.log",
+    "flaggems.log",
+)
 
+
+def copy_results(run_dir: Path, target_dir: Path) -> Path | None:
     artifact_dir_text = discover_artifact_dir(run_dir / "local-ci.log")
     artifact_dir = map_container_path(artifact_dir_text)
-    if artifact_dir and artifact_dir.exists():
-        copied_artifacts = target_dir / "artifacts"
-        if copied_artifacts.exists():
-            shutil.rmtree(copied_artifacts)
-        shutil.copytree(artifact_dir, copied_artifacts)
-        return copied_artifacts
-    return None
+    if not artifact_dir or not artifact_dir.exists():
+        return None
 
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
-def write_summary(target_dir: Path, args: argparse.Namespace, status_text: str, result_url: str, artifact_copied: bool) -> None:
-    summary = target_dir / "summary.md"
-    summary.write_text(
-        "# Local CI Result\n\n"
-        f"- Status: {status_text}\n"
-        f"- Source branch: {args.source_branch}\n"
-        f"- Commit: {args.sha}\n"
-        f"- Run id: {args.run_id}\n"
-        f"- Context: {args.context}\n"
-        f"- Exit code: {args.exit_code}\n"
-        f"- Artifacts copied: {'yes' if artifact_copied else 'no'}\n"
-        f"- Result URL: {result_url}\n"
-    )
+    copied = []
+    for file_name in PUBLISHED_ARTIFACT_FILES:
+        source = artifact_dir / file_name
+        if source.is_file():
+            shutil.copy2(source, target_dir / file_name)
+            copied.append(file_name)
 
+    if not copied:
+        shutil.rmtree(target_dir)
+        return None
+    return target_dir
 
 def post_commit_comment(owner: str, repo: str, sha: str, token: str, body: str) -> None:
     path_owner = urllib.parse.quote(owner, safe="")
@@ -200,7 +196,6 @@ def main() -> int:
 
         target_dir = worktree / rel_dir
         copied_artifacts = copy_results(run_dir, target_dir)
-        write_summary(target_dir, args, status_text, result_url, copied_artifacts is not None)
 
         latest_dir = worktree / "runs" / safe_branch / args.sha
         latest_dir.mkdir(parents=True, exist_ok=True)
@@ -212,16 +207,6 @@ def main() -> int:
             "Result directories are stored under runs/<branch>/<commit>/<run-id>/.\n"
         )
 
-        metadata = {
-            "status": status_text,
-            "exit_code": args.exit_code,
-            "source_branch": args.source_branch,
-            "sha": args.sha,
-            "run_id": args.run_id,
-            "context": args.context,
-            "result_url": result_url,
-        }
-        (target_dir / "result.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n")
 
         run_git(["add", "-A"], worktree, git_env)
         diff = run_git(["diff", "--cached", "--quiet"], worktree, git_env, check=False)

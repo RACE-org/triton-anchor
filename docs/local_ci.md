@@ -81,7 +81,7 @@ Container-side artifacts:
 /workspace/local-ci-artifacts
 ```
 
-Published Gitee results are stored on the local-ci-results branch under runs/<branch>/<commit>/<run-id>/. Commit comments contain only a short summary and a link to the result directory. Full logs stay on the result branch.
+Published Gitee results are stored on the local-ci-results branch under runs/<branch>/<commit>/<run-id>/. Commit comments contain only a short summary and a link to the result directory. The Gitee result directory intentionally keeps only selected files: delivery-summary.txt, frontend-install.log, backend-smoke-jit.log, and flaggems.log. Full local logs remain under /workspace/local-ci-artifacts.
 
 ## Order Notes
 
