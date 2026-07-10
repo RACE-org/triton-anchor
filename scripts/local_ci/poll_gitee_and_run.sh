@@ -17,8 +17,13 @@ GITEE_TOKEN="${GITEE_TOKEN:-}"
 LOCAL_CI_STATE_DIR="${LOCAL_CI_STATE_DIR:-/root/projects/test/local-ci-state}"
 LOCAL_CI_POLL_INTERVAL="${LOCAL_CI_POLL_INTERVAL:-60}"
 LOCAL_CI_ONCE="${LOCAL_CI_ONCE:-0}"
-GITEE_STATUS_CONTEXT="${GITEE_STATUS_CONTEXT:-local-ci/sophgo-cmodel}"
-export GITEE_TOKEN
+GITEE_RESULT_CONTEXT="${GITEE_RESULT_CONTEXT:-local-ci/sophgo-cmodel}"
+GITEE_RESULTS_BRANCH="${GITEE_RESULTS_BRANCH:-local-ci-results}"
+PUBLISH_GITEE_RESULTS="${PUBLISH_GITEE_RESULTS:-1}"
+GITEE_USERNAME="${GITEE_USERNAME:-${GITEE_OWNER}}"
+GITEE_WEB_URL="${GITEE_WEB_URL:-https://gitee.com/${GITEE_OWNER}/${GITEE_REPO}}"
+LOCAL_CI_WORKSPACE_HOST="${LOCAL_CI_WORKSPACE_HOST:-/root/projects/test/workspace}"
+export GITEE_TOKEN GITEE_USERNAME GITEE_WEB_URL WORKSPACE LOCAL_CI_WORKSPACE_HOST
 
 mkdir -p "${LOCAL_CI_STATE_DIR}"
 lock_file="${LOCAL_CI_STATE_DIR}/poll.lock"
@@ -34,25 +39,28 @@ latest_sha() {
   git ls-remote "${GITEE_REPO_URL}" "refs/heads/${GITEE_BRANCH}" | awk '{print $1}'
 }
 
-post_status() {
+publish_result() {
   local sha="$1"
-  local state="$2"
-  local description="$3"
-  local target_url="${4:-}"
+  local status="$2"
+  local run_id="$3"
+  local run_dir="$4"
+  if [[ "${PUBLISH_GITEE_RESULTS}" != "1" ]]; then
+    echo "PUBLISH_GITEE_RESULTS is not 1; skip publishing Gitee result branch and commit comment."
+    return 0
+  fi
   local args=(
     --owner "${GITEE_OWNER}"
     --repo "${GITEE_REPO}"
+    --repo-url "${GITEE_REPO_URL}"
     --sha "${sha}"
-    --state "${state}"
-    --context "${GITEE_STATUS_CONTEXT}"
-    --description "${description}"
+    --source-branch "${GITEE_BRANCH}"
+    --run-id "${run_id}"
+    --run-dir "${run_dir}"
+    --exit-code "${status}"
+    --results-branch "${GITEE_RESULTS_BRANCH}"
+    --context "${GITEE_RESULT_CONTEXT}"
   )
-
-  if [[ -n "${target_url}" ]]; then
-    args+=(--target-url "${target_url}")
-  fi
-
-  "${SCRIPT_DIR}/post_gitee_status.py" "${args[@]}"
+  "${SCRIPT_DIR}/publish_gitee_result.py" "${args[@]}"
 }
 
 run_once() {
@@ -80,7 +88,6 @@ run_once() {
 
   echo "Detected new commit on ${GITEE_BRANCH}: ${sha}"
   echo "Run directory: ${run_dir}"
-  post_status "${sha}" "pending" "local-ci started" || true
 
   local status=0
   set +e
@@ -90,14 +97,12 @@ run_once() {
 
   if [[ ${status} -eq 0 ]]; then
     echo "${sha}" > "${last_file}"
-    post_status "${sha}" "success" "local-ci passed" || true
   else
     echo "local-ci failed; ${sha} was not marked processed and will be retried." >&2
-    post_status "${sha}" "failure" "local-ci failed with exit code ${status}" || true
   fi
 
-
   echo "{\"sha\":\"${sha}\",\"status\":${status},\"run_dir\":\"${run_dir}\"}" > "${run_dir}/result.json"
+  publish_result "${sha}" "${status}" "${run_id}" "${run_dir}" || true
   return "${status}"
 }
 
