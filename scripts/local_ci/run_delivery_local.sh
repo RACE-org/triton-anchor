@@ -190,9 +190,9 @@ fi
   sha256sum "${wheel_path}"
 } | tee "${DELIVERY_ARTIFACT_DIR}/frontend-wheel-info.log"
 if use_uv; then
-  run_logged frontend-install uv pip install --force-reinstall "${wheel_path}"
+  run_logged frontend-install uv pip install --force-reinstall --no-deps "${wheel_path}"
 else
-  run_logged frontend-install "${PYTHON_BIN}" -m pip install --force-reinstall "${wheel_path}"
+  run_logged frontend-install "${PYTHON_BIN}" -m pip install --force-reinstall --no-deps "${wheel_path}"
 fi
 
 source_python_venv
