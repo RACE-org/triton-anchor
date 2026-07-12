@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from triton_anchor.diagnose import main
+from triton_anchor.diagnose import InputDiagnosticError, main
 from triton_anchor.diagnostics import PassDescriptor, PassDiagnostic
 
 
@@ -214,6 +214,93 @@ def test_cli_python_mode_diagnoses_in_memory_module(tmp_path, monkeypatch):
     assert exit_code == 0
     assert (tmp_path / "01-common.inliner.before.mlir").exists()
     assert (tmp_path / "01-common.inliner.after.mlir").exists()
+
+
+def test_cli_reports_input_parse_diagnostic(tmp_path, monkeypatch, capsys):
+    input_path = tmp_path / "bad.mlir"
+    input_path.write_text(
+        "\n".join(
+            [
+                "module {",
+                '  "tt.load"() : () -> f32',
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "diag"
+
+    def fail_parse(path):
+        original = RuntimeError(f"{path}:2:3: error: failed to parse operation 'tt.load'")
+        raise InputDiagnosticError(
+            "input-parse",
+            str(original),
+            diagnostic_text=str(original),
+            input_path=path,
+            original=original,
+        )
+
+    monkeypatch.setattr("triton_anchor.diagnose._load_mlir_module", fail_parse)
+
+    exit_code = main([str(input_path), "--output-dir", str(output_dir)])
+
+    assert exit_code == 2
+    assert (output_dir / "input-parse.diagnostic.txt").exists()
+    assert (output_dir / "summary.json").exists()
+    diagnostic_text = (output_dir / "input-parse.diagnostic.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "stage: input-parse" in diagnostic_text
+    assert "operation: tt.load" in diagnostic_text
+    captured = capsys.readouterr()
+    assert "FAILED: input-parse failed before pass diagnostics." in captured.out
+    assert "location:" in captured.out
+
+
+def test_cli_reports_python_frontend_diagnostic(tmp_path, monkeypatch, capsys):
+    output_dir = tmp_path / "diag"
+    python_target = "tests.test_smoke:_smoke_add_kernel"
+
+    def fail_frontend(python_target, signature, constants):
+        original = RuntimeError(
+            'loc("kernel.py":4:5): error: operation \'tl.load\' failed before TTIR'
+        )
+        raise InputDiagnosticError(
+            "python-frontend",
+            str(original),
+            diagnostic_text=str(original),
+            python_target=python_target,
+            original=original,
+        )
+
+    monkeypatch.setattr(
+        "triton_anchor.diagnose._make_ttir_from_python",
+        fail_frontend,
+    )
+
+    exit_code = main(
+        [
+            "--python",
+            python_target,
+            "--signature",
+            "*fp32,*fp32,*fp32,i32",
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 2
+    assert (output_dir / "python-frontend.diagnostic.txt").exists()
+    assert (output_dir / "summary.json").exists()
+    diagnostic_text = (output_dir / "python-frontend.diagnostic.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "stage: python-frontend" in diagnostic_text
+    assert "python_target: tests.test_smoke:_smoke_add_kernel" in diagnostic_text
+    assert "operation: tl.load" in diagnostic_text
+    captured = capsys.readouterr()
+    assert "FAILED: python-frontend failed before TTIR generation." in captured.out
+    assert "operation: tl.load" in captured.out
 
 
 def test_cli_help_loads_without_libtriton(capsys):
