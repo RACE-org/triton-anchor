@@ -4,12 +4,62 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
+import os
 import sys
+import tempfile
+import traceback
 from ast import literal_eval
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .diagnostics import PassDiagnostic, PassDiagnosticResult
+from .diagnostics import (
+    MLIRDiagnosticLocation,
+    PassDiagnostic,
+    PassDiagnosticResult,
+    extract_mlir_location,
+)
+
+
+@dataclass
+class InputDiagnosticResult:
+    """Summary for failures that happen before any compiler pass runs."""
+
+    ok: bool
+    stage: str
+    pipeline: str
+    output_dir: Path
+    diagnostic_path: Path
+    error: str
+    input_path: Path | None = None
+    python_target: str | None = None
+    diagnostic_text: str | None = None
+    mlir_location: MLIRDiagnosticLocation | None = None
+    traceback: str | None = None
+    summary_path: Path | None = None
+
+
+class InputDiagnosticError(Exception):
+    """A diagnosable input/pre-pass failure."""
+
+    def __init__(
+        self,
+        stage: str,
+        message: str,
+        *,
+        diagnostic_text: str = "",
+        input_path: Path | None = None,
+        python_target: str | None = None,
+        original: Exception | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.message = message
+        self.diagnostic_text = diagnostic_text
+        self.input_path = input_path
+        self.python_target = python_target
+        self.original = original
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,6 +70,10 @@ def main(argv: list[str] | None = None) -> int:
         mod = _load_input_module(args)
     except FileNotFoundError:
         print(f"error: input file not found: {args.input}", file=sys.stderr)
+        return 2
+    except InputDiagnosticError as exc:
+        result = _write_input_diagnostic(exc, args)
+        _print_input_diagnostic(result, quiet=args.quiet)
         return 2
     except ImportError as exc:
         print(
@@ -166,7 +220,17 @@ def _load_mlir_module(input_path: Path):
     ctx = ir.context()
     ir.load_dialects(ctx)
     anchor.load_dialects(ctx)
-    mod = ir.parse_mlir_module(str(input_path), ctx)
+    try:
+        mod, _ = _capture_stderr(lambda: ir.parse_mlir_module(str(input_path), ctx))
+    except _CapturedInputError as exc:
+        original = exc.original
+        raise InputDiagnosticError(
+            "input-parse",
+            str(original),
+            diagnostic_text=exc.diagnostic_text,
+            input_path=input_path,
+            original=original,
+        ) from original
     mod.context = ctx
     return mod
 
@@ -185,22 +249,45 @@ def _make_ttir_from_python(
     import triton
     from triton._C.libtriton import anchor, ir
 
-    module_name, function_name = python_target.split(":", 1)
-    module = importlib.import_module(module_name)
-    fn = getattr(module, function_name)
+    try:
+        module_name, function_name = python_target.split(":", 1)
+        module = importlib.import_module(module_name)
+        fn = getattr(module, function_name)
 
-    parsed_signature = _parse_signature(signature)
-    parsed_constants = _parse_constants(constants, fn=fn)
+        parsed_signature = _parse_signature(signature)
+        parsed_constants = _parse_constants(constants, fn=fn)
 
-    ctx = ir.context()
-    ir.load_dialects(ctx)
-    anchor.load_dialects(ctx)
-    src = triton.compiler.ASTSource(
-        fn=fn,
-        signature=parsed_signature,
-        constants=parsed_constants,
-    )
-    mod = src.make_ir(options=_MinimalTritonOptions(), codegen_fns=None, context=ctx)
+        ctx = ir.context()
+        ir.load_dialects(ctx)
+        anchor.load_dialects(ctx)
+        src = triton.compiler.ASTSource(
+            fn=fn,
+            signature=parsed_signature,
+            constants=parsed_constants,
+        )
+        mod, _ = _capture_stderr(
+            lambda: src.make_ir(
+                options=_MinimalTritonOptions(),
+                codegen_fns=None,
+                context=ctx,
+            )
+        )
+    except _CapturedInputError as exc:
+        original = exc.original
+        raise InputDiagnosticError(
+            "python-frontend",
+            str(original),
+            diagnostic_text=exc.diagnostic_text,
+            python_target=python_target,
+            original=original,
+        ) from original
+    except Exception as exc:
+        raise InputDiagnosticError(
+            "python-frontend",
+            str(exc),
+            python_target=python_target,
+            original=exc,
+        ) from exc
     mod.context = ctx
     return mod
 
@@ -269,6 +356,174 @@ class _MinimalTritonOptions:
         self.allow_fp8e4nv = False
         self.max_num_imprecise_acc_default = False
         self.debug = False
+
+
+class _CapturedInputError(Exception):
+    def __init__(self, original: Exception, diagnostic_text: str) -> None:
+        super().__init__(str(original))
+        self.original = original
+        self.diagnostic_text = diagnostic_text
+
+
+def _capture_stderr(fn):
+    saved_stderr_fd = os.dup(2)
+    original: Exception | None = None
+    result = None
+    with tempfile.TemporaryFile(mode="w+b") as captured:
+        try:
+            os.dup2(captured.fileno(), 2)
+            try:
+                result = fn()
+            except Exception as exc:
+                original = exc
+            finally:
+                os.dup2(saved_stderr_fd, 2)
+        finally:
+            os.close(saved_stderr_fd)
+
+        captured.seek(0)
+        diagnostic_text = captured.read().decode("utf-8", errors="replace")
+
+    if original is not None:
+        raise _CapturedInputError(original, diagnostic_text) from original
+    return result, diagnostic_text
+
+
+def _write_input_diagnostic(
+    exc: InputDiagnosticError,
+    args: argparse.Namespace,
+) -> InputDiagnosticResult:
+    output_dir = Path(
+        args.output_dir or tempfile.mkdtemp(prefix="triton-anchor-diagnose-")
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    original = exc.original or exc
+    tb = "".join(
+        traceback.format_exception(type(original), original, original.__traceback__)
+    )
+    input_text, location_path = _read_input_text_for_diagnostic(exc.input_path)
+    mlir_location = extract_mlir_location(
+        exc.message,
+        exc.diagnostic_text,
+        input_text,
+        location_path,
+    )
+
+    diagnostic_path = output_dir / f"{exc.stage}.diagnostic.txt"
+    result = InputDiagnosticResult(
+        ok=False,
+        stage=exc.stage,
+        pipeline=args.pipeline,
+        output_dir=output_dir,
+        diagnostic_path=diagnostic_path,
+        error=exc.message,
+        input_path=exc.input_path,
+        python_target=exc.python_target,
+        diagnostic_text=exc.diagnostic_text or None,
+        mlir_location=mlir_location,
+        traceback=tb,
+    )
+    _write_input_diagnostic_file(result)
+    if not args.no_summary_json:
+        summary_path = output_dir / "summary.json"
+        result.summary_path = summary_path
+        summary_path.write_text(
+            json.dumps(_to_jsonable(asdict(result)), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    return result
+
+
+def _read_input_text_for_diagnostic(input_path: Path | None) -> tuple[str, Path]:
+    if input_path is None:
+        return "", Path("<unknown>")
+    try:
+        return input_path.read_text(encoding="utf-8"), input_path
+    except OSError:
+        return "", input_path
+
+
+def _write_input_diagnostic_file(result: InputDiagnosticResult) -> None:
+    parts = [
+        f"stage: {result.stage}",
+        f"pipeline: {result.pipeline}",
+        f"error: {result.error}",
+    ]
+    if result.input_path is not None:
+        parts.append(f"input: {result.input_path}")
+    if result.python_target is not None:
+        parts.append(f"python_target: {result.python_target}")
+    if result.mlir_location is not None:
+        location = result.mlir_location
+        parts.extend(
+            [
+                "location:",
+                f"  raw: {location.raw}",
+                f"  file: {location.file}",
+                f"  line: {location.line}",
+                f"  column: {location.column}",
+                f"  operation: {location.operation}",
+                f"  ir_line: {location.ir_line}",
+                f"  ir_snippet: {location.ir_snippet}",
+            ]
+        )
+    if result.diagnostic_text:
+        parts.extend(["captured diagnostics:", result.diagnostic_text.rstrip()])
+    if result.traceback:
+        parts.extend(["traceback:", result.traceback.rstrip()])
+    result.diagnostic_path.write_text("\n".join(parts) + "\n", encoding="utf-8")
+
+
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, list):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _to_jsonable(item) for key, item in value.items()}
+    return value
+
+
+def _print_input_diagnostic(
+    result: InputDiagnosticResult,
+    *,
+    quiet: bool = False,
+) -> None:
+    if result.stage == "python-frontend":
+        print("FAILED: python-frontend failed before TTIR generation.")
+    elif result.stage == "input-parse":
+        print("FAILED: input-parse failed before pass diagnostics.")
+    else:
+        print(f"FAILED: {result.stage} failed before pass diagnostics.")
+    if quiet:
+        return
+
+    if result.input_path is not None:
+        print(f"input: {result.input_path}")
+    if result.python_target is not None:
+        print(f"python target: {result.python_target}")
+    print(f"diagnostic detail: {result.diagnostic_path}")
+    if result.mlir_location is not None:
+        location = result.mlir_location
+        if location.line is not None and location.column is not None:
+            if location.file:
+                print(f"location: {location.file}:{location.line}:{location.column}")
+            else:
+                print(f"location: {location.line}:{location.column}")
+        elif location.raw and location.raw != location.operation:
+            print(f"location: {location.raw}")
+        else:
+            print("location: <not available>")
+        if location.operation:
+            print(f"operation: {location.operation}")
+        if location.ir_line is not None:
+            print(f"ir line: {location.ir_line}: {location.ir_snippet}")
+    if result.error:
+        print(f"error: {result.error}")
+    print(f"diagnostic output: {result.output_dir}")
+    if result.summary_path is not None:
+        print(f"summary: {result.summary_path}")
 
 
 def _print_result(result: PassDiagnosticResult, *, quiet: bool = False) -> None:

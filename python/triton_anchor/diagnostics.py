@@ -281,6 +281,21 @@ class PassDiagnostic:
         return path
 
 
+def extract_mlir_location(
+    error: str,
+    diagnostic_text: str = "",
+    before_ir_text: str = "",
+    before_path: str | Path | None = None,
+) -> Optional[MLIRDiagnosticLocation]:
+    """Extract a best-effort MLIR source/op location from diagnostic text."""
+    return _extract_mlir_location(
+        error,
+        diagnostic_text,
+        before_ir_text,
+        Path(before_path) if before_path is not None else Path("<unknown>"),
+    )
+
+
 def build_ttir_pass_descriptors(
     *, hw: Optional[HWCapability] = None
 ) -> Iterable[PassDescriptor]:
