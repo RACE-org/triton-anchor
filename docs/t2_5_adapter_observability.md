@@ -134,10 +134,3 @@ summary: ./out/summary.json
 - **任务**：T2.5 Adapter 层健壮性，优先级 P1，属于任务2（开发者工具链补全）
 - **依赖链**：T2.1 诊断 CLI → T2.5 Adapter 健壮性 → T3.4 交付测试 CI
 
----
-
-## 后续工作
-
-1. **Subprocess adapter RSS 跟踪**：triton-shared 集成完成后，用 `Popen` + `psutil` 采样子进程内存。
-2. **T3.4 CI 集成**：用 `summary.json` 新字段做质量卡点（如单 pass 耗时 >5s 报警）。
-3. **T3.7 性能基准对接**：复用 `total_duration_ms` 和逐 pass 耗时，建立性能回归检测。
