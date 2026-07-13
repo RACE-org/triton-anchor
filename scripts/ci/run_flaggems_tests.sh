@@ -14,6 +14,8 @@ FLAGGEMS_CLONE_DIR="${FLAGGEMS_CLONE_DIR:-${WORKSPACE}/FlagGems}"
 FLAGGEMS_REPO_URL="${FLAGGEMS_REPO_URL:-}"
 FLAGGEMS_REF="${FLAGGEMS_REF:-}"
 FLAGGEMS_PIP_PACKAGES="${FLAGGEMS_PIP_PACKAGES:-}"
+FLAGGEMS_TEST_FILES="${FLAGGEMS_TEST_FILES:-}"
+FLAGGEMS_TEST_MARKERS="${FLAGGEMS_TEST_MARKERS:-}"
 FLAGGEMS_TEST_COMMAND="${FLAGGEMS_TEST_COMMAND:-}"
 
 cd "${ROOT_DIR}"
@@ -117,10 +119,19 @@ collect_flaggems_artifacts() {
   mkdir -p "${out_dir}"
 
   cp -f "${DELIVERY_ARTIFACT_DIR}/flaggems-test.log" "${out_dir}/" 2>/dev/null || true
-  cp -f "${backend_dir}"/testop/batch_test_results_flaggems_*.csv "${out_dir}/" 2>/dev/null || true
-  if [[ -d "${backend_dir}/testop/logs" ]]; then
-    cp -a "${backend_dir}/testop/logs" "${out_dir}/" 2>/dev/null || true
+}
+
+build_default_flaggems_test_command() {
+  if [[ -n "${FLAGGEMS_TEST_COMMAND}" ]]; then
+    return 0
   fi
+  if [[ -z "${FLAGGEMS_TEST_FILES}" || -z "${FLAGGEMS_TEST_MARKERS}" ]]; then
+    echo "FLAGGEMS_TEST_COMMAND is required when FlagGems tests are enabled unless FLAGGEMS_TEST_FILES and FLAGGEMS_TEST_MARKERS are set." >&2
+    exit 1
+  fi
+
+  FLAGGEMS_TEST_COMMAND="cd \"${FLAGGEMS_ROOT}\" && ${PYTHON_BIN} -m pytest -s ${FLAGGEMS_TEST_FILES} -m \"${FLAGGEMS_TEST_MARKERS}\" --record=log"
+  export FLAGGEMS_TEST_COMMAND
 }
 
 if [[ "${SOURCE_ENVSETUP}" == "1" ]]; then
@@ -133,11 +144,6 @@ if [[ -z "${backend_dir}" || ! -d "${backend_dir}" ]]; then
   echo "FlagGems tests require an installed backend directory. Got: ${backend_dir:-<none>}" >&2
   exit 1
 fi
-if [[ -z "${FLAGGEMS_TEST_COMMAND}" ]]; then
-  echo "FLAGGEMS_TEST_COMMAND is required when FlagGems tests are enabled." >&2
-  exit 1
-fi
-
 normalize_flaggems_repo_config
 clone_flaggems_repo
 
@@ -152,6 +158,7 @@ fi
 
 export FLAGGEMS_ROOT="${FLAGGEMS_CLONE_DIR}"
 source_backend_envsetup "${backend_dir}"
+build_default_flaggems_test_command
 
 log_file="${DELIVERY_ARTIFACT_DIR}/flaggems-test.log"
 echo "Running FlagGems test command in ${backend_dir}; log: ${log_file}"
