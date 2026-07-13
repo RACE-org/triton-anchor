@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish local-ci logs to a Gitee branch and add a short commit comment."""
+"""Publish local-ci logs to a Gitee results repository and add a short commit comment."""
 
 from __future__ import annotations
 
@@ -19,9 +19,13 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--owner", required=True)
-    parser.add_argument("--repo", required=True)
-    parser.add_argument("--repo-url", required=True)
+    parser.add_argument("--owner", required=True, help="Source Gitee code repository owner for commit comments.")
+    parser.add_argument("--repo", required=True, help="Source Gitee code repository name for commit comments.")
+    parser.add_argument("--repo-url", required=True, help="Source Gitee code repository URL; kept for compatibility.")
+    parser.add_argument("--results-owner", default="")
+    parser.add_argument("--results-repo", default="")
+    parser.add_argument("--results-repo-url", default="")
+    parser.add_argument("--results-web-url", default="")
     parser.add_argument("--sha", required=True)
     parser.add_argument("--source-branch", required=True)
     parser.add_argument("--run-id", required=True)
@@ -127,6 +131,7 @@ def copy_results(run_dir: Path, target_dir: Path) -> Path | None:
         return None
     return target_dir
 
+
 def post_commit_comment(owner: str, repo: str, sha: str, token: str, body: str) -> None:
     path_owner = urllib.parse.quote(owner, safe="")
     path_repo = urllib.parse.quote(repo, safe="")
@@ -158,8 +163,17 @@ def main() -> int:
         print("GITEE_TOKEN is not set; skip publishing Gitee result branch and commit comment.")
         return 0
 
+    results_owner = args.results_owner or args.owner
+    results_repo = args.results_repo or args.repo
+    results_repo_url = args.results_repo_url or args.repo_url
+    results_web_url = (
+        args.results_web_url
+        or os.getenv("GITEE_RESULTS_WEB_URL", "")
+        or os.getenv("GITEE_WEB_URL", "")
+        or f"https://gitee.com/{results_owner}/{results_repo}"
+    ).rstrip("/")
+
     username = os.getenv("GITEE_USERNAME", args.owner)
-    web_url = os.getenv("GITEE_WEB_URL", f"https://gitee.com/{args.owner}/{args.repo}").rstrip("/")
     run_dir = Path(args.run_dir).resolve()
     if not run_dir.exists():
         print(f"Run directory does not exist: {run_dir}", file=sys.stderr)
@@ -170,7 +184,7 @@ def main() -> int:
     rel_dir = Path("runs") / safe_branch / args.sha / args.run_id
     quoted_branch = urllib.parse.quote(args.results_branch, safe="")
     quoted_rel_dir = urllib.parse.quote(str(rel_dir), safe="/")
-    result_url = f"{web_url}/tree/{quoted_branch}/{quoted_rel_dir}"
+    result_url = f"{results_web_url}/tree/{quoted_branch}/{quoted_rel_dir}"
 
     with tempfile.TemporaryDirectory(prefix="triton-anchor-local-ci-results-") as tmp:
         tmp_path = Path(tmp)
@@ -181,7 +195,7 @@ def main() -> int:
         run_git(["init", "-q"], worktree, git_env)
         run_git(["config", "user.name", "triton-anchor-local-ci"], worktree, git_env)
         run_git(["config", "user.email", "triton-anchor-local-ci@example.invalid"], worktree, git_env)
-        run_git(["remote", "add", "origin", args.repo_url], worktree, git_env)
+        run_git(["remote", "add", "origin", results_repo_url], worktree, git_env)
 
         fetch = run_git(
             ["fetch", "--depth=1", "origin", f"refs/heads/{args.results_branch}:refs/remotes/origin/{args.results_branch}"],
@@ -195,7 +209,7 @@ def main() -> int:
             run_git(["checkout", "-q", "--orphan", args.results_branch], worktree, git_env)
 
         target_dir = worktree / rel_dir
-        copied_artifacts = copy_results(run_dir, target_dir)
+        copy_results(run_dir, target_dir)
 
         latest_dir = worktree / "runs" / safe_branch / args.sha
         latest_dir.mkdir(parents=True, exist_ok=True)
@@ -207,7 +221,6 @@ def main() -> int:
             "Result directories are stored under runs/<branch>/<commit>/<run-id>/.\n"
         )
 
-
         run_git(["add", "-A"], worktree, git_env)
         diff = run_git(["diff", "--cached", "--quiet"], worktree, git_env, check=False)
         if diff.returncode == 0:
@@ -215,7 +228,7 @@ def main() -> int:
         else:
             run_git(["commit", "-q", "-m", f"local-ci: {status_text} {args.sha[:12]} {args.run_id}"], worktree, git_env)
             run_git(["push", "origin", f"HEAD:refs/heads/{args.results_branch}"], worktree, git_env)
-            print(f"Published Gitee local-ci results: {result_url}")
+            print(f"Published Gitee local-ci results to {results_owner}/{results_repo}: {result_url}")
 
     comment_body = (
         f"local-ci {status_text}\n\n"

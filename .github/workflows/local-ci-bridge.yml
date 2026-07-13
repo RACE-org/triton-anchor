@@ -3,6 +3,8 @@ name: Local CI Bridge
 on:
   push:
     branches: [jiwang-delivery-ci]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       source_branch:
@@ -19,7 +21,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -27,15 +29,21 @@ jobs:
     name: Publish Gitee Local CI Status
     runs-on: ubuntu-latest
     env:
-      GITEE_OWNER: ${{ vars.GITEE_OWNER || 'likehupochuan' }}
-      GITEE_REPO: ${{ vars.GITEE_REPO || 'triton-anchor' }}
+      GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'likehupochuan' }}
+      GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
       GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
-      GITEE_WEB_URL: ${{ vars.GITEE_WEB_URL || 'https://gitee.com/likehupochuan/triton-anchor' }}
+      GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/triton-anchor-local-ci-results' }}
       LOCAL_CI_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
       LOCAL_CI_BRIDGE_TIMEOUT_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_TIMEOUT_SECONDS || '10800' }}
       LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
     steps:
+      - name: Check pull request source
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::Local CI can only test PR branches that are mirrored into Gitee. Fork PRs are not supported by this runner."
+          exit 1
+
       - uses: actions/checkout@v4
         with:
           submodules: false
@@ -50,14 +58,14 @@ jobs:
       - name: Wait for Gitee result and update GitHub status
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          BRIDGE_SOURCE_BRANCH: ${{ github.event.inputs.source_branch || github.ref_name }}
-          BRIDGE_COMMIT_SHA: ${{ github.event.inputs.commit_sha || github.sha }}
+          BRIDGE_SOURCE_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.event.inputs.source_branch || github.ref_name }}
+          BRIDGE_COMMIT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.inputs.commit_sha || github.sha }}
         run: |
           python scripts/local_ci/bridge_gitee_to_github_status.py \
-            --gitee-owner "${GITEE_OWNER}" \
-            --gitee-repo "${GITEE_REPO}" \
+            --gitee-owner "${GITEE_RESULTS_OWNER}" \
+            --gitee-repo "${GITEE_RESULTS_REPO}" \
             --gitee-results-branch "${GITEE_RESULTS_BRANCH}" \
-            --gitee-web-url "${GITEE_WEB_URL}" \
+            --gitee-web-url "${GITEE_RESULTS_WEB_URL}" \
             --source-branch "${BRIDGE_SOURCE_BRANCH}" \
             --sha "${BRIDGE_COMMIT_SHA}" \
             --context "${LOCAL_CI_CONTEXT}" \
