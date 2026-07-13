@@ -5,8 +5,8 @@ name: Upstream Triton Watch
 
 on:
   schedule:
-    # 每周一 09:00（北京时间）检查 Triton 上游 release 分支变化。
-    - cron: "0 1 * * 1"
+    # 每周一 03:42（北京时间）检查 Triton 上游 release 分支变化。
+    - cron: "42 19 * * 0"
   workflow_dispatch:
     inputs:
       since_days:
