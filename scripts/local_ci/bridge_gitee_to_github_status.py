@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bridge Gitee local-ci results back to a GitHub commit status."""
+"""Bridge Gitee local-ci results back to GitHub commit statuses."""
 
 from __future__ import annotations
 
@@ -9,10 +9,24 @@ import json
 import os
 import re
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Target:
+    source_branch: str
+    sha: str
+    label: str
+
+
+@dataclass(frozen=True)
+class LocalCIResult:
+    exit_code: int | None
+    target_url: str
+    run_id: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,11 +35,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gitee-repo", required=True)
     parser.add_argument("--gitee-results-branch", default="local-ci-results")
     parser.add_argument("--gitee-web-url", required=True)
-    parser.add_argument("--source-branch", required=True)
-    parser.add_argument("--sha", required=True)
+    parser.add_argument("--source-branch", default="jiwang-delivery-ci")
+    parser.add_argument("--sha", default="")
     parser.add_argument("--context", default="local-ci/sophgo-cmodel")
-    parser.add_argument("--timeout-seconds", type=int, default=10800)
-    parser.add_argument("--poll-interval-seconds", type=int, default=60)
+    parser.add_argument("--mode", choices=("single", "reconcile"), default="single")
+    parser.add_argument("--set-pending", action="store_true")
+    parser.add_argument("--max-prs", type=int, default=100)
+    # Kept for compatibility with older workflow variables; non-blocking mode does not wait.
+    parser.add_argument("--timeout-seconds", type=int, default=0)
+    parser.add_argument("--poll-interval-seconds", type=int, default=0)
     return parser.parse_args()
 
 
@@ -93,13 +111,26 @@ def parse_summary_status(summary: str) -> int | None:
     return None
 
 
+def github_api_url(path: str, params: dict[str, str] | None = None) -> str:
+    url = f"https://api.github.com{path}"
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+    return url
+
+
+def github_repo() -> str:
+    return os.environ["GITHUB_REPOSITORY"]
+
+
+def github_token() -> str:
+    return os.environ["GITHUB_TOKEN"]
+
+
 def github_status_url(sha: str) -> str:
-    repository = os.environ["GITHUB_REPOSITORY"]
-    return f"https://api.github.com/repos/{repository}/statuses/{sha}"
+    return github_api_url(f"/repos/{github_repo()}/statuses/{sha}")
 
 
 def post_github_status(sha: str, state: str, context: str, description: str, target_url: str = "") -> None:
-    token = os.environ["GITHUB_TOKEN"]
     payload = {
         "state": state,
         "context": context,
@@ -108,9 +139,64 @@ def post_github_status(sha: str, state: str, context: str, description: str, tar
     if target_url:
         payload["target_url"] = target_url
 
-    status, _, raw = request_json(github_status_url(sha), method="POST", token=token, data=payload)
+    status, _, raw = request_json(github_status_url(sha), method="POST", token=github_token(), data=payload)
     if status not in (200, 201):
         raise RuntimeError(f"GitHub status update failed: HTTP {status}: {raw[:500]}")
+
+
+def get_github_json(path: str, params: dict[str, str] | None = None) -> object | None:
+    status, payload, raw = request_json(github_api_url(path, params), token=github_token())
+    if status == 404:
+        return None
+    if status != 200:
+        raise RuntimeError(f"GitHub API request failed: HTTP {status}: {raw[:500]}")
+    return payload
+
+
+def github_branch_head(branch: str) -> str | None:
+    quoted_branch = urllib.parse.quote(branch, safe="")
+    payload = get_github_json(f"/repos/{github_repo()}/branches/{quoted_branch}")
+    if not isinstance(payload, dict):
+        return None
+    commit = payload.get("commit")
+    if not isinstance(commit, dict):
+        return None
+    sha = commit.get("sha")
+    return sha if isinstance(sha, str) else None
+
+
+def list_open_pr_targets(limit: int) -> list[Target]:
+    targets: list[Target] = []
+    page = 1
+    per_page = min(max(limit, 1), 100)
+    while len(targets) < limit:
+        payload = get_github_json(
+            f"/repos/{github_repo()}/pulls",
+            {"state": "open", "per_page": str(per_page), "page": str(page)},
+        )
+        if not isinstance(payload, list) or not payload:
+            break
+        for item in payload:
+            if len(targets) >= limit:
+                break
+            if not isinstance(item, dict):
+                continue
+            head = item.get("head")
+            if not isinstance(head, dict):
+                continue
+            repo = head.get("repo")
+            if not isinstance(repo, dict) or repo.get("full_name") != github_repo():
+                print(f"Skip fork PR #{item.get('number')}: local CI only supports mirrored same-repo branches")
+                continue
+            branch = head.get("ref")
+            sha = head.get("sha")
+            number = item.get("number")
+            if isinstance(branch, str) and isinstance(sha, str):
+                targets.append(Target(branch, sha, f"PR #{number}"))
+        if len(payload) < per_page:
+            break
+        page += 1
+    return targets
 
 
 def gitee_result_url(web_url: str, results_branch: str, rel_dir: str) -> str:
@@ -119,60 +205,102 @@ def gitee_result_url(web_url: str, results_branch: str, rel_dir: str) -> str:
     return f"{web_url.rstrip('/')}/tree/{quoted_branch}/{quoted_rel_dir}"
 
 
+def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: str) -> LocalCIResult | None:
+    safe_branch = safe_path_part(target.source_branch)
+    commit_dir = f"runs/{safe_branch}/{target.sha}"
+    latest_path = f"{commit_dir}/latest.txt"
+    run_id_text = gitee_content(
+        args.gitee_owner,
+        args.gitee_repo,
+        latest_path,
+        args.gitee_results_branch,
+        gitee_token,
+    )
+    if not run_id_text:
+        print(f"No Gitee local CI result yet for {target.label}: {latest_path}")
+        return None
+
+    run_id = run_id_text.strip().splitlines()[0]
+    rel_dir = f"{commit_dir}/{run_id}"
+    summary_path = f"{rel_dir}/delivery-summary.txt"
+    summary = gitee_content(
+        args.gitee_owner,
+        args.gitee_repo,
+        summary_path,
+        args.gitee_results_branch,
+        gitee_token,
+    )
+    if not summary:
+        print(f"Gitee local CI run exists but summary is missing for {target.label}: {summary_path}")
+        return None
+
+    return LocalCIResult(
+        parse_summary_status(summary),
+        gitee_result_url(args.gitee_web_url, args.gitee_results_branch, rel_dir),
+        run_id,
+    )
+
+
+def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> bool:
+    gitee_token = os.getenv("GITEE_TOKEN", "")
+    if set_pending:
+        post_github_status(target.sha, "pending", args.context, "Waiting for Gitee local CI result")
+
+    result = read_local_ci_result(args, target, gitee_token)
+    if result is None:
+        return False
+
+    if result.exit_code == 0:
+        post_github_status(target.sha, "success", args.context, "Gitee local CI passed", result.target_url)
+        print(f"Gitee local CI passed for {target.label}: {result.target_url}")
+    else:
+        post_github_status(
+            target.sha,
+            "failure",
+            args.context,
+            f"Gitee local CI failed: status {result.exit_code}",
+            result.target_url,
+        )
+        print(f"Gitee local CI failed for {target.label}: {result.target_url}")
+    return True
+
+
+def reconcile_targets(args: argparse.Namespace) -> list[Target]:
+    targets: list[Target] = []
+    seen: set[tuple[str, str]] = set()
+
+    branch_sha = github_branch_head(args.source_branch)
+    if branch_sha:
+        targets.append(Target(args.source_branch, branch_sha, f"branch {args.source_branch}"))
+        seen.add((args.source_branch, branch_sha))
+    else:
+        print(f"Source branch not found on GitHub: {args.source_branch}")
+
+    for target in list_open_pr_targets(args.max_prs):
+        key = (target.source_branch, target.sha)
+        if key not in seen:
+            targets.append(target)
+            seen.add(key)
+    return targets
+
+
 def main() -> int:
     args = parse_args()
-    gitee_token = os.getenv("GITEE_TOKEN", "")
-    safe_branch = safe_path_part(args.source_branch)
-    commit_dir = f"runs/{safe_branch}/{args.sha}"
-    latest_path = f"{commit_dir}/latest.txt"
 
-    post_github_status(args.sha, "pending", args.context, "Waiting for Gitee local CI result")
+    if args.mode == "single":
+        if not args.sha:
+            print("--sha is required in single mode", file=sys.stderr)
+            return 2
+        target = Target(args.source_branch, args.sha, args.source_branch)
+        sync_target(args, target, args.set_pending)
+        return 0
 
-    deadline = time.monotonic() + args.timeout_seconds
-    last_message = "result not found yet"
-    while time.monotonic() < deadline:
-        try:
-            run_id_text = gitee_content(
-                args.gitee_owner,
-                args.gitee_repo,
-                latest_path,
-                args.gitee_results_branch,
-                gitee_token,
-            )
-            if run_id_text:
-                run_id = run_id_text.strip().splitlines()[0]
-                rel_dir = f"{commit_dir}/{run_id}"
-                summary_path = f"{rel_dir}/delivery-summary.txt"
-                summary = gitee_content(
-                    args.gitee_owner,
-                    args.gitee_repo,
-                    summary_path,
-                    args.gitee_results_branch,
-                    gitee_token,
-                )
-                if summary:
-                    exit_code = parse_summary_status(summary)
-                    target_url = gitee_result_url(args.gitee_web_url, args.gitee_results_branch, rel_dir)
-                    if exit_code == 0:
-                        post_github_status(args.sha, "success", args.context, "Gitee local CI passed", target_url)
-                        print(f"Gitee local CI passed: {target_url}")
-                        return 0
-                    post_github_status(args.sha, "failure", args.context, f"Gitee local CI failed: status {exit_code}", target_url)
-                    print(f"Gitee local CI failed: {target_url}")
-                    return 1
-                last_message = f"run {run_id} found but delivery-summary.txt is missing"
-            else:
-                last_message = f"{latest_path} not found"
-        except Exception as exc:  # noqa: BLE001 - keep polling through transient Gitee errors.
-            last_message = str(exc)
-            print(f"Waiting for Gitee local CI result: {last_message}", file=sys.stderr)
-
-        time.sleep(args.poll_interval_seconds)
-
-    timeout_url = gitee_result_url(args.gitee_web_url, args.gitee_results_branch, commit_dir)
-    post_github_status(args.sha, "error", args.context, "Timed out waiting for Gitee local CI", timeout_url)
-    print(f"Timed out waiting for Gitee local CI: {last_message}", file=sys.stderr)
-    return 1
+    updated = 0
+    for target in reconcile_targets(args):
+        if sync_target(args, target, set_pending=False):
+            updated += 1
+    print(f"Reconciled {updated} target(s) with available Gitee local CI results.")
+    return 0
 
 
 if __name__ == "__main__":

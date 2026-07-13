@@ -95,9 +95,11 @@ Published Gitee results are stored in the result repository on the local-ci-resu
 
 ## GitHub Status Bridge
 
-GitHub does not need to run the hardware tests. The `Local CI Bridge` workflow waits for the Gitee `local-ci-results` branch and writes the result back to the GitHub commit status. It runs on pushes to jiwang-delivery-ci, manual workflow_dispatch, and pull_request events.
+GitHub does not need to run the hardware tests. The `Local CI Bridge` workflow only synchronizes local-ci results from the Gitee result repository back to GitHub commit statuses. It runs on pushes to jiwang-delivery-ci, pull_request events, manual workflow_dispatch, and a scheduled reconciliation.
 
-For a pull request, the bridge waits for the PR head branch and PR head SHA. This supports PRs whose source branch is in the same GitHub repository and is mirrored to Gitee. Fork PRs are intentionally rejected because the local server cannot fetch fork code through the current GitHub -> Gitee mirror path.
+Push and pull_request events use `single` mode: the workflow writes a pending status, checks Gitee once, then exits. It does not wait for hours. The scheduled job uses `reconcile` mode: it periodically scans the configured branch head and open same-repository PRs, then updates GitHub statuses for commits whose Gitee results are available. This avoids the GitHub-hosted runner six-hour job limit.
+
+For a pull request, the bridge checks the PR head branch and PR head SHA. This supports PRs whose source branch is in the same GitHub repository and is mirrored to Gitee. Fork PRs are intentionally rejected because the local server cannot fetch fork code through the current GitHub -> Gitee mirror path.
 
 Configure these GitHub repository variables if the defaults change:
 
@@ -107,8 +109,8 @@ GITEE_RESULTS_REPO=triton-anchor-local-ci-results
 GITEE_RESULTS_BRANCH=local-ci-results
 GITEE_RESULTS_WEB_URL=https://gitee.com/likehupochuan/triton-anchor-local-ci-results
 LOCAL_CI_CONTEXT=local-ci/sophgo-cmodel
-LOCAL_CI_BRIDGE_TIMEOUT_SECONDS=10800
-LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS=60
+LOCAL_CI_RECONCILE_SOURCE_BRANCH=jiwang-delivery-ci
+LOCAL_CI_BRIDGE_MAX_PRS=100
 ```
 
 If the Gitee result repository or result branch is private, add a GitHub repository secret named `GITEE_TOKEN` with read access to the result repository. The local server token also needs write access to the result repository, and read/comment access to the source mirror if those operations are private. The workflow uses GitHub's built-in `GITHUB_TOKEN` with `statuses: write` permission to publish the GitHub status.
