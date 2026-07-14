@@ -47,6 +47,8 @@ jobs:
       LOCAL_CI_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
       LOCAL_CI_RECONCILE_SOURCE_BRANCH: ${{ vars.LOCAL_CI_RECONCILE_SOURCE_BRANCH || 'jiwang-delivery-ci' }}
       LOCAL_CI_BRIDGE_MAX_PRS: ${{ vars.LOCAL_CI_BRIDGE_MAX_PRS || '100' }}
+      LOCAL_CI_BRIDGE_SINGLE_TIMEOUT_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_SINGLE_TIMEOUT_SECONDS || '600' }}
+      LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
     steps:
       - name: Check pull request source
@@ -93,5 +95,7 @@ jobs:
               --gitee-web-url "${GITEE_RESULTS_WEB_URL}" \
               --source-branch "${BRIDGE_SOURCE_BRANCH}" \
               --sha "${BRIDGE_COMMIT_SHA}" \
-              --context "${LOCAL_CI_CONTEXT}"
+              --context "${LOCAL_CI_CONTEXT}" \
+              --timeout-seconds "${LOCAL_CI_BRIDGE_SINGLE_TIMEOUT_SECONDS}" \
+              --poll-interval-seconds "${LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS}"
           fi

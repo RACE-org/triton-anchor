@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -88,6 +89,10 @@ def gitee_content(owner: str, repo: str, path: str, ref: str, token: str) -> str
         return None
     if status != 200:
         raise RuntimeError(f"Gitee content request failed: HTTP {status}: {raw[:500]}")
+    if isinstance(payload, list):
+        if not payload:
+            return None
+        raise RuntimeError(f"Gitee content response is a directory listing, not a file object: {raw[:500]}")
     if not isinstance(payload, dict):
         raise RuntimeError(f"Gitee content response is not a file object: {raw[:500]}")
 
@@ -246,23 +251,34 @@ def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> 
     if set_pending:
         post_github_status(target.sha, "pending", args.context, "Waiting for Gitee local CI result")
 
-    result = read_local_ci_result(args, target, gitee_token)
-    if result is None:
-        return False
+    timeout = max(args.timeout_seconds, 0)
+    interval = max(args.poll_interval_seconds, 1)
+    deadline = time.monotonic() + timeout
 
-    if result.exit_code == 0:
-        post_github_status(target.sha, "success", args.context, "Gitee local CI passed", result.target_url)
-        print(f"Gitee local CI passed for {target.label}: {result.target_url}")
-    else:
-        post_github_status(
-            target.sha,
-            "failure",
-            args.context,
-            f"Gitee local CI failed: status {result.exit_code}",
-            result.target_url,
-        )
-        print(f"Gitee local CI failed for {target.label}: {result.target_url}")
-    return True
+    while True:
+        result = read_local_ci_result(args, target, gitee_token)
+        if result is not None:
+            if result.exit_code == 0:
+                post_github_status(target.sha, "success", args.context, "Gitee local CI passed", result.target_url)
+                print(f"Gitee local CI passed for {target.label}: {result.target_url}")
+            else:
+                post_github_status(
+                    target.sha,
+                    "failure",
+                    args.context,
+                    f"Gitee local CI failed: status {result.exit_code}",
+                    result.target_url,
+                )
+                print(f"Gitee local CI failed for {target.label}: {result.target_url}")
+            return True
+
+        if timeout == 0 or time.monotonic() >= deadline:
+            print(f"No available Gitee local CI result for {target.label}; leaving GitHub status pending.")
+            return False
+
+        sleep_seconds = min(interval, max(1, int(deadline - time.monotonic())))
+        print(f"Waiting {sleep_seconds}s before checking Gitee local CI result again...")
+        time.sleep(sleep_seconds)
 
 
 def reconcile_targets(args: argparse.Namespace) -> list[Target]:
