@@ -17,6 +17,9 @@ WORKSPACE="${WORKSPACE:-/workspace}"
 ANCHOR_DIR="${ANCHOR_DIR:-${WORKSPACE}/triton-anchor}"
 GITEE_REPO_URL="${GITEE_REPO_URL:-https://gitee.com/likehupochuan/triton-anchor.git}"
 GITEE_BRANCH="${GITEE_BRANCH:-jiwang-delivery-ci}"
+GITEE_USERNAME="${GITEE_USERNAME:-likehupochuan}"
+GITEE_TOKEN="${GITEE_TOKEN:-}"
+LOCAL_CI_GIT_ASKPASS=""
 BACKEND_PROFILE="${BACKEND_PROFILE:-sophgo-cmodel}"
 EXPECTED_TRITON_BACKEND="${EXPECTED_TRITON_BACKEND:-sophgo}"
 BACKEND_PATH="${BACKEND_PATH:-${WORKSPACE}/triton-sophgo-backend}"
@@ -52,6 +55,34 @@ use_uv() {
   [[ "${PACKAGE_TOOL}" == "uv" ]] || { [[ "${PACKAGE_TOOL}" == "auto" ]] && command -v uv >/dev/null 2>&1; }
 }
 
+setup_gitee_git_auth() {
+  if [[ -z "${GITEE_TOKEN}" ]]; then
+    echo "GITEE_TOKEN is not set; git fetch will rely on existing credentials."
+    export GIT_TERMINAL_PROMPT=0
+    return 0
+  fi
+
+  local askpass
+  askpass="$(mktemp /tmp/local-ci-gitee-askpass.XXXXXX)"
+  cat > "${askpass}" <<'EOF'
+#!/usr/bin/env sh
+case "$1" in
+  *Username*) printf '%s\n' "${GITEE_USERNAME:-likehupochuan}" ;;
+  *) printf '%s\n' "${GITEE_TOKEN}" ;;
+esac
+EOF
+  chmod 700 "${askpass}"
+  export GITEE_USERNAME GITEE_TOKEN
+  export GIT_ASKPASS="${askpass}"
+  export GIT_TERMINAL_PROMPT=0
+  LOCAL_CI_GIT_ASKPASS="${askpass}"
+}
+
+cleanup_gitee_git_auth() {
+  if [[ -n "${LOCAL_CI_GIT_ASKPASS:-}" && -f "${LOCAL_CI_GIT_ASKPASS}" ]]; then
+    rm -f "${LOCAL_CI_GIT_ASKPASS}"
+  fi
+}
 run_logged() {
   local name="$1"
   shift
@@ -137,6 +168,7 @@ write_summary() {
 
 on_exit() {
   local status="$?"
+  cleanup_gitee_git_auth
   write_summary "${status}"
   exit "${status}"
 }
@@ -150,6 +182,7 @@ else
   git remote add gitee "${GITEE_REPO_URL}"
 fi
 
+setup_gitee_git_auth
 git fetch --prune gitee "${GITEE_BRANCH}"
 git checkout --detach "${target_sha}"
 git reset --hard "${target_sha}"
