@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CONFIG_FILE="${LOCAL_CI_CONFIG:-${SCRIPT_DIR}/config.env}"
+CONFIG_FILE="${LOCAL_CI_CONFIG:-${SOURCE_SCRIPT_DIR}/config.env}"
 if [[ -f "${CONFIG_FILE}" ]]; then
   # shellcheck disable=SC1090
   source "${CONFIG_FILE}"
 fi
+
+LOCAL_CI_STATE_DIR="${LOCAL_CI_STATE_DIR:-/root/projects/test/local-ci-state}"
+
+if [[ "${LOCAL_CI_POLLER_STAGED:-0}" != "1" ]]; then
+  stage_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  staged_dir="${LOCAL_CI_STATE_DIR}/runner/${stage_id}"
+  mkdir -p "${staged_dir}"
+  cp -a "${SOURCE_SCRIPT_DIR}/." "${staged_dir}/"
+  export LOCAL_CI_CONFIG="${CONFIG_FILE}"
+  export LOCAL_CI_POLLER_STAGED="1"
+  export LOCAL_CI_RUNNER_DIR="${staged_dir}"
+  exec "${staged_dir}/poll_gitee_and_run.sh" "$@"
+fi
+
+SCRIPT_DIR="${LOCAL_CI_RUNNER_DIR:-${SOURCE_SCRIPT_DIR}}"
 
 GITEE_REPO_URL="${GITEE_REPO_URL:-https://gitee.com/likehupochuan/triton-anchor.git}"
 GITEE_OWNER="${GITEE_OWNER:-likehupochuan}"
@@ -140,7 +155,7 @@ run_once() {
 
   local status=0
   set +e
-  GITEE_BRANCH="${branch}" "${SCRIPT_DIR}/run_in_container.sh" "${sha}" 2>&1 | tee "${run_dir}/local-ci.log"
+  GITEE_BRANCH="${branch}" "${SCRIPT_DIR}/run_in_container.sh" "${sha}" "${branch}" 2>&1 | tee "${run_dir}/local-ci.log"
   status=${PIPESTATUS[0]}
   set -e
 

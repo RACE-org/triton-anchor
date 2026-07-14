@@ -8,8 +8,13 @@ if [[ -f "${CONFIG_FILE}" ]]; then
   source "${CONFIG_FILE}"
 fi
 
-sha="${1:?usage: run_in_container.sh <commit-sha>}"
+sha="${1:?usage: run_in_container.sh <commit-sha> [source-branch]}"
+branch_override="${2:-}"
+if [[ -n "${branch_override}" ]]; then
+  GITEE_BRANCH="${branch_override}"
+fi
 LOCAL_CI_CONTAINER="${LOCAL_CI_CONTAINER:-triton-anchor-dev}"
+CONTAINER_CI_RUNNER_DIR="${CONTAINER_CI_RUNNER_DIR:-/tmp/triton-anchor-local-ci-runner-${sha:0:12}-$$}"
 
 pass_env=(
   GITEE_REPO_URL GITEE_BRANCH GITEE_USERNAME GITEE_TOKEN ANCHOR_DIR WORKSPACE
@@ -25,8 +30,12 @@ for name in "${pass_env[@]}"; do
   fi
 done
 
+docker exec "${LOCAL_CI_CONTAINER}" mkdir -p "${CONTAINER_CI_RUNNER_DIR}"
+docker cp "${SCRIPT_DIR}/." "${LOCAL_CI_CONTAINER}:${CONTAINER_CI_RUNNER_DIR}/"
+
 docker exec \
   "${docker_args[@]}" \
   -e LOCAL_CI_COMMIT="${sha}" \
+  -e LOCAL_CI_RUNNER_DIR="${CONTAINER_CI_RUNNER_DIR}" \
   "${LOCAL_CI_CONTAINER}" \
-  bash -lc '"${ANCHOR_DIR:-/workspace/triton-anchor}/scripts/local_ci/run_delivery_local.sh" "${LOCAL_CI_COMMIT}"'
+  bash -lc 'bash "${LOCAL_CI_RUNNER_DIR}/run_delivery_local.sh" "${LOCAL_CI_COMMIT}"'
