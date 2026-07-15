@@ -32,9 +32,12 @@ The mirror process must not target this relay repository.
 ## Expected Layout
 
 ```text
-host:      /root/projects/test/workspace
-container: /workspace
+host runner checkout: /opt/local-ci/triton-anchor-runner
+host config/state:    /opt/local-ci/config.env, /root/projects/test/local-ci-state
+container workspace:  /workspace
 ```
+
+Keep the runner checkout separate from the code checkout under test. The runner checkout tracks the trusted branch that owns `scripts/local_ci`; set `LOCAL_CI_SCRIPT_DIR` to that fixed script directory. For each task, the host poller copies `LOCAL_CI_SCRIPT_DIR` into a per-run snapshot under `LOCAL_CI_STATE_DIR/runner/<run-id>/`, then `run_in_container.sh` copies that snapshot into the Docker container. The container workspace `/workspace/triton-anchor` is reset to the dispatched `ci/*` task commit for each PR or push. PR branches do not need to contain local CI scripts.
 
 Prepared inside the container:
 
@@ -51,8 +54,8 @@ The runner does not pull backend source code. Backend source and dependencies mu
 ## Configure
 
 ```bash
-cd /root/projects/test/workspace/triton-anchor
-cp scripts/local_ci/config.example.env scripts/local_ci/config.env
+cd /opt/local-ci/triton-anchor-runner
+cp scripts/local_ci/config.example.env /opt/local-ci/config.env
 ```
 
 Important defaults for Sophgo CModel:
@@ -99,13 +102,13 @@ Set `RUN_FLAGGEMS_TESTS=true` to run the local FlagGems check. The default comma
 Run one discovery pass:
 
 ```bash
-bash scripts/local_ci/poll_gitee_and_run.sh --once
+LOCAL_CI_CONFIG=/opt/local-ci/config.env bash scripts/local_ci/poll_gitee_and_run.sh --once
 ```
 
 Run continuously:
 
 ```bash
-LOCAL_CI_POLL_INTERVAL=60 bash scripts/local_ci/poll_gitee_and_run.sh
+LOCAL_CI_CONFIG=/opt/local-ci/config.env LOCAL_CI_POLL_INTERVAL=60 bash scripts/local_ci/poll_gitee_and_run.sh
 ```
 
 Host-side poller logs/state:

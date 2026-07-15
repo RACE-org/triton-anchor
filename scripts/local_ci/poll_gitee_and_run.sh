@@ -10,19 +10,7 @@ if [[ -f "${CONFIG_FILE}" ]]; then
 fi
 
 LOCAL_CI_STATE_DIR="${LOCAL_CI_STATE_DIR:-/root/projects/test/local-ci-state}"
-
-if [[ "${LOCAL_CI_POLLER_STAGED:-0}" != "1" ]]; then
-  stage_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  staged_dir="${LOCAL_CI_STATE_DIR}/runner/${stage_id}"
-  mkdir -p "${staged_dir}"
-  cp -a "${SOURCE_SCRIPT_DIR}/." "${staged_dir}/"
-  export LOCAL_CI_CONFIG="${CONFIG_FILE}"
-  export LOCAL_CI_POLLER_STAGED="1"
-  export LOCAL_CI_RUNNER_DIR="${staged_dir}"
-  exec "${staged_dir}/poll_gitee_and_run.sh" "$@"
-fi
-
-SCRIPT_DIR="${LOCAL_CI_RUNNER_DIR:-${SOURCE_SCRIPT_DIR}}"
+LOCAL_CI_SCRIPT_DIR="${LOCAL_CI_SCRIPT_DIR:-${SOURCE_SCRIPT_DIR}}"
 
 GITEE_REPO_URL="${GITEE_REPO_URL:-https://gitee.com/likehupochuan/triton-anchor-local-ci-results.git}"
 GITEE_OWNER="${GITEE_OWNER:-likehupochuan}"
@@ -134,7 +122,21 @@ publish_result() {
     --results-branch "${GITEE_RESULTS_BRANCH}"
     --context "${GITEE_RESULT_CONTEXT}"
   )
-  "${SCRIPT_DIR}/publish_gitee_result.py" "${args[@]}"
+  "${LOCAL_CI_RUNNER_DIR}/publish_gitee_result.py" "${args[@]}"
+}
+
+stage_runner_scripts() {
+  local run_id="$1"
+  if [[ ! -d "${LOCAL_CI_SCRIPT_DIR}" ]]; then
+    echo "LOCAL_CI_SCRIPT_DIR does not exist: ${LOCAL_CI_SCRIPT_DIR}" >&2
+    return 1
+  fi
+
+  local staged_dir="${LOCAL_CI_STATE_DIR}/runner/${run_id}"
+  rm -rf "${staged_dir}"
+  mkdir -p "${staged_dir}"
+  cp -a "${LOCAL_CI_SCRIPT_DIR}/." "${staged_dir}/"
+  printf '%s' "${staged_dir}"
 }
 
 run_once() {
@@ -167,9 +169,13 @@ run_once() {
   echo "Detected new commit on ${branch}: ${sha}"
   echo "Run directory: ${run_dir}"
 
+  LOCAL_CI_RUNNER_DIR="$(stage_runner_scripts "${run_id}")"
+  export LOCAL_CI_RUNNER_DIR
+  echo "Runner script snapshot: ${LOCAL_CI_RUNNER_DIR}"
+
   local status=0
   set +e
-  GITEE_BRANCH="${branch}" "${SCRIPT_DIR}/run_in_container.sh" "${sha}" "${branch}" 2>&1 | tee "${run_dir}/local-ci.log"
+  GITEE_BRANCH="${branch}" "${LOCAL_CI_RUNNER_DIR}/run_in_container.sh" "${sha}" "${branch}" 2>&1 | tee "${run_dir}/local-ci.log"
   status=${PIPESTATUS[0]}
   set -e
 
