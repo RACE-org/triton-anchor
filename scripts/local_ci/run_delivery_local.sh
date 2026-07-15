@@ -91,6 +91,43 @@ run_logged() {
   "$@" 2>&1 | tee "${log_file}"
 }
 
+rebuild_backend() {
+  if [[ ! -d "${BACKEND_PATH}" ]]; then
+    echo "Backend path does not exist: ${BACKEND_PATH}" >&2
+    return 1
+  fi
+
+  local log_file="${DELIVERY_ARTIFACT_DIR}/backend-rebuild.log"
+  echo "Running backend-rebuild; log: ${log_file}"
+  set +e
+  (
+    set -euo pipefail
+    cd "${BACKEND_PATH}"
+    if use_uv; then
+      uv pip install scikit-build-core pybind11
+      uv pip uninstall triton-sophgo-backend triton_sophgo_backend || true
+      rm -rf build dist *.egg-info
+      uv build --wheel --no-build-isolation
+      uv pip install --force-reinstall dist/triton_sophgo_backend-*.whl
+    else
+      "${PYTHON_BIN}" -m pip install scikit-build-core pybind11 build
+      "${PYTHON_BIN}" -m pip uninstall -y triton-sophgo-backend triton_sophgo_backend || true
+      rm -rf build dist *.egg-info
+      "${PYTHON_BIN}" -m build --wheel --no-isolation
+      "${PYTHON_BIN}" -m pip install --force-reinstall dist/triton_sophgo_backend-*.whl
+    fi
+
+    backend_wheel="$(find dist -maxdepth 1 -name 'triton_sophgo_backend-*.whl' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {print $2}')"
+    if [[ -n "${backend_wheel}" ]]; then
+      cp "${backend_wheel}" "${DELIVERY_ARTIFACT_DIR}/"
+      ls -lh "${backend_wheel}" "${DELIVERY_ARTIFACT_DIR}/$(basename "${backend_wheel}")"
+    fi
+  ) 2>&1 | tee "${log_file}"
+  local status=${PIPESTATUS[0]}
+  set -e
+  return "${status}"
+}
+
 source_python_venv() {
   if [[ -z "${PYTHON_VENV_ACTIVATE}" ]]; then
     return 0
@@ -230,12 +267,19 @@ fi
 
 source_python_venv
 source_anchor_env
-source_backend_env
 
 run_logged verify-triton-anchor-import "${PYTHON_BIN}" - <<'PY'
 import triton_anchor
 print("triton-anchor loaded", getattr(triton_anchor, "__version__", "unknown"))
 PY
+
+(cd "${ANCHOR_DIR}" && run_logged frontend-smoke "${PYTHON_BIN}" tests/test_smoke.py)
+
+source_backend_env
+rebuild_backend
+source_python_venv
+source_anchor_env
+source_backend_env
 
 run_logged verify-backend-discovery "${PYTHON_BIN}" - <<'PY'
 from triton.backends import backends

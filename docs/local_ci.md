@@ -10,8 +10,10 @@ GitHub push/PR
   -> poll Gitee CI relay
   -> enter existing Docker
   -> checkout/build/install frontend
+  -> run triton-anchor/tests/test_smoke.py
+  -> rebuild backend wheel against the newly installed frontend
   -> source backend env
-  -> run smoke/JIT and optional FlagGems
+  -> run backend smoke/JIT and optional FlagGems
   -> publish selected logs to local-ci-results in the same relay repository
   -> receiver writes the result to GitHub commit status
   -> scheduled bridge reconciles missed status updates
@@ -44,7 +46,7 @@ Prepared inside the container:
 /workspace/FlagGems
 ```
 
-The runner does not pull or install the backend. For another backend, prepare it in the container first, then change `BACKEND_PATH`, `BACKEND_ENVSETUP_ARGS`, and the test commands in `scripts/local_ci/config.env`.
+The runner does not pull backend source code. Backend source and dependencies must already exist in the container, but the backend wheel is rebuilt for every tested frontend commit. For another backend, prepare it in the container first, then change `BACKEND_PATH`, `BACKEND_ENVSETUP_ARGS`, and the test commands in `scripts/local_ci/config.env`.
 
 ## Configure
 
@@ -118,7 +120,7 @@ Container-side artifacts:
 /workspace/local-ci-artifacts
 ```
 
-Published results are stored on `local-ci-results` under `runs/<safe-task-ref>/<commit>/<run-id>/`. The result directory intentionally keeps only `delivery-summary.txt`, `frontend-install.log`, `backend-smoke-jit.log`, and `flaggems.log`. Full local logs remain under `/workspace/local-ci-artifacts`.
+Published results are stored on `local-ci-results` under `runs/<safe-task-ref>/<commit>/<run-id>/`. The result directory intentionally keeps only `delivery-summary.txt`, `frontend-install.log`, `frontend-smoke.log`, `backend-rebuild.log`, `backend-smoke-jit.log`, and `flaggems.log`. Full local logs remain under `/workspace/local-ci-artifacts`.
 
 ## GitHub Workflows
 
@@ -148,4 +150,4 @@ Add GitHub repository secrets `GITEE_TOKEN` and, when it differs from the owner,
 
 ## Order Notes
 
-It is fine for the backend to be prepared before the frontend is pulled and rebuilt. The per-commit operation is frontend checkout/build/install, then source the already-prepared backend environment and run discovery/smoke/JIT. If a future frontend change breaks backend ABI/API compatibility, smoke/JIT should catch it; then that backend may need to be rebuilt separately.
+It is fine for backend source and heavy dependencies to be prepared before the frontend is pulled. The per-commit operation is frontend checkout/build/install, frontend smoke, backend rebuild, then backend discovery/smoke/JIT. If a future frontend change breaks backend ABI/API compatibility, the fixed rebuild and smoke/JIT sequence should catch it.
