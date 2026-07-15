@@ -16,9 +16,14 @@ import urllib.request
 from dataclasses import dataclass
 
 
+RESULT_NOT_READY_EXIT_CODE = 3
+RESULT_FAILED_EXIT_CODE = 10
+
+
 @dataclass(frozen=True)
 class Target:
     source_branch: str
+    task_ref: str
     sha: str
     label: str
 
@@ -37,14 +42,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gitee-results-branch", default="local-ci-results")
     parser.add_argument("--gitee-web-url", required=True)
     parser.add_argument("--source-branch", default="jiwang-delivery-ci")
+    parser.add_argument("--reconcile-source-branches", default="")
+    parser.add_argument("--task-ref", default="")
     parser.add_argument("--sha", default="")
     parser.add_argument("--context", default="local-ci/sophgo-cmodel")
     parser.add_argument("--mode", choices=("single", "reconcile"), default="single")
     parser.add_argument("--set-pending", action="store_true")
     parser.add_argument("--max-prs", type=int, default=100)
-    # Kept for compatibility with older workflow variables; non-blocking mode does not wait.
     parser.add_argument("--timeout-seconds", type=int, default=0)
     parser.add_argument("--poll-interval-seconds", type=int, default=0)
+    parser.add_argument("--require-result", action="store_true")
+    parser.add_argument("--exit-with-result", action="store_true")
     return parser.parse_args()
 
 
@@ -191,13 +199,13 @@ def list_open_pr_targets(limit: int) -> list[Target]:
                 continue
             repo = head.get("repo")
             if not isinstance(repo, dict) or repo.get("full_name") != github_repo():
-                print(f"Skip fork PR #{item.get('number')}: local CI only supports mirrored same-repo branches")
+                print(f"Skip fork PR #{item.get('number')}: local CI only supports same-repository PRs")
                 continue
             branch = head.get("ref")
             sha = head.get("sha")
             number = item.get("number")
-            if isinstance(branch, str) and isinstance(sha, str):
-                targets.append(Target(branch, sha, f"PR #{number}"))
+            if isinstance(branch, str) and isinstance(sha, str) and isinstance(number, int):
+                targets.append(Target(branch, f"ci/pr-{number}", sha, f"PR #{number}"))
         if len(payload) < per_page:
             break
         page += 1
@@ -211,8 +219,8 @@ def gitee_result_url(web_url: str, results_branch: str, rel_dir: str) -> str:
 
 
 def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: str) -> LocalCIResult | None:
-    safe_branch = safe_path_part(target.source_branch)
-    commit_dir = f"runs/{safe_branch}/{target.sha}"
+    safe_task_ref = safe_path_part(target.task_ref)
+    commit_dir = f"runs/{safe_task_ref}/{target.sha}"
     latest_path = f"{commit_dir}/latest.txt"
     run_id_text = gitee_content(
         args.gitee_owner,
@@ -222,7 +230,7 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
         gitee_token,
     )
     if not run_id_text:
-        print(f"No Gitee local CI result yet for {target.label}: {latest_path}")
+        print(f"No Gitee local CI result yet for {target.label} ({target.task_ref}): {latest_path}")
         return None
 
     run_id = run_id_text.strip().splitlines()[0]
@@ -246,7 +254,7 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
     )
 
 
-def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> bool:
+def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> LocalCIResult | None:
     gitee_token = os.getenv("GITEE_TOKEN", "")
     if set_pending:
         post_github_status(target.sha, "pending", args.context, "Waiting for Gitee local CI result")
@@ -270,11 +278,11 @@ def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> 
                     result.target_url,
                 )
                 print(f"Gitee local CI failed for {target.label}: {result.target_url}")
-            return True
+            return result
 
         if timeout == 0 or time.monotonic() >= deadline:
             print(f"No available Gitee local CI result for {target.label}; leaving GitHub status pending.")
-            return False
+            return None
 
         sleep_seconds = min(interval, max(1, int(deadline - time.monotonic())))
         print(f"Waiting {sleep_seconds}s before checking Gitee local CI result again...")
@@ -284,16 +292,27 @@ def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> 
 def reconcile_targets(args: argparse.Namespace) -> list[Target]:
     targets: list[Target] = []
     seen: set[tuple[str, str]] = set()
+    configured_branches = args.reconcile_source_branches.strip()
+    source_branches = re.split(r"[\s,]+", configured_branches) if configured_branches else [args.source_branch]
 
-    branch_sha = github_branch_head(args.source_branch)
-    if branch_sha:
-        targets.append(Target(args.source_branch, branch_sha, f"branch {args.source_branch}"))
-        seen.add((args.source_branch, branch_sha))
-    else:
-        print(f"Source branch not found on GitHub: {args.source_branch}")
+    for source_branch in source_branches:
+        if not source_branch:
+            continue
+        branch_sha = github_branch_head(source_branch)
+        if branch_sha:
+            target = Target(
+                source_branch,
+                f"ci/push/{source_branch}",
+                branch_sha,
+                f"branch {source_branch}",
+            )
+            targets.append(target)
+            seen.add((target.task_ref, target.sha))
+        else:
+            print(f"Source branch not found on GitHub: {source_branch}")
 
     for target in list_open_pr_targets(args.max_prs):
-        key = (target.source_branch, target.sha)
+        key = (target.task_ref, target.sha)
         if key not in seen:
             targets.append(target)
             seen.add(key)
@@ -307,13 +326,22 @@ def main() -> int:
         if not args.sha:
             print("--sha is required in single mode", file=sys.stderr)
             return 2
-        target = Target(args.source_branch, args.sha, args.source_branch)
-        sync_target(args, target, args.set_pending)
+        target = Target(
+            args.source_branch,
+            args.task_ref or args.source_branch,
+            args.sha,
+            args.source_branch,
+        )
+        result = sync_target(args, target, args.set_pending)
+        if result is None:
+            return RESULT_NOT_READY_EXIT_CODE if args.require_result else 0
+        if args.exit_with_result and result.exit_code != 0:
+            return RESULT_FAILED_EXIT_CODE
         return 0
 
     updated = 0
     for target in reconcile_targets(args):
-        if sync_target(args, target, set_pending=False):
+        if sync_target(args, target, set_pending=False) is not None:
             updated += 1
     print(f"Reconciled {updated} target(s) with available Gitee local CI results.")
     return 0

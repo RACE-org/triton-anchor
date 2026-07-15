@@ -1,0 +1,148 @@
+name: Dispatch Local CI via Gitee
+
+on:
+  push:
+    branches:
+      - main
+      - jiwang-delivery-ci
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "GitHub branch represented by this local CI task"
+        required: false
+        default: "jiwang-delivery-ci"
+        type: string
+      commit_sha:
+        description: "Commit SHA to test; defaults to the workflow commit"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  statuses: write
+
+concurrency:
+  group: dispatch-local-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name || inputs.source_branch }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch-local-ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
+      GITEE_CI_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'likehupochuan' }}
+      GITEE_CI_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
+      GITEE_CI_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+      GITEE_CI_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/triton-anchor-local-ci-results' }}
+      GITEE_USERNAME: ${{ secrets.GITEE_USERNAME }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      RECEIVER_REF: ${{ vars.LOCAL_CI_RECEIVER_REF || github.event.repository.default_branch }}
+      RECEIVER_WAIT_SECONDS: ${{ vars.LOCAL_CI_RECEIVER_WAIT_SECONDS || '20400' }}
+
+    steps:
+      - name: Check pull request source
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::Local CI only supports PR branches from this repository. Fork PRs cannot use repository Gitee credentials."
+          exit 1
+
+      - name: Resolve task metadata
+        id: meta
+        env:
+          EVENT_SHA: ${{ github.event.pull_request.head.sha || inputs.commit_sha || github.sha }}
+          EVENT_SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || inputs.source_branch || github.ref_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            task_ref="ci/pr-${PR_NUMBER}"
+          else
+            task_ref="ci/push/${EVENT_SOURCE_BRANCH}"
+          fi
+
+          {
+            echo "sha=${EVENT_SHA}"
+            echo "source_branch=${EVENT_SOURCE_BRANCH}"
+            echo "task_ref=${task_ref}"
+            echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout exact task commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.sha }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Push task ref to CI relay repository
+        env:
+          TASK_REF: ${{ steps.meta.outputs.task_ref }}
+        run: |
+          if [ -z "${GITEE_TOKEN}" ]; then
+            echo "GITEE_TOKEN is empty"
+            exit 1
+          fi
+
+          GITEE_USERNAME="${GITEE_USERNAME:-${GITEE_CI_OWNER}}"
+          export GITEE_USERNAME
+          repo_url="${GITEE_CI_REPO_URL:-https://gitee.com/${GITEE_CI_OWNER}/${GITEE_CI_REPO}.git}"
+          askpass="${RUNNER_TEMP}/gitee-askpass.sh"
+          cat > "${askpass}" <<'SH'
+          #!/usr/bin/env sh
+          case "$1" in
+            *Username*) printf '%s\n' "${GITEE_USERNAME}" ;;
+            *) printf '%s\n' "${GITEE_TOKEN}" ;;
+          esac
+          SH
+          chmod 700 "${askpass}"
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git remote add gitee-ci "${repo_url}"
+          GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+            git push --force gitee-ci "HEAD:refs/heads/${TASK_REF}"
+
+      - name: Mark local CI pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          TASK_REF: ${{ steps.meta.outputs.task_ref }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state=pending \
+            -f context="${CONTEXT}" \
+            -f description="local CI task queued on Gitee" \
+            -f target_url="${GITEE_CI_WEB_URL}/tree/${TASK_REF}"
+
+      - name: Start result receiver
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.meta.outputs.sha }}
+          SOURCE_BRANCH: ${{ steps.meta.outputs.source_branch }}
+          TASK_REF: ${{ steps.meta.outputs.task_ref }}
+          STARTED_AT: ${{ steps.meta.outputs.started_at }}
+        run: |
+          gh workflow run receive-local-ci-result.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${RECEIVER_REF}" \
+            -f sha="${SHA}" \
+            -f source_branch="${SOURCE_BRANCH}" \
+            -f task_ref="${TASK_REF}" \
+            -f attempt="1" \
+            -f started_at="${STARTED_AT}" \
+            -f wait_seconds="${RECEIVER_WAIT_SECONDS}"
+
+      - name: Mark dispatch failure
+        if: ${{ failure() && steps.meta.outputs.sha != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+            -f state=error \
+            -f context="${CONTEXT}" \
+            -f description="failed to dispatch local CI task"

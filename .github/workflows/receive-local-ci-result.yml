@@ -1,0 +1,139 @@
+name: Receive Local CI Result
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit SHA being tested
+        required: true
+        type: string
+      source_branch:
+        description: Original GitHub source branch
+        required: true
+        type: string
+      task_ref:
+        description: Gitee task branch containing the exact commit
+        required: true
+        type: string
+      attempt:
+        description: Receiver continuation attempt
+        required: true
+        default: "1"
+        type: string
+      started_at:
+        description: Initial dispatch time in UTC
+        required: true
+        type: string
+      wait_seconds:
+        description: Polling window for this receiver attempt
+        required: true
+        default: "20400"
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  statuses: write
+
+concurrency:
+  group: receive-local-ci-${{ inputs.task_ref }}
+  cancel-in-progress: ${{ inputs.attempt == '1' }}
+
+jobs:
+  receive-local-ci-result:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
+      SHA: ${{ inputs.sha }}
+      SOURCE_BRANCH: ${{ inputs.source_branch }}
+      TASK_REF: ${{ inputs.task_ref }}
+      ATTEMPT: ${{ inputs.attempt }}
+      STARTED_AT: ${{ inputs.started_at }}
+      WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      MAX_ATTEMPTS: ${{ vars.LOCAL_CI_RECEIVER_MAX_ATTEMPTS || '4' }}
+      POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
+      RECEIVER_REF: ${{ vars.LOCAL_CI_RECEIVER_REF || github.event.repository.default_branch }}
+      GITEE_RESULTS_OWNER: ${{ vars.GITEE_RESULTS_OWNER || vars.GITEE_OWNER || 'likehupochuan' }}
+      GITEE_RESULTS_REPO: ${{ vars.GITEE_RESULTS_REPO || 'triton-anchor-local-ci-results' }}
+      GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
+      GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/triton-anchor-local-ci-results' }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check bridge script
+        run: python -m py_compile scripts/local_ci/bridge_gitee_to_github_status.py
+
+      - name: Wait for Gitee local CI result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          python scripts/local_ci/bridge_gitee_to_github_status.py \
+            --mode single \
+            --gitee-owner "${GITEE_RESULTS_OWNER}" \
+            --gitee-repo "${GITEE_RESULTS_REPO}" \
+            --gitee-results-branch "${GITEE_RESULTS_BRANCH}" \
+            --gitee-web-url "${GITEE_RESULTS_WEB_URL}" \
+            --source-branch "${SOURCE_BRANCH}" \
+            --task-ref "${TASK_REF}" \
+            --sha "${SHA}" \
+            --context "${CONTEXT}" \
+            --timeout-seconds "${WAIT_SECONDS}" \
+            --poll-interval-seconds "${POLL_INTERVAL_SECONDS}" \
+            --require-result \
+            --exit-with-result
+          bridge_status=$?
+          set -e
+
+          case "${bridge_status}" in
+            0)
+              exit 0
+              ;;
+            10)
+              # The bridge already published the local CI failure status.
+              exit 1
+              ;;
+            3)
+              if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+                next_attempt=$((ATTEMPT + 1))
+                if gh workflow run receive-local-ci-result.yml \
+                  --repo "${REPO}" \
+                  --ref "${RECEIVER_REF}" \
+                  -f sha="${SHA}" \
+                  -f source_branch="${SOURCE_BRANCH}" \
+                  -f task_ref="${TASK_REF}" \
+                  -f attempt="${next_attempt}" \
+                  -f started_at="${STARTED_AT}" \
+                  -f wait_seconds="${WAIT_SECONDS}"; then
+                  gh api --method POST "repos/${REPO}/statuses/${SHA}" \
+                    -f state=pending \
+                    -f context="${CONTEXT}" \
+                    -f description="local CI still running; receiver ${next_attempt}/${MAX_ATTEMPTS}"
+                  exit 0
+                fi
+                description="failed to continue local CI result receiver"
+              else
+                description="local CI result not received after ${MAX_ATTEMPTS} receiver attempts"
+              fi
+              ;;
+            *)
+              description="local CI result receiver failed"
+              ;;
+          esac
+
+          gh api --method POST "repos/${REPO}/statuses/${SHA}" \
+            -f state=error \
+            -f context="${CONTEXT}" \
+            -f description="${description}"
+          exit 1

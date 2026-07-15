@@ -24,13 +24,13 @@ fi
 
 SCRIPT_DIR="${LOCAL_CI_RUNNER_DIR:-${SOURCE_SCRIPT_DIR}}"
 
-GITEE_REPO_URL="${GITEE_REPO_URL:-https://gitee.com/likehupochuan/triton-anchor.git}"
+GITEE_REPO_URL="${GITEE_REPO_URL:-https://gitee.com/likehupochuan/triton-anchor-local-ci-results.git}"
 GITEE_OWNER="${GITEE_OWNER:-likehupochuan}"
-GITEE_REPO="${GITEE_REPO:-triton-anchor}"
-GITEE_BRANCH="${GITEE_BRANCH:-jiwang-delivery-ci}"
+GITEE_REPO="${GITEE_REPO:-triton-anchor-local-ci-results}"
+GITEE_BRANCH="${GITEE_BRANCH:-ci/push/jiwang-delivery-ci}"
 GITEE_BRANCHES="${GITEE_BRANCHES:-${GITEE_BRANCH}}"
-GITEE_POLL_ALL_BRANCHES="${GITEE_POLL_ALL_BRANCHES:-0}"
-GITEE_BRANCH_INCLUDE_REGEX="${GITEE_BRANCH_INCLUDE_REGEX:-}"
+GITEE_POLL_ALL_BRANCHES="${GITEE_POLL_ALL_BRANCHES:-1}"
+GITEE_BRANCH_INCLUDE_REGEX="${GITEE_BRANCH_INCLUDE_REGEX:-^ci/(pr-[0-9]+|push/.+)$}"
 GITEE_TOKEN="${GITEE_TOKEN:-}"
 LOCAL_CI_STATE_DIR="${LOCAL_CI_STATE_DIR:-/root/projects/test/local-ci-state}"
 LOCAL_CI_POLL_INTERVAL="${LOCAL_CI_POLL_INTERVAL:-60}"
@@ -48,6 +48,20 @@ LOCAL_CI_WORKSPACE_HOST="${LOCAL_CI_WORKSPACE_HOST:-/root/projects/test/workspac
 export GITEE_TOKEN GITEE_USERNAME GITEE_WEB_URL GITEE_RESULTS_WEB_URL WORKSPACE LOCAL_CI_WORKSPACE_HOST
 
 mkdir -p "${LOCAL_CI_STATE_DIR}"
+export GIT_TERMINAL_PROMPT=0
+if [[ -n "${GITEE_TOKEN}" ]]; then
+  gitee_askpass="${LOCAL_CI_STATE_DIR}/gitee-askpass.sh"
+  cat > "${gitee_askpass}" <<'SH'
+#!/usr/bin/env sh
+case "$1" in
+  *Username*) printf '%s\n' "${GITEE_USERNAME}" ;;
+  *) printf '%s\n' "${GITEE_TOKEN}" ;;
+esac
+SH
+  chmod 700 "${gitee_askpass}"
+  export GIT_ASKPASS="${gitee_askpass}"
+fi
+
 lock_file="${LOCAL_CI_STATE_DIR}/poll.lock"
 
 exec 9>"${lock_file}"

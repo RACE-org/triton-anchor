@@ -1,16 +1,12 @@
 name: Local CI Bridge
 
 on:
-  push:
-    branches: [jiwang-delivery-ci]
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       mode:
-        description: "single checks one commit; reconcile scans branch head and open PRs"
+        description: "single checks one commit; reconcile scans configured branch heads and open PRs"
         required: false
         default: "single"
         type: choice
@@ -18,11 +14,15 @@ on:
           - single
           - reconcile
       source_branch:
-        description: "Gitee source branch to check or reconcile"
+        description: "Original GitHub source branch to check"
         required: false
         default: "jiwang-delivery-ci"
       commit_sha:
         description: "Commit SHA to check in single mode; defaults to the workflow commit"
+        required: false
+        default: ""
+      task_ref:
+        description: "Gitee ci/* task ref to check; defaults to ci/push/<source_branch>"
         required: false
         default: ""
 
@@ -32,7 +32,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.event.pull_request.head.sha || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.commit_sha || github.sha }}
   cancel-in-progress: false
 
 jobs:
@@ -45,18 +45,12 @@ jobs:
       GITEE_RESULTS_BRANCH: ${{ vars.GITEE_RESULTS_BRANCH || 'local-ci-results' }}
       GITEE_RESULTS_WEB_URL: ${{ vars.GITEE_RESULTS_WEB_URL || 'https://gitee.com/likehupochuan/triton-anchor-local-ci-results' }}
       LOCAL_CI_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
-      LOCAL_CI_RECONCILE_SOURCE_BRANCH: ${{ vars.LOCAL_CI_RECONCILE_SOURCE_BRANCH || 'jiwang-delivery-ci' }}
+      LOCAL_CI_RECONCILE_SOURCE_BRANCHES: ${{ vars.LOCAL_CI_RECONCILE_SOURCE_BRANCHES || vars.LOCAL_CI_RECONCILE_SOURCE_BRANCH || 'main jiwang-delivery-ci' }}
       LOCAL_CI_BRIDGE_MAX_PRS: ${{ vars.LOCAL_CI_BRIDGE_MAX_PRS || '100' }}
       LOCAL_CI_BRIDGE_SINGLE_TIMEOUT_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_SINGLE_TIMEOUT_SECONDS || '600' }}
       LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS: ${{ vars.LOCAL_CI_BRIDGE_POLL_INTERVAL_SECONDS || '60' }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
     steps:
-      - name: Check pull request source
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
-        run: |
-          echo "::error::Local CI can only test PR branches that are mirrored into Gitee. Fork PRs are not supported by this runner."
-          exit 1
-
       - uses: actions/checkout@v4
         with:
           submodules: false
@@ -71,9 +65,10 @@ jobs:
       - name: Sync Gitee result to GitHub status
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          BRIDGE_MODE: ${{ github.event_name == 'schedule' && 'reconcile' || github.event.inputs.mode || 'single' }}
-          BRIDGE_SOURCE_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.event.inputs.source_branch || github.ref_name }}
-          BRIDGE_COMMIT_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.inputs.commit_sha || github.sha }}
+          BRIDGE_MODE: ${{ github.event_name == 'schedule' && 'reconcile' || inputs.mode || 'single' }}
+          BRIDGE_SOURCE_BRANCH: ${{ inputs.source_branch || github.ref_name }}
+          BRIDGE_COMMIT_SHA: ${{ inputs.commit_sha || github.sha }}
+          BRIDGE_TASK_REF: ${{ inputs.task_ref }}
         run: |
           if [ "${BRIDGE_MODE}" = "reconcile" ]; then
             python scripts/local_ci/bridge_gitee_to_github_status.py \
@@ -82,10 +77,11 @@ jobs:
               --gitee-repo "${GITEE_RESULTS_REPO}" \
               --gitee-results-branch "${GITEE_RESULTS_BRANCH}" \
               --gitee-web-url "${GITEE_RESULTS_WEB_URL}" \
-              --source-branch "${LOCAL_CI_RECONCILE_SOURCE_BRANCH}" \
+              --reconcile-source-branches "${LOCAL_CI_RECONCILE_SOURCE_BRANCHES}" \
               --context "${LOCAL_CI_CONTEXT}" \
               --max-prs "${LOCAL_CI_BRIDGE_MAX_PRS}"
           else
+            task_ref="${BRIDGE_TASK_REF:-ci/push/${BRIDGE_SOURCE_BRANCH}}"
             python scripts/local_ci/bridge_gitee_to_github_status.py \
               --mode single \
               --set-pending \
@@ -94,6 +90,7 @@ jobs:
               --gitee-results-branch "${GITEE_RESULTS_BRANCH}" \
               --gitee-web-url "${GITEE_RESULTS_WEB_URL}" \
               --source-branch "${BRIDGE_SOURCE_BRANCH}" \
+              --task-ref "${task_ref}" \
               --sha "${BRIDGE_COMMIT_SHA}" \
               --context "${LOCAL_CI_CONTEXT}" \
               --timeout-seconds "${LOCAL_CI_BRIDGE_SINGLE_TIMEOUT_SECONDS}" \

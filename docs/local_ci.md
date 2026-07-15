@@ -5,8 +5,27 @@ This runner is for the internal server path where GitHub Actions cannot reach co
 The Docker container and backend environment are assumed to be ready already. Local CI only does the moving part for each frontend commit:
 
 ```text
-poll Gitee -> enter existing Docker -> checkout frontend commit -> build/install frontend -> source backend env -> run smoke/JIT -> run FlagGems -> save logs -> push local-ci-results branch -> add commit comment
+GitHub push/PR
+  -> dispatch exact SHA to Gitee CI relay ci/* task ref
+  -> poll Gitee CI relay
+  -> enter existing Docker
+  -> checkout/build/install frontend
+  -> source backend env
+  -> run smoke/JIT and optional FlagGems
+  -> publish selected logs to local-ci-results in the same relay repository
+  -> receiver writes the result to GitHub commit status
+  -> scheduled bridge reconciles missed status updates
 ```
+
+The Gitee CI relay is intentionally separate from the normal source mirror. One relay repository carries both sides of the protocol without mixing their branches:
+
+```text
+ci/push/<github-branch>   exact SHA dispatched by a GitHub push
+ci/pr-<number>            exact PR head SHA dispatched by a GitHub PR event
+local-ci-results          local runner results only
+```
+
+The mirror process must not target this relay repository.
 
 ## Expected Layout
 
@@ -49,31 +68,39 @@ FLAGGEMS_TEST_OP="abs"
 FLAGGEMS_TEST_COMMAND=""
 ```
 
-Set GITEE_TOKEN to publish local CI results back to Gitee. The runner pulls source code from GITEE_REPO_URL, pushes logs to GITEE_RESULTS_REPO_URL on the local-ci-results branch, and adds a short commit comment on the source mirror commit with the result link. The old commit status API route is not used because Gitee rejects that endpoint with HTTP 405.
+Use the same independent Gitee repository for task code and results:
 
-Recommended repository split:
+```bash
+GITEE_REPO_URL="https://gitee.com/likehupochuan/triton-anchor-local-ci-results.git"
+GITEE_OWNER="likehupochuan"
+GITEE_REPO="triton-anchor-local-ci-results"
+GITEE_POLL_ALL_BRANCHES="1"
+GITEE_BRANCH_INCLUDE_REGEX="^ci/(pr-[0-9]+|push/.+)$"
 
-```text
-GITEE_REPO_URL=https://gitee.com/likehupochuan/triton-anchor.git
-GITEE_RESULTS_REPO_URL=https://gitee.com/likehupochuan/triton-anchor-local-ci-results.git
-GITEE_RESULTS_WEB_URL=https://gitee.com/likehupochuan/triton-anchor-local-ci-results
+GITEE_RESULTS_OWNER="likehupochuan"
+GITEE_RESULTS_REPO="triton-anchor-local-ci-results"
+GITEE_RESULTS_REPO_URL="https://gitee.com/likehupochuan/triton-anchor-local-ci-results.git"
+GITEE_RESULTS_BRANCH="local-ci-results"
+GITEE_RESULTS_WEB_URL="https://gitee.com/likehupochuan/triton-anchor-local-ci-results"
 ```
 
-By default the poller only watches GITEE_BRANCH, currently jiwang-delivery-ci. To let GitHub PRs from this same repository trigger local CI, the PR source branch must also exist in the Gitee mirror and the local poller must watch it. Either list branches explicitly with GITEE_BRANCHES, or set GITEE_POLL_ALL_BRANCHES=1 and optionally narrow it with GITEE_BRANCH_INCLUDE_REGEX. The results branch is always skipped so publishing logs does not trigger another local CI run.
+Existing server installations must update `scripts/local_ci/config.env`; changing `config.example.env` does not overwrite a local configuration. In particular, point `GITEE_REPO_URL` at the relay repository and enable the `ci/*` filter above.
 
-The runner activates /opt/venv/bin/activate before running uv build or uv pip install. Set PYTHON_VENV_ACTIVATE to another path, or empty, if a different container layout is used.
+Set `GITEE_TOKEN` for a private relay and for result publishing. The token needs read/write access to the relay repository. The old Gitee commit status API route is not used because Gitee rejects that endpoint with HTTP 405.
 
-Set RUN_FLAGGEMS_TESTS=true to run the local FlagGems check. The default command runs only the abs operator through the current Sophgo script. Internally this expands to: python3 -m pytest -s tests/test_unary_pointwise_ops.py -m abs
+The runner activates `/opt/venv/bin/activate` before running `uv build` or `uv pip install`. Set `PYTHON_VENV_ACTIVATE` to another path, or empty, if a different container layout is used.
 
-Change FLAGGEMS_TEST_OP for another unary marker if this default pytest entry still applies. For another file or script, set FLAGGEMS_TEST_COMMAND directly, for example: python3 testop/new_flaggems_smoke.py --op add.
+Set `RUN_FLAGGEMS_TESTS=true` to run the local FlagGems check. The default command runs only the `abs` operator through the current Sophgo script. Change `FLAGGEMS_TEST_OP` for another unary marker, or set `FLAGGEMS_TEST_COMMAND` directly for another file or script.
 
-## Run Once
+## Run
+
+Run one discovery pass:
 
 ```bash
 bash scripts/local_ci/poll_gitee_and_run.sh --once
 ```
 
-## Run As A Poller
+Run continuously:
 
 ```bash
 LOCAL_CI_POLL_INTERVAL=60 bash scripts/local_ci/poll_gitee_and_run.sh
@@ -91,29 +118,33 @@ Container-side artifacts:
 /workspace/local-ci-artifacts
 ```
 
-Published Gitee results are stored in the result repository on the local-ci-results branch under runs/<branch>/<commit>/<run-id>/. Commit comments contain only a short summary and a link to the result directory. The Gitee result directory intentionally keeps only selected files: delivery-summary.txt, frontend-install.log, backend-smoke-jit.log, and flaggems.log. Full local logs remain under /workspace/local-ci-artifacts.
+Published results are stored on `local-ci-results` under `runs/<safe-task-ref>/<commit>/<run-id>/`. The result directory intentionally keeps only `delivery-summary.txt`, `frontend-install.log`, `backend-smoke-jit.log`, and `flaggems.log`. Full local logs remain under `/workspace/local-ci-artifacts`.
 
-## GitHub Status Bridge
+## GitHub Workflows
 
-GitHub does not need to run the hardware tests. The `Local CI Bridge` workflow only synchronizes local-ci results from the Gitee result repository back to GitHub commit statuses. It runs on pushes to jiwang-delivery-ci, pull_request events, manual workflow_dispatch, and a scheduled reconciliation.
+`Dispatch Local CI via Gitee` is the only automatic push/PR entry point. Pushes to `main` and `jiwang-delivery-ci` create `ci/push/*`; same-repository PR events create `ci/pr-*`. Fork PRs are rejected because GitHub does not expose repository Gitee credentials to them.
 
-Push and pull_request events use `single` mode: the workflow writes a pending status, checks Gitee once, then exits. It does not wait for hours. The scheduled job uses `reconcile` mode: it periodically scans the configured branch head and open same-repository PRs, then updates GitHub statuses for commits whose Gitee results are available. This avoids the GitHub-hosted runner six-hour job limit.
+`Receive Local CI Result` polls the existing result protocol and writes `pending`, `success`, or `failure` to the original GitHub SHA. A receiver waits up to 20,400 seconds by default, then starts the next attempt. Four attempts preserve the coworker workflow's long-running handoff behavior without changing the local runner.
 
-For a pull request, the bridge checks the PR head branch and PR head SHA. This supports PRs whose source branch is in the same GitHub repository and is mirrored to Gitee. Fork PRs are intentionally rejected because the local server cannot fetch fork code through the current GitHub -> Gitee mirror path.
+`Local CI Bridge` is retained as a manual query and scheduled reconciliation fallback. It checks configured push branch heads and open same-repository PRs using the same `ci/*` task-ref mapping, so a delayed or cancelled receiver does not permanently lose a final status.
 
 Configure these GitHub repository variables if the defaults change:
 
 ```text
 GITEE_RESULTS_OWNER=likehupochuan
 GITEE_RESULTS_REPO=triton-anchor-local-ci-results
+GITEE_RESULTS_REPO_URL=https://gitee.com/likehupochuan/triton-anchor-local-ci-results.git
 GITEE_RESULTS_BRANCH=local-ci-results
 GITEE_RESULTS_WEB_URL=https://gitee.com/likehupochuan/triton-anchor-local-ci-results
 LOCAL_CI_CONTEXT=local-ci/sophgo-cmodel
-LOCAL_CI_RECONCILE_SOURCE_BRANCH=jiwang-delivery-ci
+LOCAL_CI_RECONCILE_SOURCE_BRANCHES="main jiwang-delivery-ci"
 LOCAL_CI_BRIDGE_MAX_PRS=100
+LOCAL_CI_RECEIVER_REF=main
+LOCAL_CI_RECEIVER_WAIT_SECONDS=20400
+LOCAL_CI_RECEIVER_MAX_ATTEMPTS=4
 ```
 
-If the Gitee result repository or result branch is private, add a GitHub repository secret named `GITEE_TOKEN` with read access to the result repository. The local server token also needs write access to the result repository, and read/comment access to the source mirror if those operations are private. The workflow uses GitHub's built-in `GITHUB_TOKEN` with `statuses: write` permission to publish the GitHub status.
+Add GitHub repository secrets `GITEE_TOKEN` and, when it differs from the owner, `GITEE_USERNAME`. The workflow uses GitHub's built-in `GITHUB_TOKEN` with `actions: write` and `statuses: write` to start the receiver and publish commit statuses.
 
 ## Order Notes
 
