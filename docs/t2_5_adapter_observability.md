@@ -10,10 +10,53 @@ python -m triton_anchor.diagnose /path/to/input.mlir \
   --output-dir ./out
 ```
 
-运行测试：
+---
+
+## 测试
+
+以下命令在仓库根目录执行：
 
 ```bash
-PYTHONPATH=python python -m pytest python/triton_anchor/tests/test_diagnostics.py -v
+cd /your/path/triton-anchor
+source .venv/bin/activate
+RUN_ROOT="/tmp/anchor-diagnose/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$RUN_ROOT"
+```
+
+先验证正常 TTIR 诊断，预期退出码为 `0`：
+
+```bash
+PYTHONPATH=triton/python:python:. python -m triton_anchor.diagnose \
+  --python tests.test_smoke:_smoke_add_kernel \
+  --signature '*fp32,*fp32,*fp32,i32' \
+  --constant BLOCK=256 \
+  --pipeline ttir \
+  --output-dir "$RUN_ROOT/success-ttir"
+echo "exit code: $?"
+```
+
+再运行预期失败的 Adapter 样例，预期退出码为 `1`，失败点为
+`triton_linalg.triton_to_linalg`：
+
+```bash
+TRITON_ANCHOR_DIAGNOSE_ON_ERROR=1 \
+TRITON_ANCHOR_DIAGNOSE_DIR="$RUN_ROOT/bad-inline" \
+python ops-diagnose-cli/test/anchor_diag_bad_kernels.py
+echo "exit code: $?"
+```
+
+检查失败诊断和可观测性指标：
+
+```bash
+python -m json.tool \
+  "$RUN_ROOT/bad-inline/triton-linalg/summary.json"
+```
+
+运行 diagnose 单元测试：
+
+```bash
+PYTHONPATH=triton/python:python:. python \
+  -m pytest python/triton_anchor/tests/test_diagnostics.py -q
 ```
 
 ---
@@ -119,18 +162,4 @@ summary: ./out/summary.json
 - **RSS 采样**：调用 `resource.getrusage(RUSAGE_SELF).ru_maxrss`，采样整个 Python 进程峰值 RSS。对 pybind adapter 是进程级粗粒度监控，不能精确归因到单个 pass；macOS 单位为字节，Linux 为 KB（已做换算）。
 - **失败时**：失败 pass 的 `duration_ms` 和 `before_ir_bytes` 仍会记录；`after_ir_bytes` 和 `ir_delta_bytes` 置 0；`output_ir_bytes` 保留失败前最后一个成功 pass 的 IR 大小。
 
----
-
-## 设计决策：为什么不做独立 CLI
-
-早期曾尝试 `triton-anchor-adapter-eval` 作为独立工具，但 todo 文档的依赖语义（T2.1→T2.5→T3.4）一贯意味着**复用/扩展**，而不是新增并列工具。独立 CLI 会导致与 diagnose 功能重叠、T3.4 CI 需对接两套输出，偏离整体设计脉络。
-
-最终方案：**扩展 `PassDiagnostic`**，指标直接写入同一份 `summary.json`，与 T2.2/T3.7 的集成方式保持一致。
-
----
-
-## 任务背景
-
-- **任务**：T2.5 Adapter 层健壮性，优先级 P1，属于任务2（开发者工具链补全）
-- **依赖链**：T2.1 诊断 CLI → T2.5 Adapter 健壮性 → T3.4 交付测试 CI
 
