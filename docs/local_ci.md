@@ -6,7 +6,8 @@ The Docker container and backend environment are assumed to be ready already. Lo
 
 ```text
 GitHub push/PR
-  -> dispatch exact SHA to Gitee CI relay ci/* task ref
+  -> dispatch exact head SHA to Gitee CI relay ci/* task ref
+  -> for a PR, also dispatch its base SHA to ci/base/pr-<number>
   -> poll Gitee CI relay
   -> enter existing Docker
   -> checkout/build/install frontend
@@ -14,6 +15,8 @@ GitHub push/PR
   -> rebuild backend wheel against the newly installed frontend
   -> source backend env
   -> run backend smoke/JIT and optional FlagGems
+  -> benchmark add, mm, softmax, and layernorm compile time
+  -> compare PR head against the cached result for its base SHA
   -> publish selected logs to local-ci-results in the same relay repository
   -> receiver writes the result to GitHub commit status
   -> scheduled bridge reconciles missed status updates
@@ -24,6 +27,7 @@ The Gitee CI relay is intentionally separate from the normal source mirror. One 
 ```text
 ci/push/<github-branch>   exact SHA dispatched by a GitHub push
 ci/pr-<number>            exact PR head SHA dispatched by a GitHub PR event
+ci/base/pr-<number>       exact PR base SHA; metadata only, not a standalone task
 local-ci-results          local runner results only
 ```
 
@@ -50,6 +54,13 @@ Prepared inside the container:
 ```
 
 The runner does not pull backend source code. Backend source and dependencies must already exist in the container, but the backend wheel is rebuilt for every tested frontend commit. For another backend, prepare it in the container first, then change `BACKEND_PATH`, `BACKEND_ENVSETUP_ARGS`, and the test commands in `scripts/local_ci/config.env`.
+
+For a PR, the poller reads `ci/base/pr-<number>`. If
+`compile-time/by-sha/<base-sha>/<backend-profile>/latest.json` already exists on
+`local-ci-results`, it reuses that result. Otherwise it runs the base commit
+once, publishes its compile-time result, and then runs the PR head. The base
+ref is excluded from normal branch discovery, so it does not create a second
+independent GitHub CI status.
 
 ## Configure
 
@@ -89,6 +100,24 @@ GITEE_RESULTS_BRANCH="local-ci-results"
 GITEE_RESULTS_WEB_URL="https://gitee.com/likehupochuan/triton-anchor-local-ci-results"
 ```
 
+Compile-time regression defaults:
+
+```bash
+RUN_COMPILE_BENCHMARK="true"
+COMPILE_BENCHMARK_KERNELS="add,mm,softmax,layernorm"
+COMPILE_BENCHMARK_REPEAT="5"
+COMPILE_BENCHMARK_WARMUP="1"
+COMPILE_BENCHMARK_THRESHOLD="0.20"
+COMPILE_BENCHMARK_TIMEOUT="30m"
+```
+
+The threshold is symmetric: a change greater than `+20%` or less than `-20%`
+is reported as a warning. A missing base result is also a warning. Correctness,
+build, or benchmark execution failures still fail local CI. GitHub commit
+statuses have no warning state, so a warning is published as `success` with
+the description `Gitee local CI passed with compile-time warning`; the detailed
+comparison is linked from the Gitee result directory.
+
 Existing server installations must update `scripts/local_ci/config.env`; changing `config.example.env` does not overwrite a local configuration. In particular, point `GITEE_REPO_URL` at the relay repository and enable the `ci/*` filter above.
 
 Set `GITEE_TOKEN` for a private relay and for result publishing. The token needs read/write access to the relay repository. The old Gitee commit status API route is not used because Gitee rejects that endpoint with HTTP 405.
@@ -123,11 +152,23 @@ Container-side artifacts:
 /workspace/local-ci-artifacts
 ```
 
-Published results are stored on `local-ci-results` under `runs/<safe-task-ref>/<commit>/<run-id>/`. The result directory intentionally keeps only `delivery-summary.txt`, `frontend-install.log`, `frontend-smoke.log`, `backend-rebuild.log`, `backend-smoke-jit.log`, and `flaggems.log`. Full local logs remain under `/workspace/local-ci-artifacts`.
+Published results are stored on `local-ci-results` under `runs/<safe-task-ref>/<commit>/<run-id>/`. The result directory keeps selected delivery logs and compile-time reports; full local logs remain under `/workspace/local-ci-artifacts`.
+
+Compile-time artifacts in each run include `compile-benchmark.json`,
+`compile-benchmark.csv`, and, for PRs, `compile-time-comparison.json` and
+`compile-time-comparison.md`. A stable SHA-indexed copy is also written to:
+
+```text
+compile-time/by-sha/<commit>/<backend-profile>/latest.json
+compile-time/by-sha/<commit>/<backend-profile>/latest.csv
+```
+
+This directory is parallel to the existing `runs/` directory. Existing result
+repositories do not need migration.
 
 ## GitHub Workflows
 
-`Dispatch Local CI via Gitee` is the only automatic push/PR entry point. Pushes to `main` and `jiwang-delivery-ci` create `ci/push/*`; same-repository PR events create `ci/pr-*`. Fork PRs are rejected because GitHub does not expose repository Gitee credentials to them.
+`Dispatch Local CI via Gitee` is the only automatic push/PR entry point. Pushes to `main` and `jiwang-delivery-ci` create `ci/push/*`; same-repository PR events create `ci/pr-*` and update the matching `ci/base/pr-*` pointer. Fork PRs are rejected because GitHub does not expose repository Gitee credentials to them.
 
 `Receive Local CI Result` polls the existing result protocol and writes `pending`, `success`, or `failure` to the original GitHub SHA. A receiver waits up to 20,400 seconds by default, then starts the next attempt. Four attempts preserve the coworker workflow's long-running handoff behavior without changing the local runner.
 

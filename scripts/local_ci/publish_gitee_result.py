@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -108,6 +109,13 @@ PUBLISHED_ARTIFACT_FILES = (
     "backend-rebuild.log",
     "backend-smoke-jit.log",
     "flaggems.log",
+    "compile-benchmark.log",
+    "compile-benchmark.json",
+    "compile-benchmark.csv",
+    "compile-benchmark-base.json",
+    "compile-time-comparison.json",
+    "compile-time-comparison.md",
+    "compile-time-comparison.log",
 )
 
 
@@ -132,6 +140,29 @@ def copy_results(run_dir: Path, target_dir: Path) -> Path | None:
         shutil.rmtree(target_dir)
         return None
     return target_dir
+
+
+def publish_compile_time_cache(worktree: Path, result_dir: Path | None, sha: str) -> Path | None:
+    if result_dir is None:
+        return None
+    source_json = result_dir / "compile-benchmark.json"
+    if not source_json.is_file():
+        return None
+
+    try:
+        document = json.loads(source_json.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        print(f"Cannot publish compile-time cache from {source_json}: {exc}", file=sys.stderr)
+        return None
+    metadata = document.get("metadata", {}) if isinstance(document, dict) else {}
+    profile = metadata.get("backend_profile") or metadata.get("backend") or "default"
+    cache_dir = worktree / "compile-time" / "by-sha" / sha / safe_path_part(str(profile))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_json, cache_dir / "latest.json")
+    source_csv = result_dir / "compile-benchmark.csv"
+    if source_csv.is_file():
+        shutil.copy2(source_csv, cache_dir / "latest.csv")
+    return cache_dir
 
 
 def post_commit_comment(owner: str, repo: str, sha: str, token: str, body: str) -> None:
@@ -211,7 +242,10 @@ def main() -> int:
             run_git(["checkout", "-q", "--orphan", args.results_branch], worktree, git_env)
 
         target_dir = worktree / rel_dir
-        copy_results(run_dir, target_dir)
+        copied_result_dir = copy_results(run_dir, target_dir)
+        compile_cache_dir = publish_compile_time_cache(worktree, copied_result_dir, args.sha)
+        if compile_cache_dir is not None:
+            print(f"Prepared compile-time cache: {compile_cache_dir.relative_to(worktree)}")
 
         latest_dir = worktree / "runs" / safe_branch / args.sha
         latest_dir.mkdir(parents=True, exist_ok=True)
@@ -220,7 +254,9 @@ def main() -> int:
         index = worktree / "index.md"
         index.write_text(
             "# Triton Anchor Local CI Results\n\n"
-            "Result directories are stored under runs/<branch>/<commit>/<run-id>/.\n"
+            "Result directories are stored under runs/<branch>/<commit>/<run-id>/.\n\n"
+            "Compile-time baselines are stored under "
+            "compile-time/by-sha/<commit>/<backend-profile>/latest.json.\n"
         )
 
         run_git(["add", "-A"], worktree, git_env)

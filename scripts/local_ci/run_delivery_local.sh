@@ -19,6 +19,10 @@ GITEE_REPO_URL="${GITEE_REPO_URL:-https://gitee.com/likehupochuan/triton-anchor.
 GITEE_BRANCH="${GITEE_BRANCH:-jiwang-delivery-ci}"
 GITEE_USERNAME="${GITEE_USERNAME:-likehupochuan}"
 GITEE_TOKEN="${GITEE_TOKEN:-}"
+GITEE_RESULTS_REPO_URL="${GITEE_RESULTS_REPO_URL:-${GITEE_REPO_URL}}"
+GITEE_RESULTS_BRANCH="${GITEE_RESULTS_BRANCH:-local-ci-results}"
+LOCAL_CI_BASE_SHA="${LOCAL_CI_BASE_SHA:-}"
+LOCAL_CI_BASE_REF="${LOCAL_CI_BASE_REF:-}"
 LOCAL_CI_GIT_ASKPASS=""
 BACKEND_PROFILE="${BACKEND_PROFILE:-sophgo-cmodel}"
 EXPECTED_TRITON_BACKEND="${EXPECTED_TRITON_BACKEND:-sophgo}"
@@ -41,6 +45,17 @@ PYTHON_VENV_ACTIVATE="${PYTHON_VENV_ACTIVATE:-/opt/venv/bin/activate}"
 SOURCE_ENVSETUP="${SOURCE_ENVSETUP:-1}"
 FRONTEND_BUILD_COMMAND="${FRONTEND_BUILD_COMMAND:-}"
 LOCAL_CI_ARTIFACT_ROOT="${LOCAL_CI_ARTIFACT_ROOT:-${WORKSPACE}/local-ci-artifacts}"
+RUN_COMPILE_BENCHMARK="${RUN_COMPILE_BENCHMARK:-true}"
+COMPILE_BENCHMARK_KERNELS="${COMPILE_BENCHMARK_KERNELS:-add,mm,softmax,layernorm}"
+COMPILE_BENCHMARK_REPEAT="${COMPILE_BENCHMARK_REPEAT:-5}"
+COMPILE_BENCHMARK_WARMUP="${COMPILE_BENCHMARK_WARMUP:-1}"
+COMPILE_BENCHMARK_THRESHOLD="${COMPILE_BENCHMARK_THRESHOLD:-0.20}"
+COMPILE_BENCHMARK_TIMEOUT="${COMPILE_BENCHMARK_TIMEOUT:-30m}"
+COMPILE_TIME_STATUS="disabled"
+MAX_JOBS="${MAX_JOBS:-1}"
+CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
+NINJAFLAGS="${NINJAFLAGS:--j1}"
+UV_LINK_MODE="${UV_LINK_MODE:-copy}"
 run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 DELIVERY_ARTIFACT_DIR="${DELIVERY_ARTIFACT_DIR:-${LOCAL_CI_ARTIFACT_ROOT}/${run_stamp}-${target_sha:0:12}}"
 
@@ -48,6 +63,7 @@ export WORKSPACE ANCHOR_DIR BACKEND_PROFILE EXPECTED_TRITON_BACKEND BACKEND_PATH
 export BACKEND_ENVSETUP BACKEND_ENVSETUP_ARGS BACKEND_TEST_COMMAND
 export RUN_FLAGGEMS_TESTS FLAGGEMS_CLONE_DIR FLAGGEMS_REF FLAGGEMS_PIP_PACKAGES FLAGGEMS_TEST_OP FLAGGEMS_TEST_COMMAND
 export LLVM_BUILD_DIR PPL_ROOT PYTHON_BIN PYTHON_VENV_ACTIVATE GITHUB_SHA="${target_sha}" GITHUB_REF="refs/heads/${GITEE_BRANCH}"
+export BACKEND_PROFILE MAX_JOBS CMAKE_BUILD_PARALLEL_LEVEL NINJAFLAGS UV_LINK_MODE
 
 mkdir -p "${DELIVERY_ARTIFACT_DIR}"
 
@@ -172,6 +188,89 @@ source_backend_env() {
   set -u
 }
 
+safe_path_part() {
+  local value="$1"
+  value="${value//\//_}"
+  value="$(printf '%s' "${value}" | tr -c 'A-Za-z0-9._-' '_')"
+  value="${value##_}"
+  value="${value%%_}"
+  printf '%s' "${value:-default}"
+}
+
+fetch_compile_baseline() {
+  local sha="$1"
+  local output="$2"
+  local safe_profile
+  safe_profile="$(safe_path_part "${BACKEND_PROFILE}")"
+  local rel_path="compile-time/by-sha/${sha}/${safe_profile}/latest.json"
+
+  if git remote get-url gitee-results >/dev/null 2>&1; then
+    git remote set-url gitee-results "${GITEE_RESULTS_REPO_URL}"
+  else
+    git remote add gitee-results "${GITEE_RESULTS_REPO_URL}"
+  fi
+  if ! git fetch -q --depth=1 gitee-results \
+    "refs/heads/${GITEE_RESULTS_BRANCH}:refs/remotes/gitee-results/${GITEE_RESULTS_BRANCH}"; then
+    echo "Compile-time results branch is not available: ${GITEE_RESULTS_BRANCH}" >&2
+    return 1
+  fi
+  if ! git show "gitee-results/${GITEE_RESULTS_BRANCH}:${rel_path}" > "${output}"; then
+    rm -f "${output}"
+    echo "No cached compile-time baseline at ${rel_path}" >&2
+    return 1
+  fi
+  echo "Loaded compile-time baseline for ${sha}: ${rel_path}"
+}
+
+run_compile_benchmark() {
+  if [[ "${RUN_COMPILE_BENCHMARK}" != "true" ]]; then
+    COMPILE_TIME_STATUS="disabled"
+    return 0
+  fi
+  if [[ ! -f "${LOCAL_CI_RUNNER_DIR}/compile_benchmark.py" ]]; then
+    echo "Compile benchmark script is missing from the trusted runner snapshot." >&2
+    return 1
+  fi
+  if [[ ! -f "${LOCAL_CI_RUNNER_DIR}/compare_compile_time.py" ]]; then
+    echo "Compile comparison script is missing from the trusted runner snapshot." >&2
+    return 1
+  fi
+
+  local candidate_json="${DELIVERY_ARTIFACT_DIR}/compile-benchmark.json"
+  local candidate_csv="${DELIVERY_ARTIFACT_DIR}/compile-benchmark.csv"
+  export FLAGGEMS_ROOT="${FLAGGEMS_CLONE_DIR}"
+  source_backend_env
+  run_logged compile-benchmark timeout "${COMPILE_BENCHMARK_TIMEOUT}" \
+    "${PYTHON_BIN}" "${LOCAL_CI_RUNNER_DIR}/compile_benchmark.py" \
+      --backend "${EXPECTED_TRITON_BACKEND:-sophgo}" \
+      --vendor "${EXPECTED_TRITON_BACKEND:-sophgo}" \
+      --flaggems-root "${FLAGGEMS_CLONE_DIR}" \
+      --kernels "${COMPILE_BENCHMARK_KERNELS}" \
+      --repeat "${COMPILE_BENCHMARK_REPEAT}" \
+      --warmup "${COMPILE_BENCHMARK_WARMUP}" \
+      --output-json "${candidate_json}" \
+      --output-csv "${candidate_csv}"
+
+  COMPILE_TIME_STATUS="pass"
+  if [[ -n "${LOCAL_CI_BASE_SHA}" ]]; then
+    local baseline_json="${DELIVERY_ARTIFACT_DIR}/compile-benchmark-base.json"
+    fetch_compile_baseline "${LOCAL_CI_BASE_SHA}" "${baseline_json}" || true
+    "${PYTHON_BIN}" "${LOCAL_CI_RUNNER_DIR}/compare_compile_time.py" \
+      --baseline-json "${baseline_json}" \
+      --candidate-json "${candidate_json}" \
+      --base-sha "${LOCAL_CI_BASE_SHA}" \
+      --candidate-sha "${target_sha}" \
+      --kernels "${COMPILE_BENCHMARK_KERNELS}" \
+      --threshold "${COMPILE_BENCHMARK_THRESHOLD}" \
+      --output-json "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.json" \
+      --output-markdown "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.md" \
+      2>&1 | tee "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.log"
+    COMPILE_TIME_STATUS="$("${PYTHON_BIN}" -c \
+      'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["status"])' \
+      "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.json")"
+  fi
+}
+
 git_commit() {
   local repo="$1"
   git -C "${repo}" rev-parse HEAD 2>/dev/null || true
@@ -184,6 +283,8 @@ write_summary() {
     echo "schema: triton-anchor-local-ci/v2"
     echo "status: ${status}"
     echo "target_sha: ${target_sha}"
+    echo "base_sha: ${LOCAL_CI_BASE_SHA}"
+    echo "base_ref: ${LOCAL_CI_BASE_REF}"
     echo "branch: ${GITEE_BRANCH}"
     echo "anchor_dir: ${ANCHOR_DIR}"
     echo "anchor_commit: $(git_commit "${ANCHOR_DIR}")"
@@ -199,6 +300,8 @@ write_summary() {
     echo "llvm_build_dir: ${LLVM_BUILD_DIR}"
     echo "ppl_root: ${PPL_ROOT}"
     echo "artifact_dir: ${DELIVERY_ARTIFACT_DIR}"
+    echo "compile_time_status: ${COMPILE_TIME_STATUS}"
+    echo "compile_time_threshold: ${COMPILE_BENCHMARK_THRESHOLD}"
   } > "${DELIVERY_ARTIFACT_DIR}/delivery-summary.txt"
   set -e
 }
@@ -300,6 +403,15 @@ if [[ -n "${BACKEND_TEST_COMMAND}" ]]; then
   (cd "${BACKEND_PATH}" && run_logged backend-smoke-jit bash -lc "${BACKEND_TEST_COMMAND}")
 fi
 
+if [[ ("${RUN_FLAGGEMS_TESTS}" == "true" || "${RUN_COMPILE_BENCHMARK}" == "true") \
+  && "${INSTALL_FLAGGEMS_PACKAGES}" != "0" && -n "${FLAGGEMS_PIP_PACKAGES}" ]]; then
+  if use_uv; then
+    run_logged flaggems-deps uv pip install ${FLAGGEMS_PIP_PACKAGES}
+  else
+    run_logged flaggems-deps "${PYTHON_BIN}" -m pip install ${FLAGGEMS_PIP_PACKAGES}
+  fi
+fi
+
 if [[ "${RUN_FLAGGEMS_TESTS}" == "true" ]]; then
   if [[ ! -d "${FLAGGEMS_CLONE_DIR}" ]]; then
     echo "FlagGems repo does not exist: ${FLAGGEMS_CLONE_DIR}" >&2
@@ -308,17 +420,12 @@ if [[ "${RUN_FLAGGEMS_TESTS}" == "true" ]]; then
   if [[ -n "${FLAGGEMS_REF}" ]]; then
     git -C "${FLAGGEMS_CLONE_DIR}" checkout "${FLAGGEMS_REF}"
   fi
-  if [[ "${INSTALL_FLAGGEMS_PACKAGES}" != "0" && -n "${FLAGGEMS_PIP_PACKAGES}" ]]; then
-    if use_uv; then
-      run_logged flaggems-deps uv pip install ${FLAGGEMS_PIP_PACKAGES}
-    else
-      run_logged flaggems-deps "${PYTHON_BIN}" -m pip install ${FLAGGEMS_PIP_PACKAGES}
-    fi
-  fi
   export FLAGGEMS_ROOT="${FLAGGEMS_CLONE_DIR}"
   source_backend_env
   (cd "${BACKEND_PATH}" && run_logged flaggems bash -lc "${FLAGGEMS_TEST_COMMAND}")
 
 fi
+
+run_compile_benchmark
 
 echo "Local CI finished successfully. Artifacts are in ${DELIVERY_ARTIFACT_DIR}"

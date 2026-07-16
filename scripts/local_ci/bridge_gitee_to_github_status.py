@@ -33,6 +33,7 @@ class LocalCIResult:
     exit_code: int | None
     target_url: str
     run_id: str
+    compile_time_status: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,6 +123,14 @@ def parse_summary_status(summary: str) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+def parse_summary_value(summary: str, key: str) -> str:
+    prefix = f"{key}:"
+    for line in summary.splitlines():
+        if line.startswith(prefix):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 def github_api_url(path: str, params: dict[str, str] | None = None) -> str:
@@ -251,6 +260,7 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
         parse_summary_status(summary),
         gitee_result_url(args.gitee_web_url, args.gitee_results_branch, rel_dir),
         run_id,
+        parse_summary_value(summary, "compile_time_status"),
     )
 
 
@@ -267,7 +277,10 @@ def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> 
         result = read_local_ci_result(args, target, gitee_token)
         if result is not None:
             if result.exit_code == 0:
-                post_github_status(target.sha, "success", args.context, "Gitee local CI passed", result.target_url)
+                description = "Gitee local CI passed"
+                if result.compile_time_status == "warning":
+                    description = "Gitee local CI passed with compile-time warning"
+                post_github_status(target.sha, "success", args.context, description, result.target_url)
                 print(f"Gitee local CI passed for {target.label}: {result.target_url}")
             else:
                 post_github_status(

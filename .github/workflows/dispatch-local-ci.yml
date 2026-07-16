@@ -55,19 +55,24 @@ jobs:
         id: meta
         env:
           EVENT_SHA: ${{ github.event.pull_request.head.sha || inputs.commit_sha || github.sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EVENT_SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || inputs.source_branch || github.ref_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
             task_ref="ci/pr-${PR_NUMBER}"
+            base_task_ref="ci/base/pr-${PR_NUMBER}"
           else
             task_ref="ci/push/${EVENT_SOURCE_BRANCH}"
+            base_task_ref=""
           fi
 
           {
             echo "sha=${EVENT_SHA}"
+            echo "base_sha=${EVENT_BASE_SHA}"
             echo "source_branch=${EVENT_SOURCE_BRANCH}"
             echo "task_ref=${task_ref}"
+            echo "base_task_ref=${base_task_ref}"
             echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "${GITHUB_OUTPUT}"
 
@@ -81,6 +86,8 @@ jobs:
       - name: Push task ref to CI relay repository
         env:
           TASK_REF: ${{ steps.meta.outputs.task_ref }}
+          BASE_SHA: ${{ steps.meta.outputs.base_sha }}
+          BASE_TASK_REF: ${{ steps.meta.outputs.base_task_ref }}
         run: |
           if [ -z "${GITEE_TOKEN}" ]; then
             echo "GITEE_TOKEN is empty"
@@ -105,6 +112,11 @@ jobs:
           git remote add gitee-ci "${repo_url}"
           GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
             git push --force gitee-ci "HEAD:refs/heads/${TASK_REF}"
+
+          if [ -n "${BASE_SHA}" ] && [ -n "${BASE_TASK_REF}" ]; then
+            GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 \
+              git push --force gitee-ci "${BASE_SHA}:refs/heads/${BASE_TASK_REF}"
+          fi
 
       - name: Mark local CI pending
         env:

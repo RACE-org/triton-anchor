@@ -144,7 +144,14 @@ jobs:
           bash -n scripts/ci/install_backend_deps.sh
           bash -n scripts/ci/run_delivery_smoke.sh
           bash -n scripts/ci/run_flaggems_tests.sh
+          bash -n scripts/local_ci/poll_gitee_and_run.sh
+          bash -n scripts/local_ci/run_in_container.sh
+          bash -n scripts/local_ci/run_delivery_local.sh
           python -m py_compile scripts/ci/collect_delivery_evidence.py
+          python -m py_compile scripts/local_ci/compile_benchmark.py
+          python -m py_compile scripts/local_ci/compare_compile_time.py
+          python -m py_compile scripts/local_ci/publish_gitee_result.py
+          python -m py_compile scripts/local_ci/bridge_gitee_to_github_status.py
           python -m py_compile tests/test_smoke.py
 
       - name: Run pure Python frontend tests
