@@ -8,7 +8,12 @@ import types
 import pytest
 
 from triton_anchor.diagnose import InputDiagnosticError, main
-from triton_anchor.diagnostics import PassDescriptor, PassDiagnostic
+from triton_anchor.diagnostics import (
+    PassDescriptor,
+    PassDiagnostic,
+    StageDiagnostic,
+    extract_mlir_location,
+)
 
 
 class FakeModule:
@@ -25,9 +30,13 @@ class FakePassManager:
         self.context = context
         self.passes = []
         self.debug_enabled = False
+        self.verifier_enabled = True
 
     def enable_debug(self) -> None:
         self.debug_enabled = True
+
+    def enable_verifier(self, value: bool) -> None:
+        self.verifier_enabled = value
 
     def run(self, mod: FakeModule) -> None:
         for pass_fn in self.passes:
@@ -38,11 +47,45 @@ def _install_fake_libtriton(monkeypatch: pytest.MonkeyPatch) -> None:
     ir_module = types.SimpleNamespace(
         pass_manager=lambda context: FakePassManager(context),
     )
-    libtriton_module = types.SimpleNamespace(ir=ir_module)
+    common_module = types.ModuleType("triton._C.libtriton.passes.common")
+    common_module.add_cse = lambda pm: pm.passes.append(lambda mod: None)
+    common_module.add_canonicalizer = lambda pm: pm.passes.append(lambda mod: None)
+    passes_module = types.ModuleType("triton._C.libtriton.passes")
+    passes_module.common = common_module
+    libtriton_module = types.ModuleType("triton._C.libtriton")
+    libtriton_module.ir = ir_module
+    libtriton_module.passes = passes_module
 
     monkeypatch.setitem(sys.modules, "triton", types.ModuleType("triton"))
     monkeypatch.setitem(sys.modules, "triton._C", types.ModuleType("triton._C"))
     monkeypatch.setitem(sys.modules, "triton._C.libtriton", libtriton_module)
+    monkeypatch.setitem(sys.modules, "triton._C.libtriton.passes", passes_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "triton._C.libtriton.passes.common",
+        common_module,
+    )
+
+
+def _install_fake_sophgo_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    def add_triton_to_ppl(pm: FakePassManager) -> None:
+        pm.passes.append(lambda mod: setattr(mod, "ir", str(mod) + "\n// triton->ppl"))
+
+    def add_linalg_to_ppl(pm: FakePassManager) -> None:
+        def fail(mod):
+            raise RuntimeError("operation 'linalg.generic' failed in ppl lowering")
+
+        pm.passes.append(fail)
+
+    passes_module = types.SimpleNamespace(
+        add_triton_to_ppl=add_triton_to_ppl,
+        add_linalg_to_ppl=add_linalg_to_ppl,
+    )
+    c_module = types.ModuleType("triton_sophgo._C")
+    c_module.passes = passes_module
+
+    monkeypatch.setitem(sys.modules, "triton_sophgo", types.ModuleType("triton_sophgo"))
+    monkeypatch.setitem(sys.modules, "triton_sophgo._C", c_module)
 
 
 def test_pass_diagnostic_reports_first_failed_pass(tmp_path, monkeypatch):
@@ -94,7 +137,9 @@ def test_pass_diagnostic_extracts_mlir_location_and_operation(tmp_path, monkeypa
             )
 
     def pass_fail(mod: FakeModule) -> None:
-        raise RuntimeError("<stdin>:2:8: error: failed to legalize operation 'tt.load'")
+        raise RuntimeError(
+            "<stdin>:2:8: error: failed to legalize operation 'tt.load'"
+        )
 
     descriptors = [
         PassDescriptor("ttir.combine", lambda pm: pm.passes.append(pass_fail)),
@@ -115,6 +160,41 @@ def test_pass_diagnostic_extracts_mlir_location_and_operation(tmp_path, monkeypa
     assert result.mlir_location.ir_line == 2
     assert '"tt.load"' in result.mlir_location.ir_snippet
     assert (tmp_path / "01-ttir.combine.diagnostic.txt").exists()
+
+
+def test_extract_mlir_location_maps_pplir_broadcast_failure(tmp_path):
+    before_ir = "\n".join(
+        [
+            '#loc = loc("/workspace/kernel.py":1:0)',
+            "module {",
+            "  %0 = tensor.empty() : tensor<4x8x16xf32> loc(#loc2)",
+            "  %broadcasted = linalg.broadcast ins(%collapsed : tensor<4x16xf32>) outs(%0 : tensor<4x8x16xf32>) dimensions = [1]  loc(#loc2)",
+            "} loc(#loc)",
+            '#loc2 = loc("/workspace/kernel.py":28:24)',
+        ]
+    )
+    diagnostic_text = "\n".join(
+        [
+            "C dimension affected, case not supported yet.",
+            'loc("/workspace/kernel.py":28:24): error: '
+            "'tensor.collapse_shape' op operand #0 must be tensor of any type values",
+        ]
+    )
+
+    location = extract_mlir_location(
+        "PassManager::run failed",
+        diagnostic_text,
+        before_ir,
+        tmp_path / "before.mlir",
+    )
+
+    assert location is not None
+    assert location.file == "/workspace/kernel.py"
+    assert location.line == 28
+    assert location.column == 24
+    assert location.operation == "linalg.broadcast"
+    assert location.ir_line == 4
+    assert "linalg.broadcast" in location.ir_snippet
 
 
 def test_pass_diagnostic_success_writes_summary(tmp_path, monkeypatch):
@@ -175,6 +255,63 @@ def test_triton_linalg_pipeline_can_be_diagnosed(tmp_path, monkeypatch):
     assert result.failed_index == 2
     assert result.mlir_location is not None
     assert result.mlir_location.operation == "tt.store"
+
+
+def test_sophgo_pplir_pipeline_can_be_diagnosed(tmp_path, monkeypatch):
+    _install_fake_libtriton(monkeypatch)
+    _install_fake_sophgo_passes(monkeypatch)
+
+    common = types.SimpleNamespace(
+        add_cse=lambda pm: pm.passes.append(lambda mod: None),
+        add_canonicalizer=lambda pm: pm.passes.append(lambda mod: None),
+    )
+    monkeypatch.setattr(
+        sys.modules["triton._C.libtriton"],
+        "passes",
+        types.SimpleNamespace(common=common),
+    )
+
+    result = PassDiagnostic(output_dir=tmp_path).diagnose_sophgo_pplir(FakeModule())
+
+    assert not result.ok
+    assert result.pipeline == "sophgo-pplir"
+    assert result.failed_pass == "sophgo.linalg_to_ppl"
+    assert result.failed_index == 2
+    assert result.mlir_location is not None
+    assert result.mlir_location.operation == "linalg.generic"
+    assert (tmp_path / "02-sophgo.linalg_to_ppl.diagnostic.txt").exists()
+
+
+def test_stage_diagnostic_writes_external_stage_failure(tmp_path):
+    input_path = tmp_path / "kernel.mlir"
+    input_path.write_text(
+        "\n".join(
+            [
+                "module {",
+                '  %0 = "ppl.copy"() : () -> ()',
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = StageDiagnostic(output_dir=tmp_path / "diag").record_failure(
+        "ppl-compile",
+        f"{input_path}:2:4: error: operation 'ppl.copy' failed",
+        diagnostic_text="ppl-compile failed",
+        command=["ppl-compile", input_path],
+        returncode=1,
+        input_path=input_path,
+        artifacts={"work_dir": tmp_path},
+    )
+
+    assert not result.ok
+    assert result.stage == "ppl-compile"
+    assert result.mlir_location is not None
+    assert result.mlir_location.operation == "ppl.copy"
+    assert result.mlir_location.ir_line == 2
+    assert result.summary_path == tmp_path / "diag" / "summary.json"
+    assert (tmp_path / "diag" / "ppl-compile.diagnostic.txt").exists()
 
 
 def test_cli_python_mode_diagnoses_in_memory_module(tmp_path, monkeypatch):
@@ -312,24 +449,13 @@ def test_cli_help_loads_without_libtriton(capsys):
     assert "--python" in captured.out
 
 
-# ── T2.5 observability metrics tests ─────────────────────────────────────────
-
-
 def test_pass_diagnostic_records_timing_and_ir_sizes(tmp_path, monkeypatch):
-    """T2.5: verify per-pass timing, IR size tracking, and aggregate metrics."""
     _install_fake_libtriton(monkeypatch)
 
-    def pass_a(mod):
-        pass
-
-    def pass_b(mod):
-        pass
-
     descriptors = [
-        PassDescriptor("pass.a", lambda pm: pm.passes.append(pass_a)),
-        PassDescriptor("pass.b", lambda pm: pm.passes.append(pass_b)),
+        PassDescriptor("pass.a", lambda pm: pm.passes.append(lambda mod: None)),
+        PassDescriptor("pass.b", lambda pm: pm.passes.append(lambda mod: None)),
     ]
-
     monkeypatch.setattr(
         "triton_anchor.diagnostics.build_ttir_pass_descriptors",
         lambda hw=None: descriptors,
@@ -339,42 +465,32 @@ def test_pass_diagnostic_records_timing_and_ir_sizes(tmp_path, monkeypatch):
 
     assert result.ok
     assert result.executed_passes == 2
-
-    # T2.5 aggregate metrics
     assert result.total_duration_ms >= 0.0
     assert result.input_ir_bytes > 0
     assert result.output_ir_bytes > 0
-    assert result.peak_rss_bytes >= 0  # may be 0 on some platforms
-
-    # T2.5 per-pass metrics
-    for rec in result.records:
-        assert rec.duration_ms >= 0.0
-        assert rec.before_ir_bytes > 0
-        assert rec.after_ir_bytes > 0
-        assert rec.ir_delta_bytes == rec.after_ir_bytes - rec.before_ir_bytes
-        assert rec.peak_rss_bytes >= 0
-
-    # T2.5 slowest_pass property
-    slowest = result.slowest_pass
-    assert slowest is not None
-    assert slowest.duration_ms == max(r.duration_ms for r in result.records)
+    assert result.peak_rss_bytes >= 0
+    for record in result.records:
+        assert record.duration_ms >= 0.0
+        assert record.before_ir_bytes > 0
+        assert record.after_ir_bytes > 0
+        assert record.ir_delta_bytes == record.after_ir_bytes - record.before_ir_bytes
+        assert record.peak_rss_bytes >= 0
+    assert result.slowest_pass is not None
+    assert result.slowest_pass.duration_ms == max(
+        record.duration_ms for record in result.records
+    )
 
 
-def test_pass_diagnostic_metrics_on_failure(tmp_path, monkeypatch):
-    """T2.5: verify metrics are captured even when a pass fails."""
+def test_pass_diagnostic_records_metrics_on_failure(tmp_path, monkeypatch):
     _install_fake_libtriton(monkeypatch)
-
-    def pass_ok(mod):
-        pass
 
     def pass_fail(mod):
         raise RuntimeError("deliberate failure")
 
     descriptors = [
-        PassDescriptor("pass.ok", lambda pm: pm.passes.append(pass_ok)),
+        PassDescriptor("pass.ok", lambda pm: pm.passes.append(lambda mod: None)),
         PassDescriptor("pass.fail", lambda pm: pm.passes.append(pass_fail)),
     ]
-
     monkeypatch.setattr(
         "triton_anchor.diagnostics.build_ttir_pass_descriptors",
         lambda hw=None: descriptors,
@@ -384,17 +500,12 @@ def test_pass_diagnostic_metrics_on_failure(tmp_path, monkeypatch):
 
     assert not result.ok
     assert result.executed_passes == 2
-
-    # T2.5: metrics captured up to failure point
     assert result.total_duration_ms >= 0.0
     assert result.input_ir_bytes > 0
-    # output_ir_bytes is last known good (before the failed pass)
     assert result.output_ir_bytes > 0
-
-    # The failed pass should have timing even though it failed
     failed = result.failed_record
     assert failed is not None
     assert failed.duration_ms >= 0.0
     assert failed.before_ir_bytes > 0
-    assert failed.after_ir_bytes == 0  # pass failed, no output
+    assert failed.after_ir_bytes == 0
     assert failed.ir_delta_bytes == 0

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import importlib.machinery
+import importlib.util
 import os
 import re
+import sys
 import tempfile
 import time
 import traceback
+import types
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -25,6 +29,7 @@ class PassDescriptor:
     name: str
     add_to_pass_manager: PassAdder
     optional: bool = False
+    disable_verifier: bool = False
 
 
 @dataclass
@@ -41,17 +46,11 @@ class PassRunRecord:
     diagnostic_text: Optional[str] = None
     mlir_location: Optional["MLIRDiagnosticLocation"] = None
     traceback: Optional[str] = None
-    # ── T2.5 adapter-layer observability metrics ──────────────────────────
     duration_ms: float = 0.0
-    """Wall-clock time for this single pass in milliseconds."""
     before_ir_bytes: int = 0
-    """UTF-8 byte size of the IR before this pass ran."""
     after_ir_bytes: int = 0
-    """UTF-8 byte size of the IR after this pass ran (0 if the pass failed)."""
     ir_delta_bytes: int = 0
-    """``after_ir_bytes - before_ir_bytes`` (0 if the pass failed)."""
     peak_rss_bytes: int = 0
-    """Process peak resident set size sampled right after this pass (0 if unknown)."""
 
 
 @dataclass
@@ -81,15 +80,10 @@ class PassDiagnosticResult:
     error: Optional[str] = None
     mlir_location: Optional[MLIRDiagnosticLocation] = None
     summary_path: Optional[Path] = None
-    # ── T2.5 adapter-layer observability metrics ──────────────────────────
     total_duration_ms: float = 0.0
-    """Sum of wall-clock time across all executed passes, in milliseconds."""
     input_ir_bytes: int = 0
-    """UTF-8 byte size of the IR fed into the pipeline."""
     output_ir_bytes: int = 0
-    """UTF-8 byte size of the IR after the last executed pass."""
     peak_rss_bytes: int = 0
-    """Highest process RSS observed across the run (0 if unknown)."""
 
     @property
     def executed_passes(self) -> int:
@@ -97,10 +91,10 @@ class PassDiagnosticResult:
 
     @property
     def slowest_pass(self) -> Optional[PassRunRecord]:
-        """The executed pass with the largest ``duration_ms`` (None if empty)."""
+        """Return the executed pass with the longest wall-clock duration."""
         if not self.records:
             return None
-        return max(self.records, key=lambda r: r.duration_ms)
+        return max(self.records, key=lambda record: record.duration_ms)
 
     @property
     def failed_record(self) -> Optional[PassRunRecord]:
@@ -110,6 +104,26 @@ class PassDiagnosticResult:
             if record.index == self.failed_index:
                 return record
         return None
+
+
+@dataclass
+class StageDiagnosticResult:
+    """Summary for a non-pass compile/runtime diagnostic."""
+
+    ok: bool
+    stage: str
+    output_dir: Path
+    diagnostic_path: Path
+    error: str
+    diagnostic_text: Optional[str] = None
+    command: Optional[list[str]] = None
+    returncode: Optional[int] = None
+    input_path: Optional[Path] = None
+    mlir_location: Optional[MLIRDiagnosticLocation] = None
+    traceback: Optional[str] = None
+    artifacts: dict[str, Any] = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
+    summary_path: Optional[Path] = None
 
 
 class PassDiagnostic:
@@ -164,10 +178,17 @@ class PassDiagnostic:
             descriptors=list(build_triton_linalg_pass_descriptors()),
         )
 
-    # ── T2.5 helper functions ────────────────────────────────────────────────
+    def diagnose_sophgo_pplir(self, mod: Any) -> PassDiagnosticResult:
+        """Diagnose the Sophgo Linalg/PPL lowering pipeline."""
+        return self._diagnose_pipeline(
+            mod,
+            pipeline="sophgo-pplir",
+            descriptors=list(build_sophgo_pplir_pass_descriptors()),
+        )
 
-    def _ir_bytes(self, ir_text_or_module: Any) -> int:
-        """Return UTF-8 byte count of the IR (0 on error)."""
+    @staticmethod
+    def _ir_bytes(ir_text_or_module: Any) -> int:
+        """Return the UTF-8 size of an IR value, or zero if unavailable."""
         try:
             text = (
                 ir_text_or_module
@@ -178,28 +199,16 @@ class PassDiagnostic:
         except Exception:
             return 0
 
-    def _sample_peak_rss_bytes(self) -> int:
-        """Sample the current process peak RSS in bytes (0 if unavailable).
-
-        Note: For pybind adapters, this samples the entire Python process RSS,
-        not just the pass execution. For subprocess adapters, each subprocess
-        would need separate tracking (not covered here).
-        """
+    @staticmethod
+    def _sample_peak_rss_bytes() -> int:
+        """Return this process's peak RSS in bytes, or zero if unavailable."""
         try:
             import resource
 
-            rusage = resource.getrusage(resource.RUSAGE_SELF)
-            # Linux: ru_maxrss is in KB; macOS: in bytes
-            import sys
-
-            if sys.platform == "darwin":
-                return rusage.ru_maxrss
-            else:
-                return rusage.ru_maxrss * 1024
+            peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            return peak_rss if sys.platform == "darwin" else peak_rss * 1024
         except Exception:
             return 0
-
-    # ──────────────────────────────────────────────────────────────────────────
 
     def _diagnose_pipeline(
         self,
@@ -218,29 +227,25 @@ class PassDiagnostic:
             output_dir=self.output_dir,
             records=records,
         )
-
-        # T2.5: capture input IR size
         result.input_ir_bytes = self._ir_bytes(mod)
 
         for index, descriptor in enumerate(descriptors, start=1):
             before_ir_text = str(mod)
             before_path = self._write_ir(index, descriptor.name, "before", mod)
-
-            # T2.5: measure before IR size
             before_ir_bytes = self._ir_bytes(before_ir_text)
-
             pm = ir.pass_manager(mod.context)
             if self.enable_debug:
                 pm.enable_debug()
+            if descriptor.disable_verifier and hasattr(pm, "enable_verifier"):
+                pm.enable_verifier(False)
             descriptor.add_to_pass_manager(pm)
 
-            # T2.5: time the pass execution
-            t0 = time.monotonic()
+            started_at = time.monotonic()
             try:
                 diagnostic_text = self._run_pass(pm, mod)
             except Exception as exc:
-                duration_ms = (time.monotonic() - t0) * 1000.0
-                peak_rss = self._sample_peak_rss_bytes()
+                duration_ms = (time.monotonic() - started_at) * 1000.0
+                peak_rss_bytes = self._sample_peak_rss_bytes()
                 diagnostic_text = getattr(exc, "diagnostic_text", "")
                 original_exc = getattr(exc, "original", exc)
                 error = str(original_exc)
@@ -275,12 +280,9 @@ class PassDiagnostic:
                     diagnostic_text=diagnostic_text or None,
                     mlir_location=mlir_location,
                     traceback=tb,
-                    # T2.5 metrics: failure case
                     duration_ms=duration_ms,
                     before_ir_bytes=before_ir_bytes,
-                    after_ir_bytes=0,
-                    ir_delta_bytes=0,
-                    peak_rss_bytes=peak_rss,
+                    peak_rss_bytes=peak_rss_bytes,
                 )
                 records.append(record)
                 result.ok = False
@@ -288,20 +290,19 @@ class PassDiagnostic:
                 result.failed_index = index
                 result.error = error
                 result.mlir_location = mlir_location
-                # T2.5: aggregate metrics on failure
-                result.total_duration_ms = sum(r.duration_ms for r in records)
-                result.output_ir_bytes = before_ir_bytes  # last known good
+                result.total_duration_ms = sum(
+                    record.duration_ms for record in records
+                )
+                result.output_ir_bytes = before_ir_bytes
                 result.peak_rss_bytes = max(
-                    (r.peak_rss_bytes for r in records), default=0
+                    (record.peak_rss_bytes for record in records), default=0
                 )
                 self._write_summary(result)
                 return result
 
-            # T2.5: pass succeeded, measure duration and after-IR size
-            duration_ms = (time.monotonic() - t0) * 1000.0
+            duration_ms = (time.monotonic() - started_at) * 1000.0
             after_ir_bytes = self._ir_bytes(mod)
-            peak_rss = self._sample_peak_rss_bytes()
-
+            peak_rss_bytes = self._sample_peak_rss_bytes()
             after_path = None
             if self.save_success_snapshots:
                 after_path = self._write_ir(index, descriptor.name, "after", mod)
@@ -312,19 +313,19 @@ class PassDiagnostic:
                     ok=True,
                     before_ir=before_path,
                     after_ir=after_path,
-                    # T2.5 metrics: success case
                     duration_ms=duration_ms,
                     before_ir_bytes=before_ir_bytes,
                     after_ir_bytes=after_ir_bytes,
                     ir_delta_bytes=after_ir_bytes - before_ir_bytes,
-                    peak_rss_bytes=peak_rss,
+                    peak_rss_bytes=peak_rss_bytes,
                 )
             )
 
-        # T2.5: finalize aggregate metrics on full success
-        result.total_duration_ms = sum(r.duration_ms for r in records)
+        result.total_duration_ms = sum(record.duration_ms for record in records)
         result.output_ir_bytes = self._ir_bytes(mod)
-        result.peak_rss_bytes = max((r.peak_rss_bytes for r in records), default=0)
+        result.peak_rss_bytes = max(
+            (record.peak_rss_bytes for record in records), default=0
+        )
         self._write_summary(result)
         return result
 
@@ -358,9 +359,7 @@ class PassDiagnostic:
         tb: str,
         mlir_location: Optional[MLIRDiagnosticLocation],
     ) -> Path:
-        path = (
-            self.output_dir / f"{index:02d}-{_safe_filename(pass_name)}.diagnostic.txt"
-        )
+        path = self.output_dir / f"{index:02d}-{_safe_filename(pass_name)}.diagnostic.txt"
         parts = [
             f"pass: {pass_name}",
             f"error: {error}",
@@ -384,6 +383,124 @@ class PassDiagnostic:
             parts.extend(["traceback:", tb.rstrip()])
         path.write_text("\n".join(parts) + "\n", encoding="utf-8")
         return path
+
+
+class StageDiagnostic:
+    """Write diagnostics for stages that are not MLIR pass pipelines."""
+
+    def __init__(
+        self,
+        output_dir: Optional[str | Path] = None,
+        *,
+        write_summary_json: bool = True,
+    ) -> None:
+        self.output_dir = Path(
+            output_dir or tempfile.mkdtemp(prefix="triton-anchor-stage-diagnose-")
+        )
+        self.write_summary_json = write_summary_json
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def record_failure(
+        self,
+        stage: str,
+        error: str,
+        *,
+        diagnostic_text: str = "",
+        command: Optional[Iterable[Any]] = None,
+        returncode: Optional[int] = None,
+        input_path: Optional[str | Path] = None,
+        input_text: str = "",
+        artifacts: Optional[dict[str, Any]] = None,
+        extra: Optional[dict[str, Any]] = None,
+        original: Optional[BaseException] = None,
+    ) -> StageDiagnosticResult:
+        input_path_obj = Path(input_path) if input_path is not None else None
+        if not input_text and input_path_obj is not None:
+            try:
+                input_text = input_path_obj.read_text(encoding="utf-8")
+            except OSError:
+                input_text = ""
+
+        tb = ""
+        if original is not None:
+            tb = "".join(
+                traceback.format_exception(
+                    type(original),
+                    original,
+                    original.__traceback__,
+                )
+            )
+
+        location = extract_mlir_location(
+            error,
+            diagnostic_text,
+            input_text,
+            input_path_obj,
+        )
+        diagnostic_path = self.output_dir / f"{_safe_filename(stage)}.diagnostic.txt"
+        result = StageDiagnosticResult(
+            ok=False,
+            stage=stage,
+            output_dir=self.output_dir,
+            diagnostic_path=diagnostic_path,
+            error=error,
+            diagnostic_text=diagnostic_text or None,
+            command=[str(item) for item in command] if command is not None else None,
+            returncode=returncode,
+            input_path=input_path_obj,
+            mlir_location=location,
+            traceback=tb or None,
+            artifacts=artifacts or {},
+            extra=extra or {},
+        )
+        self._write_failure_diagnostic(result)
+        self._write_summary(result)
+        return result
+
+    def _write_summary(self, result: StageDiagnosticResult) -> None:
+        if not self.write_summary_json:
+            return
+        path = self.output_dir / "summary.json"
+        result.summary_path = path
+        path.write_text(
+            json.dumps(_paths_to_strings(asdict(result)), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def _write_failure_diagnostic(self, result: StageDiagnosticResult) -> None:
+        parts = [
+            f"stage: {result.stage}",
+            f"error: {result.error}",
+        ]
+        if result.command is not None:
+            parts.append(f"command: {' '.join(result.command)}")
+        if result.returncode is not None:
+            parts.append(f"returncode: {result.returncode}")
+        if result.input_path is not None:
+            parts.append(f"input: {result.input_path}")
+        if result.mlir_location is not None:
+            location = result.mlir_location
+            parts.extend(
+                [
+                    "location:",
+                    f"  raw: {location.raw}",
+                    f"  file: {location.file}",
+                    f"  line: {location.line}",
+                    f"  column: {location.column}",
+                    f"  operation: {location.operation}",
+                    f"  ir_line: {location.ir_line}",
+                    f"  ir_snippet: {location.ir_snippet}",
+                ]
+            )
+        if result.artifacts:
+            parts.extend(["artifacts:", json.dumps(_paths_to_strings(result.artifacts), indent=2, sort_keys=True)])
+        if result.extra:
+            parts.extend(["extra:", json.dumps(_paths_to_strings(result.extra), indent=2, sort_keys=True)])
+        if result.diagnostic_text:
+            parts.extend(["captured diagnostics:", result.diagnostic_text.rstrip()])
+        if result.traceback:
+            parts.extend(["traceback:", result.traceback.rstrip()])
+        result.diagnostic_path.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
 
 def extract_mlir_location(
@@ -431,9 +548,7 @@ def build_ttir_pass_descriptors(
     if hw.enable_loop_unroll:
         optional = _optional_pass_adder(passes.ttir, "add_loop_unroll")
         if optional is not None:
-            descriptors.append(
-                PassDescriptor("ttir.loop_unroll", optional, optional=True)
-            )
+            descriptors.append(PassDescriptor("ttir.loop_unroll", optional, optional=True))
 
     optional = _optional_pass_adder(passes.ttir, "add_expression_restructing")
     if optional is not None:
@@ -480,9 +595,7 @@ def build_triton_linalg_pass_descriptors() -> Iterable[PassDescriptor]:
             "triton_linalg.extract_like_move_backward",
             _require_pass_adder(tl, "add_extract_like_move_backward"),
         ),
-        PassDescriptor(
-            "common.canonicalizer.post_conversion", common.add_canonicalizer
-        ),
+        PassDescriptor("common.canonicalizer.post_conversion", common.add_canonicalizer),
         PassDescriptor(
             "triton_linalg.arith_to_linalg",
             _require_pass_adder(tl, "add_arith_to_linalg"),
@@ -498,6 +611,83 @@ def build_triton_linalg_pass_descriptors() -> Iterable[PassDescriptor]:
             _require_pass_adder(tl, "add_wrap_func_body_with_single_block"),
         ),
     ]
+
+
+def build_sophgo_pplir_pass_descriptors() -> Iterable[PassDescriptor]:
+    """Build diagnosable descriptors for Sophgo Linalg/PPL lowering."""
+    from triton._C.libtriton.passes import common
+
+    sophgo_passes = _load_sophgo_passes_module()
+
+    return [
+        PassDescriptor(
+            "sophgo.triton_to_ppl",
+            _require_pass_adder(sophgo_passes, "add_triton_to_ppl"),
+        ),
+        PassDescriptor(
+            "sophgo.linalg_to_ppl",
+            _require_pass_adder(sophgo_passes, "add_linalg_to_ppl"),
+            disable_verifier=True,
+        ),
+        PassDescriptor("common.cse.pplir", common.add_cse, disable_verifier=True),
+        PassDescriptor(
+            "common.canonicalizer.pplir",
+            common.add_canonicalizer,
+            disable_verifier=True,
+        ),
+    ]
+
+
+def _load_sophgo_passes_module():
+    try:
+        from triton_sophgo._C import passes as sophgo_passes
+
+        return sophgo_passes
+    except Exception as exc:
+        normal_import_error = exc
+
+    extension_path = _find_sophgo_extension()
+    if extension_path is None:
+        raise RuntimeError(
+            "triton_sophgo._C.passes is not available. Install "
+            "triton-sophgo-backend before running sophgo-pplir diagnostics."
+        ) from normal_import_error
+
+    package = types.ModuleType("triton_sophgo")
+    package.__path__ = [str(extension_path.parent)]
+    package.__spec__ = importlib.machinery.ModuleSpec(
+        "triton_sophgo",
+        loader=None,
+        is_package=True,
+    )
+    sys.modules["triton_sophgo"] = package
+
+    spec = importlib.util.spec_from_file_location("triton_sophgo._C", extension_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(
+            f"failed to load Sophgo extension from {extension_path}"
+        ) from normal_import_error
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["triton_sophgo._C"] = module
+    spec.loader.exec_module(module)
+    sophgo_passes = getattr(module, "passes", None)
+    if sophgo_passes is None:
+        raise RuntimeError(
+            f"Sophgo extension {extension_path} does not export passes"
+        ) from normal_import_error
+    sys.modules["triton_sophgo._C.passes"] = sophgo_passes
+    return sophgo_passes
+
+
+def _find_sophgo_extension() -> Optional[Path]:
+    for entry in sys.path:
+        if not entry:
+            entry = os.getcwd()
+        package_dir = Path(entry) / "triton_sophgo"
+        for candidate in package_dir.glob("_C*.so"):
+            return candidate
+    return None
 
 
 def _optional_pass_adder(module: Any, pass_name: str) -> Optional[PassAdder]:
@@ -559,12 +749,12 @@ def _extract_mlir_location(
     if not text:
         return None
 
+    operation = _extract_operation_from_text(text)
     match = _find_location_match(text)
     if match is None:
-        op_from_text = _extract_operation_from_text(text)
-        if op_from_text is None:
+        if operation is None:
             return None
-        return MLIRDiagnosticLocation(raw=op_from_text, operation=op_from_text)
+        return MLIRDiagnosticLocation(raw=operation, operation=operation)
 
     raw = match.group(0)
     file_name = match.groupdict().get("file")
@@ -576,8 +766,8 @@ def _extract_mlir_location(
         file_name,
         line,
         before_path,
+        operation,
     )
-    operation = _extract_operation_from_text(text)
     if operation is None and ir_snippet is not None:
         operation = _extract_operation_from_ir_line(ir_snippet)
 
@@ -596,14 +786,29 @@ def _find_location_match(text: str) -> Optional[re.Match[str]]:
     patterns = [
         r'loc\("(?P<file>[^"]+)":(?P<line>\d+):(?P<column>\d+)\)',
         r'(?P<file>[^\s:"\']+\.m?lir):(?P<line>\d+):(?P<column>\d+)',
-        r"(?P<file><[^>]+>):(?P<line>\d+):(?P<column>\d+)",
-        r"(?P<line>\d+):(?P<column>\d+)",
+        r'(?P<file><[^>]+>):(?P<line>\d+):(?P<column>\d+)',
+        r'(?P<line>\d+):(?P<column>\d+)',
     ]
+    best_match: Optional[re.Match[str]] = None
+    best_score: Optional[int] = None
     for pattern in patterns:
-        match = re.search(pattern, text)
-        if match is not None:
-            return match
-    return None
+        for match in re.finditer(pattern, text):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.end())
+            if line_end == -1:
+                line_end = len(text)
+            diagnostic_line = text[line_start:line_end]
+            score = 0
+            if "error:" in diagnostic_line:
+                score += 100
+            if "failed" in diagnostic_line.lower():
+                score += 25
+            if "cannot open output file" in diagnostic_line:
+                score -= 100
+            if best_score is None or score > best_score:
+                best_score = score
+                best_match = match
+    return best_match
 
 
 def _find_ir_line_for_location(
@@ -612,12 +817,18 @@ def _find_ir_line_for_location(
     file_name: Optional[str],
     line: Optional[int],
     before_path: Path,
+    operation: Optional[str] = None,
 ) -> tuple[Optional[int], Optional[str]]:
     lines = before_ir_text.splitlines()
 
     if raw_location:
         for index, text_line in enumerate(lines, start=1):
             if raw_location in text_line:
+                alias = _extract_location_alias(text_line)
+                if alias is not None:
+                    alias_match = _find_ir_line_for_alias(lines, alias, operation)
+                    if alias_match is not None:
+                        return alias_match
                 return index, text_line.strip()
 
     if line is None or line < 1 or line > len(lines):
@@ -629,9 +840,37 @@ def _find_ir_line_for_location(
     location_pattern = f"{file_name}:{line}:"
     for index, text_line in enumerate(lines, start=1):
         if location_pattern in text_line:
+            alias = _extract_location_alias(text_line)
+            if alias is not None:
+                alias_match = _find_ir_line_for_alias(lines, alias, operation)
+                if alias_match is not None:
+                    return alias_match
             return index, text_line.strip()
 
     return None, None
+
+
+def _extract_location_alias(text_line: str) -> Optional[str]:
+    match = re.match(r"\s*(#loc\d+)\s*=", text_line)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _find_ir_line_for_alias(
+    lines: list[str],
+    alias: str,
+    operation: Optional[str],
+) -> Optional[tuple[int, str]]:
+    alias_ref = f"loc({alias})"
+    if operation is not None:
+        for index, text_line in enumerate(lines, start=1):
+            if alias_ref in text_line and operation in text_line:
+                return index, text_line.strip()
+    for index, text_line in enumerate(lines, start=1):
+        if alias_ref in text_line and _extract_operation_from_ir_line(text_line):
+            return index, text_line.strip()
+    return None
 
 
 def _location_file_matches_ir(file_name: str, before_path: Path) -> bool:
@@ -644,6 +883,11 @@ def _location_file_matches_ir(file_name: str, before_path: Path) -> bool:
 
 
 def _extract_operation_from_text(text: str) -> Optional[str]:
+    if "C dimension affected" in text:
+        return "linalg.broadcast"
+    if "unsupported transpose" in text or "cw transpose" in text:
+        return "linalg.transpose"
+
     patterns = [
         r"failed to legalize operation ['\"](?P<op>[\w.]+)['\"]",
         r"operation ['\"](?P<op>[\w.]+)['\"]",
