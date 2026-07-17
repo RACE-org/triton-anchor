@@ -99,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
             result = diagnostic.diagnose_ttir(mod)
         elif args.pipeline == "triton-linalg":
             result = diagnostic.diagnose_triton_linalg(mod)
+        elif args.pipeline == "sophgo-pplir":
+            result = diagnostic.diagnose_sophgo_pplir(mod)
         else:
             print(f"error: unsupported pipeline: {args.pipeline}", file=sys.stderr)
             return 2
@@ -161,7 +163,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--pipeline",
-        choices=("ttir", "triton-linalg"),
+        choices=("ttir", "triton-linalg", "sophgo-pplir"),
         default="ttir",
         help="Compiler pipeline to diagnose. Default: ttir.",
     )
