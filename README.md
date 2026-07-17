@@ -233,6 +233,7 @@ flowchart TD
 ### 4.2 快速安装
 
 ```bash
+# 一、前置步骤
 # 克隆仓库（含 Triton 子模块）
 git clone --recurse-submodules https://github.com/RACE-org/triton-anchor.git
 cd triton-anchor
@@ -242,36 +243,29 @@ export LLVM_SYSPATH=/path/to/llvm-release
 
 # 使用 uv 安装（推荐，极速）
 pip install uv
-uv pip install --no-build-isolation -e .
 
-# 验证安装
+# 创建、激活虚拟环境
+uv venv /opt/venv
+source /opt/venv/bin/activate
+uv pip install setuptools wheel ninja pybind11
+
+
+# 二、安装 triton-anchor
+# 1. 加载环境配置
+source envsetup.sh
+
+# 2. 构建分发包 (wheel)
+uv build --wheel --no-build-isolation
+
+# 3. 安装生成的 wheel 包
+uv pip install dist/triton_anchor-*.whl
+
+
+# 三、验证安装
 python -c "import triton_anchor; print(f'triton-anchor {triton_anchor.__version__} loaded')"
 ```
 
-### 4.3 仅安装纯 Python 模块（无需 LLVM）
 
-如果你只需要使用 `HWCapability`、`AnchorIRValidator` 等纯 Python API（例如开发后端 Plugin 时），可以跳过 C++ 构建：
-
-```bash
-# 将 python/ 目录加入 PYTHONPATH 即可
-export PYTHONPATH=/path/to/triton-anchor/python:$PYTHONPATH
-
-python -c "from triton_anchor import HWCapability, ComputeParadigm; print('OK')"
-```
-
-### 4.4 开发模式
-
-```bash
-# 安装包含测试工具的完整开发依赖
-uv pip install -e ".[dev]"
-
-# 运行单元测试
-pytest python/triton_anchor/tests/ -v
-
-# 代码风格检查
-pip install ruff
-ruff check python/ tests/
-```
 
 > 💡 **完整构建指南**（Docker 环境配置、LLVM 源码编译、Wheel 打包等）请参阅 [docs/build.md](docs/build.md)。
 

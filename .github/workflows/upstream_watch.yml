@@ -1,0 +1,68 @@
+# ──────────────────────────────────────────────────────────────
+# triton-anchor  Upstream Triton Watch
+# ──────────────────────────────────────────────────────────────
+name: Upstream Triton Watch
+
+on:
+  schedule:
+    # 每周一 03:42（北京时间）检查 Triton 上游 release 分支变化。
+    - cron: "42 19 * * 0"
+  workflow_dispatch:
+    inputs:
+      since_days:
+        description: "检查最近 N 天的上游变更"
+        required: false
+        default: "7"
+      refs:
+        description: "空格分隔的上游 refs"
+        required: false
+        default: "release/3.0.x release/3.1.x release/3.2.x release/3.3.x release/3.4.x release/3.5.x release/3.6.x"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.10"
+  UPSTREAM_REPO: "https://github.com/triton-lang/triton.git"
+
+jobs:
+  upstream-watch:
+    name: "Check Triton upstream branches"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Generate upstream change report
+        env:
+          SINCE_DAYS: ${{ inputs.since_days || '7' }}
+          WATCH_REFS: ${{ inputs.refs || 'release/3.0.x release/3.1.x release/3.2.x release/3.3.x release/3.4.x release/3.5.x release/3.6.x' }}
+        run: |
+          python .github/scripts/upstream_watch.py \
+            --repo-url "${UPSTREAM_REPO}" \
+            --refs ${WATCH_REFS} \
+            --since-days "${SINCE_DAYS}" \
+            --report upstream-watch-report.md \
+            --json upstream-watch-report.json
+
+      - name: Publish report to job summary
+        run: cat upstream-watch-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: upstream-watch-report
+          path: |
+            upstream-watch-report.md
+            upstream-watch-report.json
+          retention-days: 30
