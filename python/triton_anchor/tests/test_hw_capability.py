@@ -85,3 +85,65 @@ class TestHWCapability:
                 ptr_model="structured",
                 # Missing matrix_cap!
             )
+
+    def test_preferred_adapter_must_be_registered(self):
+        with pytest.raises(ValueError, match="not registered"):
+            HWCapability(
+                name="bad-adapter",
+                arch_family="riscv",
+                compute_paradigm=ComputeParadigm.AME_MATRIX,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="structured",
+                preferred_adapter="missing-adapter",
+                matrix_cap=MatrixCapability(),
+            )
+
+    def test_preferred_adapter_output_track_must_match(self):
+        with pytest.raises(ValueError, match="outputs linalg"):
+            HWCapability(
+                name="bad-track",
+                arch_family="gpu",
+                compute_paradigm=ComputeParadigm.GPGPU,
+                anchor_ir_track=AnchorIRTrack.TRITON_GPU,
+                ptr_model="gpu",
+                preferred_adapter="triton-shared",
+                gpgpu_cap=GPGPUCapability(),
+            )
+
+    def test_matrix_capability_values_are_validated(self):
+        with pytest.raises(ValueError, match="tile_shape"):
+            HWCapability(
+                name="bad-matrix",
+                arch_family="riscv",
+                compute_paradigm=ComputeParadigm.AME_MATRIX,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="structured",
+                matrix_cap=MatrixCapability(tile_shape=(8, 0)),
+            )
+
+    def test_tensor_capability_values_are_validated(self):
+        with pytest.raises(ValueError, match="tensor_cap.num_cores"):
+            HWCapability(
+                name="bad-tensor",
+                arch_family="tpu",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="axis_info",
+                tensor_cap=TensorCapability(num_cores=0),
+            )
+
+    def test_diagnose_reports_configuration_and_checks(self):
+        hw = HWCapability(
+            name="diag",
+            arch_family="riscv",
+            compute_paradigm=ComputeParadigm.AME_MATRIX,
+            anchor_ir_track=AnchorIRTrack.LINALG,
+            ptr_model="structured",
+            preferred_adapter="triton-shared",
+            matrix_cap=MatrixCapability(),
+        )
+
+        report = hw.diagnose()
+        assert "status: PASS" in report
+        assert "preferred_adapter: triton-shared" in report
+        assert "adapter_output_track" in report
