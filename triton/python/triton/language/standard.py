@@ -276,7 +276,8 @@ def min(
     else:
         if core.constexpr(input.dtype.primitive_bitwidth) < 32:
             if core.constexpr(input.dtype.is_floating()):
-                input = input.to(core.float32)
+                if not core.constexpr(input.dtype.is_fp16()):
+                    input = input.to(core.float32)
             else:
                 assert input.dtype.is_int(), "Expecting input to be integer type"
                 input = input.to(core.int32)

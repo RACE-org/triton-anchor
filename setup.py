@@ -193,6 +193,15 @@ class CMakeBuild(build_ext):
             f"-DMLIR_DIR={mlir_dir}",
         ]
 
+        if os.environ.get("TRITON_EXTRA_LLVM_TARGETS"):
+            # Parse env var with flexible delimiters (space, semicolon, colon)
+            import re
+            targets_str = os.environ.get("TRITON_EXTRA_LLVM_TARGETS")
+            targets = re.split(r'[;\s:]+', targets_str.strip())
+            targets = [t for t in targets if t]  # Filter empty strings
+            # CMake expects a semicolon-separated list as a single argument
+            cmake_args.append(f"-DTRITON_EXTRA_LLVM_TARGETS={';'.join(targets)}")
+
         ninja = shutil.which("ninja")
         if ninja:
             cmake_args = ["-G", "Ninja", f"-DCMAKE_MAKE_PROGRAM={ninja}"] + cmake_args
