@@ -13,10 +13,19 @@ The pipeline also supports conditional passes controlled by ``HWCapability``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 if TYPE_CHECKING:
+    from .adapters.base import ITritonToLinalgAdapter
+    from .anchor_ir_lifecycle import (
+        AnchorIRBackendHook,
+        AnchorIRLifecycleReport,
+    )
     from .hw_capability import HWCapability
+
+from .anchor_ir_rules import ANCHOR_IR_SPEC_VERSION
+from .anchor_ir_rules import validate_policy_request
+from .anchor_ir_schema import AnchorIRPhase, AnchorIRTrack
 
 
 def build_ttir_pipeline(pm, hw: Optional[HWCapability] = None):
@@ -163,3 +172,72 @@ def inject_hw_attributes(mod, hw: HWCapability, metadata: dict):
     metadata["hw_name"] = hw.name
     metadata["hw_paradigm"] = hw.compute_paradigm.value
     metadata["hw_arch_family"] = hw.arch_family
+
+
+def run_anchor_ir_compilation(
+    adapter: "ITritonToLinalgAdapter",
+    ttir_module: Any,
+    metadata: dict,
+    *,
+    hook: Optional["AnchorIRBackendHook"],
+    backend_lowering: Optional[Callable[[Any], Any]],
+    spec_version: str = ANCHOR_IR_SPEC_VERSION,
+    track: Union[AnchorIRTrack, str] = AnchorIRTrack.LINALG,
+    context: Any = None,
+    source_name: Optional[str] = None,
+) -> "AnchorIRLifecycleReport":
+    """Run the mandatory Adapter -> AnchorIR -> Backend compilation boundary.
+
+    This is the fail-closed production entry point.  ``adapter.convert`` is a
+    low-level conversion primitive; callers entering a backend should use this
+    function (or ``ITritonToLinalgAdapter.compile``) so invalid Adapter or Hook
+    output raises ``AnchorIRValidationError`` before backend lowering.
+    """
+
+    from .anchor_ir_lifecycle import AnchorIRLifecycleOrchestrator
+    from .anchor_ir_validator import AnchorIRValidationError
+
+    if not isinstance(metadata, dict):
+        raise TypeError("metadata must be a dict")
+    if backend_lowering is not None and not callable(backend_lowering):
+        raise TypeError("backend_lowering must be callable or None")
+    request = validate_policy_request(
+        spec_version=spec_version,
+        track=track,
+        phase=AnchorIRPhase.PRE_HOOK,
+    )
+    if not request.valid:
+        raise AnchorIRValidationError(request)
+    if request.track is not AnchorIRTrack.LINALG:
+        raise ValueError(
+            "ITritonToLinalgAdapter output requires track='linalg'; "
+            "use AnchorIRLifecycleOrchestrator directly for TritonGPU output"
+        )
+    if source_name is None:
+        adapter_name = adapter.name()
+        source_name = "<adapter:%s>" % adapter_name
+
+    adapter_output = adapter.convert(ttir_module, metadata, context)
+    # The production entry deliberately constructs the strict orchestrator
+    # itself.  Accepting a caller-supplied lookalike here would make it possible
+    # to bypass both validation boundaries while still calling the API that is
+    # documented as fail-closed.
+    lifecycle = AnchorIRLifecycleOrchestrator()
+    if isinstance(adapter_output, str):
+        return lifecycle.run_text_or_raise(
+            adapter_output,
+            hook=hook,
+            spec_version=spec_version,
+            track=track,
+            context=context,
+            source_name=source_name,
+            backend_lowering=backend_lowering,
+        )
+    return lifecycle.run_module_or_raise(
+        adapter_output,
+        hook=hook,
+        spec_version=spec_version,
+        track=track,
+        context=context,
+        backend_lowering=backend_lowering,
+    )

@@ -1,28 +1,33 @@
 """
-AnchorIR Specification & Two-Phase Validator
-==============================================
+AnchorIR legacy regex compatibility API
+=======================================
 
 AnchorIR is the **contract** between Adapters (Layer 2) and Backend
 Plugins (Layer 3).  Regardless of which Adapter produced the IR, the output
 must conform to AnchorIR so that any backend can consume it.
 
-Dual-Track Design (v0.1.3):
+Dual-Track Design:
   - **Linalg Track**: linalg/tensor/memref-centric IR (AME / Tensor backends)
   - **TritonGPU Track**: TritonGPU IR with Encoding attributes (GPU backends)
 
-Two-Phase Validation:
-  - ``validate_anchor_ir_pre_hook()``: runs BEFORE ``on_anchor_ir_ready()``
-    — checks base whitelist + forbidden list only
-  - ``validate_anchor_ir_post_hook()``: runs AFTER ``on_anchor_ir_ready()``
-    — checks base + extension whitelist + forbidden list
+This module keeps the historical ``AnchorIRValidator`` surface for callers
+that need a lightweight textual compatibility scan.  It is a **legacy regex compatibility**
+API, not a structural validator: it does not parse MLIR and
+cannot validate nested Regions, Types, Attributes, Properties, verifier rules,
+or Track semantic invariants.  It is **not a production AnchorIR gate**.
 
-Key invariants:
-  - Each Track has its own whitelist and forbidden list
-  - Numerical consistency: same Track, different Adapters → same numerical
-    results within tolerance (float rtol≤1e-5, int bitwise)
-  - Extension dialects declared by backend via ``get_allowed_dialects()``
+Two-phase legacy compatibility methods:
+  - ``validate_pre_hook()``: runs BEFORE ``on_anchor_ir_ready()``
+    — scans textual operation dialects against the core whitelist
+  - ``validate_post_hook()``: runs AFTER ``on_anchor_ir_ready()``
+    — scans textual operation dialects with declared backend extensions
 
-Stability guarantee: the allowed dialect whitelist is append-only.
+Use ``StructuredAnchorIRValidator`` for structural validation and
+``AnchorIRLifecycleOrchestrator``/``run_anchor_ir_compilation()`` for the
+fail-closed production lifecycle.
+
+Numerical result comparison belongs to the external corpus/runtime test
+facility; this module validates IR contracts, not runtime values.
 """
 
 from __future__ import annotations
@@ -30,27 +35,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Set, Optional, Tuple, TYPE_CHECKING
+from typing import List, Optional, Set, Tuple, TYPE_CHECKING
+
+from .anchor_ir_rules import ANCHOR_IR_SPEC_VERSION, resolve_policy
+from .anchor_ir_schema import AnchorIRPhase, AnchorIRTrack
 
 if TYPE_CHECKING:
     pass
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# AnchorIR Track — the two fundamental output forms
-# ═══════════════════════════════════════════════════════════════════════
-
-
-class AnchorIRTrack(Enum):
-    """AnchorIR dual-track output specification.
-
-    Decoupled from ComputeParadigm — backends may freely combine
-    compute paradigm and IR track (e.g., a RISC-V GPU with Tensor Core
-    could use TRITON_GPU track with RISC-V instructions).
-    """
-
-    LINALG = "linalg"  # Linalg Track (AME / Tensor)
-    TRITON_GPU = "triton_gpu"  # TritonGPU Track (gpGPU)
 
 
 class AnchorIRDialectStatus(Enum):
@@ -65,54 +56,25 @@ class AnchorIRDialectStatus(Enum):
 # Per-Track Dialect Configuration
 # ═══════════════════════════════════════════════════════════════════════
 
-# Linalg Track base whitelist
-LINALG_TRACK_ALLOWED: Set[str] = {
-    "linalg",  # Core computation
-    "linalg_ext",  # Extended ops (scatter, gather, atomic) from triton-linalg
-    "tensor",  # Tensor operations
-    "memref",  # Memory reference operations
-    "arith",  # Arithmetic operations
-    "math",  # Math operations (sin, cos, exp, ...)
-    "math_ext",  # Extended math (from triton-linalg)
-    "scf",  # Structured control flow
-    "func",  # Function operations
-    "cf",  # Control flow (basic blocks)
-    "affine",  # Affine operations
-    "aux",  # Auxiliary operations (from triton-linalg)
-    "index",  # Index operations
-    "bufferization",  # Bufferization operations
-    "vector",  # Vector operations
-}
+# Legacy mutable sets are derived from the versioned JSON policy.  They remain
+# public for compatibility, but are no longer a second production rule source.
+_LINALG_POLICY = resolve_policy(
+    spec_version=ANCHOR_IR_SPEC_VERSION,
+    track=AnchorIRTrack.LINALG,
+    phase=AnchorIRPhase.PRE_HOOK,
+)
+_TRITON_GPU_POLICY = resolve_policy(
+    spec_version=ANCHOR_IR_SPEC_VERSION,
+    track=AnchorIRTrack.TRITON_GPU,
+    phase=AnchorIRPhase.PRE_HOOK,
+)
 
-# Linalg Track forbidden dialects
-LINALG_TRACK_FORBIDDEN: Set[str] = {
-    "tt",  # Triton dialect — must be fully lowered
-    "triton",  # Alias for tt
-    "tts",  # Triton-shared transition dialect
-    "tptr",  # Triton pointer transition dialect
-    "smt",  # DSL Extension Python namespace — must be lowered to xsmt.*
-    "triton_gpu",  # TritonGPU dialect (wrong track)
-    "nvidia_gpu",  # NVIDIA-specific
-}
-
-# TritonGPU Track base whitelist
-TRITON_GPU_TRACK_ALLOWED: Set[str] = {
-    "triton_gpu",  # TritonGPU dialect (with Encoding attributes)
-    "tt",  # Triton Op retained (with Encoding)
-    "arith",  # Arithmetic operations
-    "math",  # Math operations
-    "scf",  # Structured control flow
-    "func",  # Function operations
-    "gpu",  # GPU-specific operations (optional)
-    "nvgpu",  # NVIDIA GPU operations (optional)
-}
-
-# TritonGPU Track forbidden dialects
-TRITON_GPU_TRACK_FORBIDDEN: Set[str] = {
-    "tts",  # Transition dialects forbidden
-    "tptr",  # Transition dialects forbidden
-    "smt",  # DSL Extension Python namespace
-}
+LINALG_TRACK_ALLOWED: Set[str] = set(_LINALG_POLICY.allowed_dialects)
+LINALG_TRACK_FORBIDDEN: Set[str] = set(_LINALG_POLICY.forbidden_dialects)
+TRITON_GPU_TRACK_ALLOWED: Set[str] = set(_TRITON_GPU_POLICY.allowed_dialects)
+TRITON_GPU_TRACK_FORBIDDEN: Set[str] = set(
+    _TRITON_GPU_POLICY.forbidden_dialects
+)
 
 
 def _get_track_config(track: AnchorIRTrack) -> Tuple[Set[str], Set[str]]:
@@ -161,7 +123,11 @@ class AnchorIRViolation:
 
 
 class AnchorIRValidator:
-    """Validates that an MLIR module conforms to the AnchorIR specification.
+    """Legacy regex compatibility scanner for historical AnchorIR callers.
+
+    This class is not a structural validator and must not be used as a
+    production AnchorIR gate.  It only scans textual operation spellings;
+    use ``StructuredAnchorIRValidator`` or the lifecycle API for T6.5.
 
     Supports two-phase validation (v0.1.3):
       - Phase 1 (pre-hook): base whitelist + forbidden — before ``on_anchor_ir_ready()``
@@ -262,11 +228,10 @@ class AnchorIRValidator:
     # ─── Two-Phase Validation API (v0.1.3) ────────────────────────────
 
     def validate_pre_hook(self, ir_text: str) -> List[AnchorIRViolation]:
-        """Phase 1 (pre-hook): validate against base whitelist only.
+        """Legacy Phase 1 textual scan against the base whitelist only.
 
-        Runs BEFORE ``on_anchor_ir_ready()`` — ensures Adapter output
-        does not contain forbidden dialects. Does NOT check extension
-        whitelist (backend extension ops not yet injected).
+        This does not parse MLIR or prove structural validity; use the
+        structured lifecycle for a production pre-hook boundary.
 
         Args:
             ir_text: The MLIR module as a string.
@@ -282,10 +247,10 @@ class AnchorIRValidator:
         ir_text: str,
         ext_allowed: Optional[Set[str]] = None,
     ) -> List[AnchorIRViolation]:
-        """Phase 2 (post-hook): validate against base + extension whitelist.
+        """Legacy Phase 2 textual scan against base + extension whitelist.
 
-        Runs AFTER ``on_anchor_ir_ready()`` — ensures backend-injected
-        extension ops are declared via ``get_allowed_dialects()``.
+        This does not parse MLIR or revalidate a complete Module; use the
+        structured lifecycle for a production post-hook boundary.
 
         Args:
             ir_text: The MLIR module as a string.
@@ -309,7 +274,7 @@ class AnchorIRValidator:
         return self._scan_ops(ir_text, self.allowed, self.forbidden)
 
     def is_valid(self, ir_text: str) -> bool:
-        """Quick check — returns True if IR conforms to AnchorIR."""
+        """Legacy textual quick check, not a structural validity result."""
         return len(self.validate(ir_text)) == 0
 
     def validate_and_raise(self, ir_text: str, context: str = "") -> None:

@@ -215,7 +215,10 @@ if(TRITON_BUILD_PYTHON_MODULE)
     ${PYTHON_SRC_PATH}/llvm.cc
     # triton-anchor 扩展绑定（注册 triton-shared 方言和 Pass）
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/bindings/triton_anchor_ext.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/bindings/triton_anchor_validator.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/lib/Validation/AnchorIRValidator.cpp
   )
+  target_compile_definitions(triton PRIVATE TRITON_ANCHOR_VALIDATION_EXPORTS)
 
   set(TRITON_LIBRARIES
     ${TRITON_UPSTREAM_LIBS}
@@ -228,6 +231,17 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRGPUToGPURuntimeTransforms
     MLIRGPUTransforms
     MLIRIR
+    MLIRParser
+    MLIRArithDialect
+    MLIRBufferizationDialect
+    MLIRControlFlowDialect
+    MLIRFuncDialect
+    MLIRFuncInlinerExtension
+    MLIRIndexDialect
+    MLIRMathDialect
+    MLIRNVGPUDialect
+    MLIRSCFDialect
+    MLIRVectorDialect
     MLIRControlFlowToLLVM
     MLIRBytecodeWriter
     MLIRPass
@@ -306,4 +320,3 @@ if(TRITON_BUILD_PYTHON_MODULE)
   # 确保 libtriton.so 输出到 triton/_C 目录
   set_target_properties(triton PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/triton/_C)
 endif()
-
