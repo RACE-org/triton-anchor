@@ -236,6 +236,13 @@ class CMakeBuild(build_ext):
         ensure_copy(triton_shared_opt_src, triton_shared_opt_dst, executable=True)
         outputs.append(str(triton_shared_opt_dst))
 
+        anchor_package_root = Path(self.build_lib).resolve() / "triton_anchor"
+        anchor_include_dst = anchor_package_root / "include"
+        outputs.extend(
+            str(path)
+            for path in copy_tree_files(BASE_DIR / "csrc" / "include", anchor_include_dst)
+        )
+
         self._built_outputs = outputs
 
 
@@ -257,6 +264,16 @@ setup(
     install_requires=[],
     package_data={
         "triton": ["_C/libtriton/*.pyi"],
+        "triton_anchor": [
+            "include/**/*.h",
+            "include/**/*.hpp",
+            "include/**/*.inc",
+            "include/**/*.def",
+            "include/**/*.td",
+            "spec/*.json",
+            "tests/data/anchor_ir/**/*.json",
+            "tests/data/anchor_ir/**/*.mlir",
+        ],
     },
     include_package_data=True,
     ext_modules=[CMakeExtension("triton._C.libtriton", "triton/_C")],
@@ -267,8 +284,11 @@ setup(
     },
     zip_safe=False,
     entry_points={
+        "console_scripts": [
+            "triton-anchor-validate = triton_anchor.anchor_ir_cli:main",
+        ],
         "triton.adapters": [
             "triton-shared = triton_anchor.adapters.triton_shared_adapter:TritonSharedAdapter",
-        ]
+        ],
     },
 )

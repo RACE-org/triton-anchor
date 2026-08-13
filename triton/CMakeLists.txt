@@ -114,7 +114,10 @@ if(TRITON_BUILD_PYTHON_MODULE)
   find_package(pybind11 CONFIG REQUIRED HINTS "${Python3_SITELIB}")
   include_directories(${Python3_INCLUDE_DIRS})
 
-  list(APPEND TRITON_PLUGIN_NAMES "triton_shared")
+  # Both Python modules are provided by the in-tree TritonSharedPlugin object:
+  # ``triton_shared`` keeps the existing dialect/builder bindings, while
+  # ``anchor`` exposes the structured Validator and generic conversion passes.
+  list(APPEND TRITON_PLUGIN_NAMES "triton_shared" "anchor")
 
   triton_anchor_add_triton_shared_plugin()
 

@@ -11,6 +11,9 @@ add_subdirectory(tools/triton-shared-opt)
 function(triton_anchor_add_triton_shared_plugin)
   add_triton_plugin(TritonSharedPlugin
     ${TRITON_ANCHOR_CSRC_SOURCE_DIR}/triton_shared.cc
+    ${TRITON_ANCHOR_CSRC_SOURCE_DIR}/bindings/triton_anchor_ext.cc
+    ${TRITON_ANCHOR_CSRC_SOURCE_DIR}/bindings/triton_anchor_validator.cc
+    ${TRITON_ANCHOR_CSRC_SOURCE_DIR}/lib/Validation/AnchorIRValidator.cpp
 
     LINK_LIBS
     TritonSharedAnalysis
@@ -21,11 +24,34 @@ function(triton_anchor_add_triton_shared_plugin)
     TLEToLinalg
     ProtonIR
     MLIRPtrDialect
+    MLIRAffineDialect
+    MLIRArithDialect
+    MLIRBufferizationDialect
+    MLIRControlFlowDialect
+    MLIRFuncDialect
+    MLIRFuncInlinerExtension
+    MLIRGPUDialect
+    MLIRIndexDialect
+    MLIRLinalgDialect
+    MLIRMathDialect
+    MLIRMemRefDialect
+    MLIRNVGPUDialect
+    MLIRSCFDialect
+    MLIRTensorDialect
+    MLIRVectorDialect
+    MLIRIR
+    MLIRParser
+    MLIRPass
+    MLIRTransforms
   )
 
   target_include_directories(TritonSharedPlugin PRIVATE
     ${TRITON_ANCHOR_CSRC_SOURCE_DIR}/include
     ${TRITON_ANCHOR_CSRC_BINARY_DIR}/include
+  )
+
+  target_compile_definitions(TritonSharedPlugin PRIVATE
+    TRITON_ANCHOR_VALIDATION_EXPORTS
   )
 
   target_link_libraries(TritonSharedPlugin PRIVATE

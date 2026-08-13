@@ -1,0 +1,290 @@
+"""Regression coverage for the public AnchorIR native-header artifact."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import importlib.util
+import json
+from pathlib import Path
+import pkgutil
+import shutil
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+import triton
+import triton_anchor
+from triton_anchor import (
+    ANCHOR_IR_SPEC_VERSION,
+    AnchorIRPhase,
+    AnchorIRTrack,
+    resolve_anchor_ir_policy,
+)
+from triton_anchor.anchor_ir_rules import SUPPORTED_SPEC_VERSIONS
+
+
+def _repository_validator_header() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "csrc/include/triton-anchor/Validation/AnchorIRValidator.h"
+    )
+
+
+def _installed_validator_header() -> Path:
+    return (
+        Path(triton_anchor.__file__).resolve().parent
+        / "include/triton-anchor/Validation/AnchorIRValidator.h"
+    )
+
+
+def test_wheel_resources_include_current_rules_and_both_track_corpora():
+    for version in ("1.0.0", "1.1.0", "2.0.0", "3.0.0"):
+        assert pkgutil.get_data(
+            "triton_anchor", "spec/anchor-ir-%s.json" % version
+        ) is not None
+
+    rule_data = pkgutil.get_data("triton_anchor", "spec/anchor-ir-3.0.0.json")
+    assert rule_data is not None
+    assert json.loads(rule_data.decode("utf-8"))["spec_version"] == (
+        ANCHOR_IR_SPEC_VERSION
+    )
+    assert SUPPORTED_SPEC_VERSIONS == (ANCHOR_IR_SPEC_VERSION,)
+    policy = resolve_anchor_ir_policy(
+        spec_version=ANCHOR_IR_SPEC_VERSION,
+        track=AnchorIRTrack.LINALG,
+        phase=AnchorIRPhase.PRE_HOOK,
+    )
+    assert policy.spec_version == ANCHOR_IR_SPEC_VERSION
+
+    for resource in (
+        "tests/data/anchor_ir/corpus.json",
+        "tests/data/anchor_ir/linalg/positive/basic.mlir",
+        "tests/data/anchor_ir/triton_gpu/positive/basic.mlir",
+        "tests/data/anchor_ir/golden/linalg/basic.json",
+        "tests/data/anchor_ir/golden/triton_gpu/basic.json",
+    ):
+        assert pkgutil.get_data("triton_anchor", resource) is not None
+
+
+def test_exported_anchor_ir_validator_header_contains_current_abi_fields():
+    header = _installed_validator_header()
+    if not header.is_file():
+        header = _repository_validator_header()
+    content = header.read_text(encoding="utf-8")
+
+    assert "DiagnosticTemplate resourceLimit;" in content
+    assert "bool resourceLimitReported = false;" in content
+
+
+def test_source_build_exports_an_exact_copy_of_the_validator_header():
+    source = _repository_validator_header()
+    exported = _installed_validator_header()
+    if not source.is_file() or not exported.is_file():
+        # A wheel installation intentionally has no source checkout to compare
+        # against. A clean source checkout intentionally has no build output.
+        return
+
+    assert exported.read_bytes() == source.read_bytes()
+
+
+def test_native_validator_entry_points_are_exported_for_backend_linkage():
+    nm = shutil.which("nm")
+    if nm is None:
+        pytest.skip("nm is required to inspect native symbol visibility")
+
+    native_library = (
+        Path(triton.__file__).resolve().parent / "_C" / "libtriton.so"
+    )
+    if not native_library.is_file():
+        pytest.skip("the current platform does not use libtriton.so")
+
+    result = subprocess.run(
+        [nm, "-D", "-C", "--defined-only", str(native_library)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for entry_point in (
+        "validateAnchorIR(",
+        "validateAnchorIRText(",
+        "normalizeAnchorIR(",
+        "normalizeAnchorIRText(",
+    ):
+        assert f"mlir::triton::anchor::{entry_point}" in result.stdout
+
+
+def test_one_click_runner_rejects_wrong_native_triton_version_for_plain_clone():
+    """The source version gate must not depend on a versioned directory name."""
+
+    repository_root = Path(__file__).resolve().parents[3]
+    runner_path = repository_root / "scripts/verify_t65_all.py"
+    module_name = "_triton_anchor_verify_t65_version_gate_test"
+    spec = importlib.util.spec_from_file_location(module_name, runner_path)
+    assert spec is not None and spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = runner
+    try:
+        spec.loader.exec_module(runner)
+        build_python_dir = runner._find_build_python_dir(repository_root)
+        assert build_python_dir is not None
+        source_tree = ast.parse(
+            (repository_root / "triton/python/triton/__init__.py").read_text(
+                encoding="utf-8"
+            )
+        )
+        source_version = next(
+            node.value.value
+            for node in source_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "__version__"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        # Deliberately omit TargetContext.label: a plain cloned checkout is
+        # named "current", but its selected native library still must match
+        # this checkout's triton/python/triton/__init__.py version.
+        context = SimpleNamespace(
+            path=repository_root,
+            build_python_dir=build_python_dir,
+        )
+        payload = {
+            "anchor_path": str(repository_root / "python/triton_anchor/__init__.py"),
+            "triton_path": str(build_python_dir / "triton/__init__.py"),
+            "libtriton_path": str(build_python_dir / "triton/_C/libtriton.so"),
+            "triton": source_version,
+        }
+        assert runner._probe_violations(context, payload) == []
+        payload["triton"] = "0.0.0"
+        assert any(
+            "does not match source version" in violation
+            for violation in runner._probe_violations(context, payload)
+        )
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_one_click_runner_reports_unreadable_source_version_as_a_failure(monkeypatch):
+    """A malformed checkout must produce a summary failure, not a traceback."""
+
+    repository_root = Path(__file__).resolve().parents[3]
+    runner_path = repository_root / "scripts/verify_t65_all.py"
+    module_name = "_triton_anchor_verify_t65_version_error_test"
+    spec = importlib.util.spec_from_file_location(module_name, runner_path)
+    assert spec is not None and spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = runner
+    try:
+        spec.loader.exec_module(runner)
+        context = SimpleNamespace(
+            label="current",
+            blocked=False,
+            converter_available=None,
+            launcher=Path("/tmp/t65-unused-launcher"),
+        )
+        probe_result = runner.StepResult(
+            target="current",
+            name="environment/import probe",
+            status="PASS",
+            returncode=0,
+            duration_seconds=0.0,
+            output_tail='{"ttgpu_converter": false}',
+        )
+        monkeypatch.setattr(runner, "_run", lambda *args, **kwargs: probe_result)
+
+        def raise_version_error(*args, **kwargs):
+            raise ValueError("source Triton version is missing")
+
+        monkeypatch.setattr(runner, "_probe_violations", raise_version_error)
+        results = []
+        assert runner._probe(context, results, timeout=1) is False
+        assert context.blocked
+        assert results[-1].status == "FAIL"
+        assert "source Triton version is missing" in results[-1].note
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_t65_documentation_marks_legacy_validator_as_non_strict_compatibility_api():
+    """Public docs must not direct backend authors around the strong validator."""
+
+    repository_root = Path(__file__).resolve().parents[3]
+    legacy_source = (repository_root / "python/triton_anchor/anchor_ir.py").read_text(
+        encoding="utf-8"
+    )
+    implementation_doc = (
+        repository_root / "docs/anchor_ir_validation.md"
+    ).read_text(encoding="utf-8")
+
+    assert "legacy regex compatibility" in legacy_source
+    assert "not a structural validator" in legacy_source
+    assert "validate_pre_hook()/validate_post_hook()" in implementation_doc
+    assert "legacy regex" in implementation_doc
+
+
+def test_one_click_acceptance_runner_uses_source_and_selected_native_build():
+    """Never mix a stale AnchorIR package with the selected native build."""
+
+    repository_root = Path(__file__).resolve().parents[3]
+    runner_path = repository_root / "scripts/verify_t65_all.py"
+    module_name = "_triton_anchor_verify_t65_all_test"
+    spec = importlib.util.spec_from_file_location(module_name, runner_path)
+    assert spec is not None and spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = runner
+    try:
+        spec.loader.exec_module(runner)
+        context = runner._make_context(
+            argparse.Namespace(python=None),
+            repository_root,
+        )
+        try:
+            completed = subprocess.run(
+                runner._python_command(
+                    context,
+                    "-c",
+                    (
+                        "import json, triton, triton_anchor; "
+                        "from pathlib import Path; "
+                        "from triton._C import libtriton; "
+                        "print(json.dumps({"
+                        "'anchor': str(Path(triton_anchor.__file__).resolve()), "
+                        "'triton': str(Path(triton.__file__).resolve()), "
+                        "'native': str(Path(libtriton.__file__).resolve())}))"
+                    ),
+                ),
+                cwd=repository_root,
+                env=context.env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            context.launcher_dir.cleanup()
+    finally:
+        sys.modules.pop(module_name, None)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    imported = json.loads(completed.stdout.strip())
+    source_package = (repository_root / "python/triton_anchor").resolve()
+    assert context.build_python_dir is not None
+    build_package = (context.build_python_dir / "triton").resolve()
+    try:
+        Path(imported["anchor"]).resolve().relative_to(source_package)
+    except ValueError:
+        pytest.fail(
+            "one-click acceptance imported a stale triton_anchor copy: %s"
+            % imported["anchor"]
+        )
+    for field in ("triton", "native"):
+        try:
+            Path(imported[field]).resolve().relative_to(build_package)
+        except ValueError:
+            pytest.fail(
+                "one-click acceptance imported %s outside the selected build: %s"
+                % (field, imported[field])
+            )

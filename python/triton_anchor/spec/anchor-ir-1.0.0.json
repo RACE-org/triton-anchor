@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "spec_version": "anchor-ir/1.0.0",
+  "unknown_dialect_diagnostic": {
+    "code": "AIR-COMMON-001",
+    "message": "Unknown operation dialect '{dialect}'",
+    "hint": "Lower '{operation}' to a dialect allowed by the selected Track."
+  },
+  "unknown_type_diagnostic": {
+    "code": "AIR-COMMON-002",
+    "message": "Unknown type dialect '{dialect}' in '{object}'",
+    "hint": "Replace '{object}' with a type allowed by the selected Track."
+  },
+  "unknown_attribute_diagnostic": {
+    "code": "AIR-COMMON-003",
+    "message": "Unknown attribute dialect '{dialect}' in '{object}'",
+    "hint": "Replace or remove '{object}' using attributes allowed by the selected Track."
+  },
+  "resource_limit_diagnostic": {
+    "code": "AIR-COMMON-004",
+    "message": "AnchorIR structural resource limit exceeded at '{object}'",
+    "hint": "Reduce AnchorIR operation nesting, operation count, or nested object structure before validation."
+  },
+  "parse_failure_diagnostic": {
+    "code": "AIR-PARSE-001",
+    "message": "Failed to parse the MLIR module",
+    "hint": "Fix the MLIR syntax and ensure the input contains one builtin.module."
+  },
+  "verify_failure_diagnostic": {
+    "code": "AIR-VERIFY-001",
+    "message": "MLIR verifier rejected the module",
+    "hint": "Fix the reported MLIR or Dialect invariant before AnchorIR validation."
+  },
+  "tracks": {
+    "linalg": {
+      "allowed_dialects": [
+        "affine",
+        "arith",
+        "aux",
+        "bufferization",
+        "cf",
+        "func",
+        "index",
+        "linalg",
+        "linalg_ext",
+        "math",
+        "math_ext",
+        "memref",
+        "scf",
+        "tensor",
+        "vector"
+      ],
+      "forbidden_dialects": [
+        "triton_nvidia_gpu",
+        "smt",
+        "tptr",
+        "triton",
+        "triton_gpu",
+        "tt",
+        "tts"
+      ],
+      "forbidden_dialect_diagnostic": {
+        "code": "AIR-LINALG-001",
+        "message": "Forbidden dialect '{dialect}' is not permitted in Linalg Track",
+        "hint": "Fully lower '{operation}' to the Linalg Track before the AnchorIR boundary."
+      },
+      "forbidden_type_diagnostic": {
+        "code": "AIR-LINALG-002",
+        "message": "Forbidden type dialect '{dialect}' in '{object}' is not permitted in Linalg Track",
+        "hint": "Fully lower or replace '{object}' before the Linalg AnchorIR boundary."
+      },
+      "forbidden_attribute_diagnostic": {
+        "code": "AIR-LINALG-003",
+        "message": "Forbidden attribute dialect '{dialect}' in '{object}' is not permitted in Linalg Track",
+        "hint": "Remove or replace '{object}' before the Linalg AnchorIR boundary."
+      },
+      "enabled_invariants": [
+        "linalg.no_unrealized_conversion_cast",
+        "linalg.ranked_shaped_values",
+        "linalg.generic_region_contract"
+      ],
+      "semantic_diagnostics": {
+        "linalg.no_unrealized_conversion_cast": {
+          "code": "AIR-LINALG-010",
+          "message": "Unfinished conversion cast remains at '{operation}'",
+          "hint": "Complete the Triton/GPU-to-Linalg conversion before the AnchorIR boundary."
+        },
+        "linalg.ranked_shaped_values": {
+          "code": "AIR-LINALG-011",
+          "message": "Linalg operation '{operation}' requires ranked shaped value '{object}'",
+          "hint": "Materialize a ranked tensor or memref shape before this Linalg operation."
+        },
+        "linalg.generic_region_contract": {
+          "code": "AIR-LINALG-012",
+          "message": "linalg.generic '{operation}' has an incomplete region/yield contract",
+          "hint": "Provide one region block, matching input/init block arguments, and one linalg.yield value for every destination-style init/output."
+        }
+      }
+    },
+    "triton_gpu": {
+      "allowed_dialects": [
+        "arith",
+        "func",
+        "gpu",
+        "math",
+        "nvgpu",
+        "scf",
+        "triton_gpu",
+        "tt"
+      ],
+      "forbidden_dialects": [
+        "smt",
+        "tptr",
+        "tts"
+      ],
+      "forbidden_dialect_diagnostic": {
+        "code": "AIR-GPU-001",
+        "message": "Forbidden dialect '{dialect}' is not permitted in TritonGPU Track",
+        "hint": "Remove or lower '{operation}' before the TritonGPU AnchorIR boundary."
+      },
+      "forbidden_type_diagnostic": {
+        "code": "AIR-GPU-002",
+        "message": "Forbidden type dialect '{dialect}' in '{object}' is not permitted in TritonGPU Track",
+        "hint": "Remove or replace '{object}' before the TritonGPU AnchorIR boundary."
+      },
+      "forbidden_attribute_diagnostic": {
+        "code": "AIR-GPU-003",
+        "message": "Forbidden attribute dialect '{dialect}' in '{object}' is not permitted in TritonGPU Track",
+        "hint": "Remove or replace '{object}' before the TritonGPU AnchorIR boundary."
+      },
+      "enabled_invariants": [
+        "gpu.tensor_encoding",
+        "gpu.module_configuration",
+        "gpu.encoding_rank",
+        "gpu.encoding_components",
+        "gpu.shaped_element_type",
+        "gpu.operation_contract",
+        "gpu.dot_encoding_contract"
+      ],
+      "semantic_diagnostics": {
+        "gpu.tensor_encoding": {
+          "code": "AIR-GPU-010",
+          "message": "TritonGPU shaped object '{object}' used by '{operation}' has no Track-compatible encoding",
+          "hint": "Attach a dialect encoding to the tensor or memdesc before the AnchorIR boundary; builtin attributes are not GPU layouts."
+        },
+        "gpu.module_configuration": {
+          "code": "AIR-GPU-011",
+          "message": "TritonGPU module configuration is missing or invalid at '{object}'",
+          "hint": "Set positive int32-range triton_gpu.num-warps, triton_gpu.threads-per-warp, and triton_gpu.num-ctas values, and make Distributed Encoding warp/thread/CTA products, including wrapped parent layouts, match them."
+        },
+        "gpu.encoding_rank": {
+          "code": "AIR-GPU-012",
+          "message": "TritonGPU encoding rank does not match shaped object '{object}'",
+          "hint": "Match encoding vectors to the tensor rank or ordinary memdesc rank; a staged Shared memdesc may have one leading positive numStages dimension beyond the Shared layout rank, and every Slice dim must be inside its parent rank."
+        },
+        "gpu.encoding_components": {
+          "code": "AIR-GPU-014",
+          "message": "TritonGPU encoding '{object}' has unsafe or unsupported layout components",
+          "hint": "Use a supported tensor element count, positive MemDesc shapes and topology fields, power-of-two Blocked/CTA components where required, a valid CTA split/order, compatible tensor/layout kinds, and an MMA version, rank, warp layout, and instruction shape supported by the pinned backend."
+        },
+        "gpu.shaped_element_type": {
+          "code": "AIR-GPU-015",
+          "message": "TritonGPU shaped object '{object}' has an unsupported element type",
+          "hint": "Use Triton-supported integer or floating-point elements; ranked tensors may also contain !tt.ptr elements, but memdesc elements may not."
+        },
+        "gpu.operation_contract": {
+          "code": "AIR-GPU-016",
+          "message": "Triton operation '{operation}' has an unsafe or incomplete semantic contract",
+          "hint": "Satisfy the operation-specific axis, rank, shape and operand/result cardinality rules; use valid block-pointer metadata, permutation, offsets, boundary dimensions and padding; keep count attributes nonnegative; and provide a registered layout interface when encoding inference is required."
+        },
+        "gpu.dot_encoding_contract": {
+          "code": "AIR-GPU-013",
+          "message": "tt.dot '{operation}' has an incomplete operand/result shape or encoding contract",
+          "hint": "Use layouts accepted by Triton's Dot interface and make A[M,K] * B[K,N], accumulator and result shapes compatible."
+        }
+      }
+    }
+  }
+}
