@@ -32,6 +32,26 @@ def _check_dtype(dtypes: List[str]) -> T:
     return wrapper
 
 
+def _auto_promote_half(fn):
+    """For 1-arg libdevice math ops that require fp32/fp64: instead of rejecting
+    fp16/bf16, promote the input to fp32, call the op, and cast the result back
+    to the original dtype. Matches the manual ``.to(tl.float32)`` pattern kernels
+    use (e.g. softmax) so unmodified kernels work on fp16/bf16 inputs."""
+
+    @wraps(fn)
+    def wrapper(x, _semantic=None):
+        x = _semantic.to_tensor(x)
+        scalar = x.type.scalar
+        if scalar is core.float16 or scalar is core.bfloat16:
+            x = x.to(core.float32, _semantic=_semantic)
+        out = fn(x, _semantic=_semantic)
+        if scalar is core.float16 or scalar is core.bfloat16:
+            out = out.to(scalar, _semantic=_semantic)
+        return out
+
+    return wrapper
+
+
 def _add_math_1arg_docstr(name: str) -> core.Callable[[T], T]:
 
     def _decorator(func: T) -> T:
@@ -94,7 +114,7 @@ def umulhi(x, y, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("exponential")
 @core._tensor_member_fn
 def exp(x, _semantic=None):
@@ -103,7 +123,7 @@ def exp(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("exponential (base 2)")
 @core._tensor_member_fn
 def exp2(x, _semantic=None):
@@ -112,7 +132,7 @@ def exp2(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("natural logarithm")
 @core._tensor_member_fn
 def log(x, _semantic=None):
@@ -121,7 +141,7 @@ def log(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("logarithm (base 2)")
 @core._tensor_member_fn
 def log2(x, _semantic=None):
@@ -130,7 +150,7 @@ def log2(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("cosine")
 @core._tensor_member_fn
 def cos(x, _semantic=None):
@@ -139,7 +159,7 @@ def cos(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("sine")
 @core._tensor_member_fn
 def sin(x, _semantic=None):
@@ -148,7 +168,7 @@ def sin(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("fast square root")
 @core._tensor_member_fn
 def sqrt(x, _semantic=None):
@@ -168,7 +188,7 @@ def sqrt_rn(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("inverse square root")
 @core._tensor_member_fn
 def rsqrt(x, _semantic=None):
@@ -217,7 +237,7 @@ def div_rn(x, y, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("error function")
 @core._tensor_member_fn
 def erf(x, _semantic=None):
@@ -226,7 +246,7 @@ def erf(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("floor")
 @core._tensor_member_fn
 def floor(x, _semantic=None):
@@ -235,7 +255,7 @@ def floor(x, _semantic=None):
 
 
 @core.builtin
-@_check_dtype(dtypes=["fp32", "fp64"])
+@_auto_promote_half
 @_add_math_1arg_docstr("ceil")
 @core._tensor_member_fn
 def ceil(x, _semantic=None):
