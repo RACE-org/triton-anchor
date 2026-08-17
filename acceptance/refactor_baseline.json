@@ -1,0 +1,150 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Behavior-preserving baseline for the BackendPluginRegistry structural refactor.",
+  "source_checkpoint": "893761dc862f5e59f04d4e3b25db54ecff1125c1",
+  "production_baseline": "b85a506656bf58b70e6093e7d48adcd6a2908f64",
+  "scope": {
+    "included": [
+      "discovery",
+      "preflight",
+      "selection",
+      "lifecycle",
+      "reset",
+      "structured_errors",
+      "load_counts",
+      "triton_bridge",
+      "wheel_probes"
+    ],
+    "excluded": [
+      {
+        "id": "T10.2",
+        "reason": "The historical checkpoint contains only pending matrix entries; no kit, command, or fixture exists."
+      },
+      {
+        "id": "protocol_field_evolution_matrix",
+        "reason": "Producer/consumer deprecation and removal testing is an independent feature line."
+      },
+      {
+        "id": "positive_subprocess_contract",
+        "reason": "Positive subprocess execution is an independent feature line; the current fail-closed pre-import rejection remains in scope."
+      },
+      {
+        "id": "production_structure_changes",
+        "reason": "This baseline commit adds and adapts tests only."
+      }
+    ]
+  },
+  "stable_contract": {
+    "selection_precedence": [
+      "python_explicit",
+      "environment",
+      "sole_candidate",
+      "manifest_priority"
+    ],
+    "manifest_lifecycle": [
+      "discovered",
+      "validated",
+      "loaded",
+      "registered",
+      "selected",
+      "active"
+    ],
+    "error_json_fields": [
+      "code",
+      "plugin_id",
+      "entry_point",
+      "field",
+      "expected",
+      "actual",
+      "remediation"
+    ],
+    "load_count_rules": [
+      "discovery and static preflight never import an entry point",
+      "selection loads only the winning entry point",
+      "load, register, initialize, diagnostics, and reset are idempotent at their documented boundary"
+    ],
+    "subprocess_behavior": "reject_before_import_until_a_versioned_IR_contract_exists"
+  },
+  "fast_gate": {
+    "environment": {
+      "PYTHONPATH": "python",
+      "PYTHONDONTWRITEBYTECODE": "1"
+    },
+    "argv": [
+      "{python}",
+      "-m",
+      "pytest",
+      "python/triton_anchor/tests",
+      "-q",
+      "-p",
+      "no:cacheprovider"
+    ],
+    "contract_tests": [
+      "python/triton_anchor/tests/test_backend_registry.py::test_discovery_is_python38_safe_deterministic_and_import_free",
+      "python/triton_anchor/tests/test_backend_registry.py::test_every_declared_version_dimension_rejects_before_import",
+      "python/triton_anchor/tests/test_backend_registry.py::test_subprocess_is_rejected_until_ir_contract_is_versioned",
+      "python/triton_anchor/tests/test_backend_registry.py::test_load_register_diagnostics_and_reset_are_idempotent",
+      "python/triton_anchor/tests/test_backend_registry_selection.py::test_registry_selects_unique_priority_and_loads_only_winner",
+      "python/triton_anchor/tests/test_backend_selection.py::test_python_selector_overrides_environment_and_manifest_priority",
+      "python/triton_anchor/tests/test_backend_selection.py::test_decision_is_independent_of_input_enumeration_order",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_registry_reset_clears_adapter_and_lazy_driver",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_concurrent_reset_invalidates_cached_selection_snapshot",
+      "python/triton_anchor/tests/test_setup_metadata.py::test_setup_preserves_ttgpu_package_data_switch"
+    ]
+  },
+  "slow_gates": [
+    {
+      "id": "ac1_rejection_matrix",
+      "argv": ["{python}", "tools/run_ac1_rejection_matrix.py"],
+      "covers": ["pre_import_rejection", "structured_error_json", "load_count", "native_conflicts", "legacy"]
+    },
+    {
+      "id": "ac2_wheel_coexistence",
+      "argv": ["{python}", "tools/run_ac2_wheel_coexistence.py"],
+      "covers": ["coexistence", "selection_order", "winner_only_load"]
+    },
+    {
+      "id": "ac3_real_compile",
+      "argv": ["{python}", "tools/run_ac3_real_compile.py"],
+      "covers": ["registry_selected_compiler", "real_triton_compile"]
+    }
+  ],
+  "recorded_results": {
+    "recorded_on": "2026-08-17",
+    "environment": {
+      "python": "3.12.3",
+      "platform": "linux_x86_64"
+    },
+    "fast_gate": {
+      "status": "passed",
+      "tests_passed": 242
+    },
+    "ac1_rejection_matrix": {
+      "status": "passed",
+      "artifact_case_count": 33,
+      "artifact_kinds": 11,
+      "operation_boundaries": ["load", "register", "select"],
+      "static_rejection_entry_point_load_calls": 0,
+      "w10_entry_modes": 6,
+      "w12_negative_results": 12
+    },
+    "ac2_wheel_coexistence": {
+      "status": "passed",
+      "fatal_conflict": false,
+      "pre_load_state": "validated",
+      "pre_load_import_calls_per_plugin": 0,
+      "pre_load_entry_point_load_calls_per_plugin": 0,
+      "final_entry_point_load_calls_per_plugin": 1,
+      "selection_method": "sole_candidate"
+    },
+    "ac3_real_compile": {
+      "status": "passed",
+      "compile_called": true,
+      "compile_success": true,
+      "entry_point_load_calls": 1,
+      "selection_method": "python_explicit",
+      "stage_calls": ["ttir", "asm"],
+      "injected_failure_returncode": 1
+    }
+  }
+}

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-anchor-w11-incompatible-backend"
+version = "1.0.0"
+description = "W11 backend rejected by the staged Triton version gate"
+requires-python = ">=3.8"
+
+[project.entry-points."triton.backends"]
+w11_incompatible = "w11_incompatible_backend"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+w11_incompatible_backend = ["triton_anchor_backend.json"]

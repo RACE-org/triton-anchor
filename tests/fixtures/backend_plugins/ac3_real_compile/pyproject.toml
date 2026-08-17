@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-anchor-ac3-real-compile-backend"
+version = "1.0.0"
+description = "AC3 fixture backend proving a Registry-selected plugin enters triton.compile()"
+requires-python = ">=3.8"
+
+[project.entry-points."triton.backends"]
+ac3_real_compile = "ac3_real_compile_backend"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ac3_real_compile_backend = ["triton_anchor_backend.json"]

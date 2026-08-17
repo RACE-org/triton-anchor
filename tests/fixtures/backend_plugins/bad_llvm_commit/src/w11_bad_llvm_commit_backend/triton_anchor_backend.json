@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "plugins": [
+    {
+      "plugin_id": "w11.bad.llvm.commit",
+      "entry_point": "w11_bad_llvm_commit",
+      "backend_protocol": ">=1.0,<2.0",
+      "requires_core": ">=0.2,<0.3",
+      "requires_triton": {
+        "version": ">=3.0,<3.1",
+        "commit": "757b6a61e7df814ba806f498f8bb3160f84b120c"
+      },
+      "requires_llvm_version": ">=19.0,<19.1",
+      "requires_llvm_commit": "0000000000000000000000000000000000000002",
+      "requires_mlir_version": ">=19.0,<19.1",
+      "requires_mlir_commit": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
+      "targets": [
+        "w11_full_mock"
+      ],
+      "isolation_mode": "python_only",
+      "priority": 50
+    }
+  ]
+}

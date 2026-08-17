@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-anchor-w11-bad-mlir-version-backend"
+version = "1.0.0"
+description = "W11 backend rejected by the MLIR version gate"
+requires-python = ">=3.8"
+
+[project.entry-points."triton.backends"]
+w11_bad_mlir_version = "w11_bad_mlir_version_backend"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+w11_bad_mlir_version_backend = ["triton_anchor_backend.json"]

@@ -1,0 +1,47 @@
+"""W11 backend whose malformed Manifest must prevent this import."""
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+TARGET = "w11_mock"
+
+
+@dataclass(frozen=True)
+class W11Target:
+    backend: str = TARGET
+    arch: int = 1
+    warp_size: int = 1
+
+
+class W11MalformedCompiler:
+
+    @classmethod
+    def supports_target(cls, target):
+        return getattr(target, "backend", None) == TARGET
+
+    def __init__(self, target):
+        self.target = target
+
+
+class W11MalformedDriver:
+
+    @classmethod
+    def is_active(cls):
+        return True
+
+    def get_current_target(self):
+        return W11Target()
+
+
+compiler_cls = W11MalformedCompiler
+driver_cls = W11MalformedDriver
+
+marker_dir = os.environ.get("TRITON_ANCHOR_W11_MARKER_DIR")
+if marker_dir:
+    marker = Path(marker_dir) / "malformed.imported"
+    marker.write_text("imported\n", encoding="utf-8")
+raise RuntimeError(
+    "W11 malformed backend reached EntryPoint.load unexpectedly"
+)

@@ -1,0 +1,6 @@
+{
+  global:
+    triton_anchor_w10_native_compatible_symbol;
+  local:
+    *;
+};

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-anchor-w11-malformed-backend"
+version = "1.0.0"
+description = "W11 backend with a required Manifest field missing"
+requires-python = ">=3.8"
+
+[project.entry-points."triton.backends"]
+w11_malformed = "w11_malformed_backend"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+w11_malformed_backend = ["triton_anchor_backend.json"]

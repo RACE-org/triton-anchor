@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "plugins": [
+    {
+      "plugin_id": "w10.native.collision_b",
+      "entry_point": "w10_native_collision_b",
+      "backend_protocol": ">=1.0,<2.0",
+      "requires_core": ">=0.2,<0.3",
+      "requires_triton": {
+        "version": ">=3.0,<3.1",
+        "commit": "757b6a61e7df814ba806f498f8bb3160f84b120c"
+      },
+      "requires_llvm_version": ">=19.0,<19.1",
+      "requires_llvm_commit": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
+      "requires_mlir_version": ">=19.0,<19.1",
+      "requires_mlir_commit": "10dc3a8e916d73291269e5e2b82dd22681489aa1",
+      "targets": [
+        "w10_native_collision"
+      ],
+      "isolation_mode": "native_in_process",
+      "native_libraries": [
+        "w10_native_collision_b/libtriton_anchor_w10_native_collision_b.so"
+      ],
+      "abi_fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "priority": 20
+    }
+  ]
+}

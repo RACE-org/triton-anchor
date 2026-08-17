@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "plugins": [
+    {
+      "plugin_id": "w11.incompatible",
+      "entry_point": "w11_incompatible",
+      "backend_protocol": ">=1.0,<2.0",
+      "requires_triton": {
+        "version": ">=9.0,<10.0"
+      },
+      "targets": [
+        "w11_mock"
+      ],
+      "isolation_mode": "python_only",
+      "priority": 100
+    }
+  ]
+}

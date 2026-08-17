@@ -142,6 +142,13 @@ x86/
 *.map
 *.exp
 
+# Backend registry native-wheel fixtures use linker version scripts named
+# exports.map.  Keep these four source fixtures visible to Git.
+!tests/fixtures/backend_plugins/native_bad_abi/exports.map
+!tests/fixtures/backend_plugins/native_collision_a/exports.map
+!tests/fixtures/backend_plugins/native_collision_b/exports.map
+!tests/fixtures/backend_plugins/native_compatible/exports.map
+
 # Debug files
 *.dSYM/
 *.idb
