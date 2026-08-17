@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
+from ._record_view import SelectionRecordView, project_selection_record
 from .capabilities import (
     CapabilityReport,
     evaluate_plugin_capabilities,
@@ -77,43 +78,6 @@ class SelectionDecision:
         }
 
 
-@dataclass(frozen=True)
-class _RecordView:
-    record: Any = field(repr=False, compare=False)
-    record_id: str
-    registry_key: str
-    plugin_id: Optional[str]
-    entry_point_name: str
-    manifest: Any = field(repr=False, compare=False)
-    is_legacy: bool
-    state: Optional[str]
-    compatibility_status: Optional[str]
-    priority: int
-
-    @property
-    def sort_key(self) -> Tuple[str, str, str, str]:
-        return (
-            self.record_id,
-            self.registry_key,
-            self.plugin_id or "",
-            self.entry_point_name,
-        )
-
-    @property
-    def selector_keys(self) -> Tuple[str, ...]:
-        values = {self.record_id, self.registry_key}
-        if not self.is_legacy and self.plugin_id is not None:
-            values.add(self.plugin_id)
-        return tuple(sorted(values))
-
-
-def _enum_value(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    raw = getattr(value, "value", value)
-    return raw if isinstance(raw, str) else str(raw)
-
-
 def _non_empty_string(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise BackendPluginSelectionError(
@@ -132,116 +96,6 @@ def _non_empty_string(value: Any, field_name: str) -> str:
             remediation=f"Remove surrounding whitespace from {field_name}.",
         )
     return value
-
-
-def _optional_record_string(record: Any, field_name: str) -> Optional[str]:
-    try:
-        value = getattr(record, field_name, None)
-    except Exception as exc:
-        raise BackendPluginSelectionError(
-            f"Backend record field '{field_name}' is unreadable: {exc}",
-            field=field_name,
-            expected="readable record metadata",
-            actual=f"<error: {exc}>",
-            remediation="Repair the discovered backend record before selection.",
-        ) from exc
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise BackendPluginSelectionError(
-            f"Backend record field '{field_name}' must be a non-empty string",
-            field=field_name,
-            expected="a non-empty string",
-            actual=repr(value),
-            remediation="Repair the discovered backend record before selection.",
-        )
-    return value
-
-
-def _project_record(record: Any) -> _RecordView:
-    record_id = _optional_record_string(record, "record_id")
-    if record_id is None:
-        raise BackendPluginSelectionError(
-            "Every backend selection record must have a record_id",
-            field="record_id",
-            expected="a stable non-empty record identifier",
-            actual="<missing>",
-            remediation="Pass records created by BackendPluginRegistry.discover().",
-        )
-
-    try:
-        manifest = getattr(record, "manifest", None)
-        source = _enum_value(getattr(record, "source", None))
-        state = _enum_value(getattr(record, "state", None))
-        compatibility_status = _enum_value(
-            getattr(record, "compatibility_status", None)
-        )
-    except Exception as exc:
-        raise BackendPluginSelectionError(
-            f"Backend record '{record_id}' metadata is unreadable: {exc}",
-            field="record",
-            expected="readable discovery and validation metadata",
-            actual=f"<error: {exc}>",
-            remediation="Repair or rediscover the backend record before selection.",
-        ) from exc
-
-    is_legacy = manifest is None and source == "legacy"
-    plugin_id = (
-        getattr(manifest, "plugin_id", None)
-        if manifest is not None
-        else _optional_record_string(record, "plugin_id")
-    )
-    if plugin_id is not None and (
-        not isinstance(plugin_id, str) or not plugin_id
-    ):
-        raise BackendPluginSelectionError(
-            f"Backend record '{record_id}' has an invalid plugin_id",
-            field="plugin_id",
-            expected="a non-empty string or null for Legacy",
-            actual=repr(plugin_id),
-            remediation="Repair the backend Manifest before selection.",
-        )
-
-    registry_key = _optional_record_string(record, "registry_key")
-    if registry_key is None:
-        registry_key = plugin_id or record_id
-
-    entry_point_name = _optional_record_string(record, "entry_point_name")
-    if entry_point_name is None and manifest is not None:
-        entry_point_name = getattr(manifest, "entry_point", None)
-    if not isinstance(entry_point_name, str) or not entry_point_name:
-        raise BackendPluginSelectionError(
-            f"Backend record '{record_id}' has no entry-point name",
-            field="entry_point_name",
-            expected="a non-empty triton.backends entry-point name",
-            actual=repr(entry_point_name),
-            remediation="Rediscover the backend from valid package metadata.",
-        )
-
-    priority = getattr(manifest, "priority", 0) if manifest is not None else 0
-    if isinstance(priority, bool) or not isinstance(priority, int):
-        raise BackendPluginSelectionError(
-            f"Backend record '{record_id}' has an invalid priority",
-            plugin_id=plugin_id,
-            entry_point=entry_point_name,
-            field="priority",
-            expected="an integer",
-            actual=repr(priority),
-            remediation="Set Manifest priority to an integer.",
-        )
-
-    return _RecordView(
-        record=record,
-        record_id=record_id,
-        registry_key=registry_key,
-        plugin_id=plugin_id,
-        entry_point_name=entry_point_name,
-        manifest=manifest,
-        is_legacy=is_legacy,
-        state=state,
-        compatibility_status=compatibility_status,
-        priority=priority,
-    )
 
 
 def _target_name(target: Any) -> str:
@@ -299,7 +153,9 @@ def _capability_names(
     return tuple(sorted(result))
 
 
-def _manifest_ineligible_reason(view: _RecordView) -> Optional[str]:
+def _manifest_ineligible_reason(
+    view: SelectionRecordView,
+) -> Optional[str]:
     if view.manifest is None:
         return "record has neither a Manifest nor Legacy source metadata"
     if view.state not in _SELECTABLE_MANIFEST_STATES:
@@ -315,7 +171,7 @@ def _manifest_ineligible_reason(view: _RecordView) -> Optional[str]:
     return None
 
 
-def _legacy_ineligible_reason(view: _RecordView) -> Optional[str]:
+def _legacy_ineligible_reason(view: SelectionRecordView) -> Optional[str]:
     if not view.is_legacy:
         return "record has neither a selectable Manifest nor Legacy source"
     if view.state not in {
@@ -335,7 +191,7 @@ def _legacy_ineligible_reason(view: _RecordView) -> Optional[str]:
 
 
 def _capability_report(
-    view: _RecordView,
+    view: SelectionRecordView,
     *,
     core_provided: Tuple[str, ...],
     kernel_required: Tuple[str, ...],
@@ -359,9 +215,9 @@ def _capability_report(
 
 
 def _matching_selector(
-    views: Tuple[_RecordView, ...],
+    views: Tuple[SelectionRecordView, ...],
     selector: str,
-) -> _RecordView:
+) -> SelectionRecordView:
     matches = tuple(
         view for view in views if selector in view.selector_keys
     )
@@ -390,7 +246,7 @@ def _matching_selector(
 
 
 def _selected_view(
-    view: _RecordView,
+    view: SelectionRecordView,
     *,
     target_name: str,
     core_provided: Tuple[str, ...],
@@ -469,7 +325,7 @@ def _selected_view(
 
 
 def _decision(
-    view: _RecordView,
+    view: SelectionRecordView,
     *,
     target_name: str,
     method: SelectionMethod,
@@ -540,7 +396,7 @@ def select_backend(
         ) from exc
 
     views = tuple(
-        sorted((_project_record(record) for record in record_tuple),
+        sorted((project_selection_record(record) for record in record_tuple),
                key=lambda view: view.sort_key)
     )
     target_name = _target_name(target)
@@ -591,7 +447,9 @@ def select_backend(
 
     eligible = []
     reports: Dict[str, CapabilityReport] = {}
-    incompatible_reports: Dict[str, Tuple[_RecordView, CapabilityReport]] = {}
+    incompatible_reports: Dict[
+        str, Tuple[SelectionRecordView, CapabilityReport]
+    ] = {}
     for view in views:
         if view.is_legacy or _manifest_ineligible_reason(view) is not None:
             continue

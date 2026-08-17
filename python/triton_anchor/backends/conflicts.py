@@ -19,8 +19,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+from ._record_view import (
+    ConflictRecordView,
+    conflict_record_sort_key,
+    project_conflict_record,
+)
 from .errors import BackendPluginConflictError
-from .protocol import PluginIsolationMode, PluginLifecycleState
+from .protocol import PluginLifecycleState
 
 
 class ConflictKind(str, Enum):
@@ -139,19 +144,6 @@ class ConflictReport:
             raise self.fatal_conflicts[0].to_error()
 
 
-@dataclass(frozen=True)
-class _RecordView:
-    """Safe immutable projection of a BackendPluginRecord-like object."""
-
-    record_id: str
-    plugin_id: Optional[str]
-    entry_point_name: Optional[str]
-    targets: Tuple[str, ...]
-    active: bool
-    native_identities: Tuple[str, ...]
-    exported_symbols: Tuple[str, ...]
-
-
 _KIND_ORDER = {
     ConflictKind.DUPLICATE_PLUGIN_ID: 0,
     ConflictKind.DUPLICATE_ENTRY_POINT: 1,
@@ -162,101 +154,11 @@ _KIND_ORDER = {
 }
 
 
-def _optional_string(value: Any) -> Optional[str]:
-    return value if isinstance(value, str) and value else None
-
-
-def _project_record(record: Any) -> _RecordView:
-    record_id = _optional_string(getattr(record, "record_id", None))
-    if record_id is None:
-        raise TypeError(
-            "Conflict analysis requires each record to expose a non-empty "
-            "string record_id"
-        )
-
-    plugin_id = _optional_string(getattr(record, "plugin_id", None))
-    entry_point_name = _optional_string(
-        getattr(record, "entry_point_name", None)
-    )
-
-    manifest = getattr(record, "manifest", None)
-    raw_targets = getattr(manifest, "targets", ()) if manifest is not None else ()
-    try:
-        targets = tuple(
-            sorted(
-                {
-                    target
-                    for target in raw_targets
-                    if isinstance(target, str) and target
-                }
-            )
-        )
-    except TypeError as exc:
-        raise TypeError(
-            f"Record '{record_id}' manifest.targets must be iterable"
-        ) from exc
-
-    state = getattr(record, "state", None)
-    active = (
-        state is PluginLifecycleState.ACTIVE
-        or state == PluginLifecycleState.ACTIVE.value
-    )
-
-    native_identities = ()
-    exported_symbols = ()
-    isolation_mode = getattr(manifest, "isolation_mode", None)
-    if (
-        isolation_mode is PluginIsolationMode.NATIVE_IN_PROCESS
-        or isolation_mode == PluginIsolationMode.NATIVE_IN_PROCESS.value
-    ):
-        report = getattr(record, "compatibility_report", None)
-        artifacts = getattr(report, "native_artifacts", ()) if report else ()
-        try:
-            native_identities = tuple(
-                sorted(
-                    {
-                        identity
-                        for identity in (
-                            getattr(artifact, "identity", None)
-                            for artifact in artifacts
-                        )
-                        if isinstance(identity, str) and identity
-                    }
-                )
-            )
-            exported_symbols = tuple(
-                sorted(
-                    {
-                        symbol
-                        for artifact in artifacts
-                        for symbol in getattr(
-                            artifact, "exported_symbols", ()
-                        )
-                        if isinstance(symbol, str) and symbol
-                    }
-                )
-            )
-        except TypeError as exc:
-            raise TypeError(
-                "Validated native artifact reports must expose iterable "
-                "exported_symbols"
-            ) from exc
-    return _RecordView(
-        record_id=record_id,
-        plugin_id=plugin_id,
-        entry_point_name=entry_point_name,
-        targets=targets,
-        active=active,
-        native_identities=native_identities,
-        exported_symbols=exported_symbols,
-    )
-
-
 def _group_by(
-    records: Iterable[_RecordView],
+    records: Iterable[ConflictRecordView],
     attribute: str,
-) -> Mapping[str, List[_RecordView]]:
-    grouped: Dict[str, List[_RecordView]] = {}
+) -> Mapping[str, List[ConflictRecordView]]:
+    grouped: Dict[str, List[ConflictRecordView]] = {}
     for record in records:
         value = getattr(record, attribute)
         if value is not None:
@@ -265,7 +167,7 @@ def _group_by(
 
 
 def _record_metadata(
-    records: Iterable[_RecordView],
+    records: Iterable[ConflictRecordView],
 ) -> Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[str, ...]]:
     records = tuple(records)
     return (
@@ -295,7 +197,7 @@ def _new_conflict(
     kind: ConflictKind,
     severity: ConflictSeverity,
     claim: str,
-    records: Iterable[_RecordView],
+    records: Iterable[ConflictRecordView],
 ) -> Conflict:
     record_ids, plugin_ids, entry_point_names = _record_metadata(records)
     if kind is ConflictKind.DUPLICATE_PLUGIN_ID:
@@ -395,8 +297,12 @@ def detect_conflicts(records: Iterable[Any]) -> ConflictReport:
     ``record_id`` is rejected as malformed input rather than reported as a
     plugin conflict because record IDs are the identities used in diagnostics.
     """
-    views = tuple(sorted((_project_record(record) for record in records),
-                         key=lambda record: record.record_id))
+    views = tuple(
+        sorted(
+            (project_conflict_record(record) for record in records),
+            key=conflict_record_sort_key,
+        )
+    )
     record_ids = [record.record_id for record in views]
     if len(record_ids) != len(set(record_ids)):
         raise ValueError(
@@ -442,8 +348,8 @@ def detect_conflicts(records: Iterable[Any]) -> ConflictReport:
             )
         )
 
-    native_identities: Dict[str, List[_RecordView]] = {}
-    exported_symbols: Dict[str, List[_RecordView]] = {}
+    native_identities: Dict[str, List[ConflictRecordView]] = {}
+    exported_symbols: Dict[str, List[ConflictRecordView]] = {}
     for record in views:
         for identity in record.native_identities:
             native_identities.setdefault(identity, []).append(record)
@@ -470,7 +376,7 @@ def detect_conflicts(records: Iterable[Any]) -> ConflictReport:
                 )
             )
 
-    targets: Dict[str, List[_RecordView]] = {}
+    targets: Dict[str, List[ConflictRecordView]] = {}
     for record in views:
         for target in record.targets:
             targets.setdefault(target, []).append(record)
