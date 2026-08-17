@@ -6,7 +6,6 @@ import importlib.metadata
 import os
 import threading
 from dataclasses import dataclass, field, replace
-from pathlib import PurePosixPath
 from typing import (
     Any,
     Callable,
@@ -24,17 +23,29 @@ from packaging.utils import canonicalize_name
 from .capabilities import (
     CapabilityReport,
     evaluate_capabilities,
-    validate_plugin_capabilities,
 )
-from .compatibility import (
-    CompatibilityReport,
-    validate_backend_plugin,
-    validate_triton_version_requirement,
+from ._registry_discovery import (
+    BACKEND_ENTRY_POINT_GROUP as _BACKEND_ENTRY_POINT_GROUP,
+    allocate_record_id as _allocate_record_id,
+    copy_manifest_error as _copy_manifest_error,
+    discover_distributions as _discover_distributions,
+    distribution_identity as _distribution_identity,
+    entry_point_name as _entry_point_name,
+    entry_point_value as _entry_point_value,
+    record_metadata as _record_metadata,
+    source_hint as _source_hint,
 )
+from ._registry_lifecycle import (
+    best_effort_shutdown as _best_effort_shutdown,
+    ensure_transition as _ensure_transition,
+    inspect_runtime_interfaces as _inspect_runtime_interfaces,
+    load_plugin_object as _load_plugin_object,
+)
+from ._registry_preflight import evaluate_record_preflight
+from .compatibility import CompatibilityReport
 from .conflicts import ConflictReport, detect_conflicts
 from .environment import CoreEnvironment, collect_core_environment
 from .errors import (
-    BackendPluginCapabilityError,
     BackendPluginCompatibilityError,
     BackendPluginConflictError,
     BackendPluginDiscoveryError,
@@ -43,14 +54,9 @@ from .errors import (
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
-    BackendPluginProtocolError,
     BackendPluginSelectionError,
 )
-from .manifest import (
-    MANIFEST_FILENAME,
-    BackendPluginManifest,
-    load_distribution_manifest,
-)
+from .manifest import BackendPluginManifest, load_distribution_manifest
 from .protocol import (
     PluginCompatibilityStatus,
     PluginIsolationMode,
@@ -61,7 +67,6 @@ from .protocol import (
 from .selection import SelectionDecision, select_backend
 
 
-_BACKEND_ENTRY_POINT_GROUP = "triton.backends"
 _PREFLIGHT_PROFILES = {"triton_version", "full"}
 
 
@@ -184,93 +189,6 @@ def _qualified_name(value: Any) -> Optional[str]:
         return "<unreadable>"
 
 
-def _distribution_identity(
-    distribution: Any,
-) -> Tuple[Optional[str], Optional[str]]:
-    try:
-        metadata = getattr(distribution, "metadata", None)
-    except Exception:
-        metadata = None
-    name = None
-    if metadata is not None:
-        try:
-            name = metadata.get("Name")
-        except Exception:
-            name = None
-    if name is None:
-        try:
-            name = getattr(distribution, "name", None)
-        except Exception:
-            name = None
-    try:
-        version = getattr(distribution, "version", None)
-    except Exception:
-        version = None
-
-    try:
-        name_text = str(name) if name is not None else None
-    except Exception:
-        name_text = None
-    try:
-        version_text = str(version) if version is not None else None
-    except Exception:
-        version_text = None
-    return name_text, version_text
-
-
-def _entry_point_name(entry_point: Any) -> str:
-    try:
-        value = getattr(entry_point, "name", "")
-        return str(value) if value is not None else ""
-    except Exception:
-        return ""
-
-
-def _entry_point_value(entry_point: Any) -> str:
-    try:
-        value = getattr(entry_point, "value", None)
-        return str(value) if value is not None else ""
-    except Exception:
-        return ""
-
-
-def _source_hint(distribution: Any) -> Optional[PluginSource]:
-    try:
-        files = getattr(distribution, "files", None)
-    except Exception:
-        return None
-    if files is None:
-        return None
-    try:
-        if any(
-            PurePosixPath(str(item)).name == MANIFEST_FILENAME
-            for item in files
-        ):
-            return PluginSource.MANIFEST
-    except Exception:
-        return None
-    return PluginSource.LEGACY
-
-
-def _copy_manifest_error(
-    error: BackendPluginError,
-    *,
-    entry_point: str,
-    plugin_id: Optional[str] = None,
-) -> BackendPluginManifestError:
-    return BackendPluginManifestError(
-        str(error),
-        plugin_id=plugin_id if plugin_id is not None else error.plugin_id,
-        entry_point=entry_point,
-        detail=error.detail,
-        field=error.field,
-        expected=error.expected,
-        actual=error.actual,
-        remediation=error.remediation
-        or "Fix the installed backend Manifest and reinstall its wheel.",
-    )
-
-
 class BackendPluginRegistry:
     """Discover, inspect, validate, load, and register backend plugins.
 
@@ -386,16 +304,7 @@ class BackendPluginRegistry:
             self._registry_errors += (error,)
 
     def _allocate_record_id(self, distribution_name: Optional[str], name: str) -> str:
-        distribution_key = canonicalize_name(
-            distribution_name or "unknown-distribution"
-        )
-        base = f"{distribution_key}:{name}"
-        candidate = base
-        suffix = 2
-        while candidate in self._records:
-            candidate = f"{base}#{suffix}"
-            suffix += 1
-        return candidate
+        return _allocate_record_id(self._records, distribution_name, name)
 
     def _store_record(
         self,
@@ -408,16 +317,16 @@ class BackendPluginRegistry:
         compatibility_status: PluginCompatibilityStatus,
         error: Optional[BackendPluginError] = None,
     ) -> BackendPluginRecord:
-        distribution_name, distribution_version = _distribution_identity(
-            distribution
-        )
-        name = _entry_point_name(entry_point)
+        metadata = _record_metadata(entry_point, distribution)
         record = BackendPluginRecord(
-            record_id=self._allocate_record_id(distribution_name, name),
-            entry_point_name=name,
-            entry_point_value=_entry_point_value(entry_point),
-            distribution_name=distribution_name,
-            distribution_version=distribution_version,
+            record_id=self._allocate_record_id(
+                metadata.distribution_name,
+                metadata.entry_point_name,
+            ),
+            entry_point_name=metadata.entry_point_name,
+            entry_point_value=metadata.entry_point_value,
+            distribution_name=metadata.distribution_name,
+            distribution_version=metadata.distribution_version,
             source=source,
             state=state,
             compatibility_status=compatibility_status,
@@ -455,199 +364,12 @@ class BackendPluginRegistry:
                 self._registry_errors = (error,)
                 raise error from exc
 
-            candidates = []
-            for distribution in distributions:
-                try:
-                    entry_points = tuple(
-                        entry_point
-                        for entry_point in (
-                            getattr(distribution, "entry_points", ()) or ()
-                        )
-                        if getattr(entry_point, "group", None)
-                        == _BACKEND_ENTRY_POINT_GROUP
-                    )
-                except Exception as exc:
-                    name, _ = _distribution_identity(distribution)
-                    error = BackendPluginDiscoveryError(
-                        "Unable to enumerate distribution entry points: "
-                        f"{name or '<unknown>'}: {exc}",
-                        field="distribution.entry_points",
-                        expected="readable entry-point metadata",
-                        actual=f"<error: {exc}>",
-                        remediation=(
-                            "Reinstall the affected distribution with valid "
-                            "entry-point metadata."
-                        ),
-                    )
-                    self._record_registry_error(error)
-                    continue
-                if not entry_points:
-                    continue
-                name, version = _distribution_identity(distribution)
-                if not name:
-                    error = BackendPluginDiscoveryError(
-                        "Backend distribution has no readable package name",
-                        field="distribution.metadata.Name",
-                        expected="a non-empty installed distribution name",
-                        actual="<unavailable>",
-                        remediation=(
-                            "Reinstall the affected backend with valid "
-                            "distribution metadata."
-                        ),
-                    )
-                    self._record_registry_error(error)
-                    source = _source_hint(distribution)
-                    for entry_point in entry_points:
-                        self._store_record(
-                            entry_point=entry_point,
-                            distribution=distribution,
-                            source=source,
-                            manifest=None,
-                            state=PluginLifecycleState.REJECTED,
-                            compatibility_status=(
-                                PluginCompatibilityStatus.NOT_CHECKED
-                            ),
-                            error=error,
-                        )
-                    continue
-                if any(not _entry_point_name(ep) for ep in entry_points):
-                    error = BackendPluginDiscoveryError(
-                        f"Backend distribution '{name}' has an unreadable "
-                        "entry-point name",
-                        field="entry_point.name",
-                        expected="a non-empty entry-point name",
-                        actual="<unavailable>",
-                        remediation=(
-                            "Reinstall the affected backend with valid "
-                            "entry-point metadata."
-                        ),
-                    )
-                    self._record_registry_error(error)
-                    source = _source_hint(distribution)
-                    for entry_point in entry_points:
-                        self._store_record(
-                            entry_point=entry_point,
-                            distribution=distribution,
-                            source=source,
-                            manifest=None,
-                            state=PluginLifecycleState.REJECTED,
-                            compatibility_status=(
-                                PluginCompatibilityStatus.NOT_CHECKED
-                            ),
-                            error=error,
-                        )
-                    continue
-                candidates.append(
-                    (
-                        (
-                            canonicalize_name(name or "unknown-distribution"),
-                            str(version or ""),
-                            tuple(
-                                sorted(
-                                    (
-                                        _entry_point_name(ep),
-                                        _entry_point_value(ep),
-                                    )
-                                    for ep in entry_points
-                                )
-                            ),
-                        ),
-                        distribution,
-                        entry_points,
-                    )
-                )
-
-            for _, distribution, entry_points in sorted(
-                candidates, key=lambda item: item[0]
-            ):
-                ordered_entry_points = tuple(
-                    sorted(
-                        entry_points,
-                        key=lambda ep: (
-                            _entry_point_name(ep),
-                            _entry_point_value(ep),
-                        )
-                    )
-                )
-                try:
-                    document = load_distribution_manifest(distribution)
-                except BackendPluginError as exc:
-                    source = _source_hint(distribution)
-                    for entry_point in ordered_entry_points:
-                        error = _copy_manifest_error(
-                            exc,
-                            entry_point=_entry_point_name(entry_point),
-                        )
-                        self._store_record(
-                            entry_point=entry_point,
-                            distribution=distribution,
-                            source=source,
-                            manifest=None,
-                            state=PluginLifecycleState.REJECTED,
-                            compatibility_status=(
-                                PluginCompatibilityStatus.NOT_CHECKED
-                            ),
-                            error=error,
-                        )
-                    continue
-                except Exception as exc:
-                    source = _source_hint(distribution)
-                    unexpected = BackendPluginManifestError(
-                        "Unexpected error while reading distribution Manifest: "
-                        f"{exc}",
-                        field="distribution_manifest",
-                        expected="readable, valid static Manifest metadata",
-                        actual=f"<error: {exc}>",
-                        remediation=(
-                            "Repair or reinstall the affected backend "
-                            "distribution; discovery did not import plugin code."
-                        ),
-                    )
-                    for entry_point in ordered_entry_points:
-                        self._store_record(
-                            entry_point=entry_point,
-                            distribution=distribution,
-                            source=source,
-                            manifest=None,
-                            state=PluginLifecycleState.REJECTED,
-                            compatibility_status=(
-                                PluginCompatibilityStatus.NOT_CHECKED
-                            ),
-                            error=_copy_manifest_error(
-                                unexpected,
-                                entry_point=_entry_point_name(entry_point),
-                            ),
-                        )
-                    continue
-
-                if document is None:
-                    for entry_point in ordered_entry_points:
-                        self._store_record(
-                            entry_point=entry_point,
-                            distribution=distribution,
-                            source=PluginSource.LEGACY,
-                            manifest=None,
-                            state=PluginLifecycleState.DISCOVERED,
-                            compatibility_status=(
-                                PluginCompatibilityStatus.LEGACY_UNVERIFIED
-                            ),
-                        )
-                    continue
-
-                manifests = {
-                    plugin.entry_point: plugin for plugin in document.plugins
-                }
-                for entry_point in ordered_entry_points:
-                    manifest = manifests[_entry_point_name(entry_point)]
-                    self._store_record(
-                        entry_point=entry_point,
-                        distribution=distribution,
-                        source=PluginSource.MANIFEST,
-                        manifest=manifest,
-                        state=PluginLifecycleState.DISCOVERED,
-                        compatibility_status=PluginCompatibilityStatus.NOT_CHECKED,
-                    )
-
+            _discover_distributions(
+                distributions,
+                store_record=self._store_record,
+                record_registry_error=self._record_registry_error,
+                load_manifest=load_distribution_manifest,
+            )
             self._discovered = True
             records = self.list()
             if strict:
@@ -837,83 +559,27 @@ class BackendPluginRegistry:
                 PluginCompatibilityStatus.INCOMPATIBLE,
             )
             return self._records[record.record_id]
-
-        try:
-            if self._preflight_profile == "triton_version":
-                if (
-                    record.manifest.isolation_mode
-                    is not PluginIsolationMode.PYTHON_ONLY
-                ):
-                    raise BackendPluginCompatibilityError(
-                        "isolation mode for triton_version profile",
-                        PluginIsolationMode.PYTHON_ONLY.value,
-                        record.manifest.isolation_mode.value,
-                        plugin_id=record.plugin_id,
-                        entry_point=record.entry_point_name,
-                        remediation=(
-                            "The staged W6-W8 profile only admits python_only "
-                            "plugins. Keep native_in_process and subprocess "
-                            "plugins disabled until their ABI or IR-contract "
-                            "validation is enabled."
-                        ),
-                    )
-                report = validate_triton_version_requirement(
-                    record.manifest,
-                    environment,
-                )
-            else:
-                report = validate_backend_plugin(
-                    record.manifest,
-                    environment,
-                    distribution=record.distribution,
-                    core_abi_fingerprint=(
-                        self._core_abi_fingerprint
-                        if self._core_abi_fingerprint is not None
-                        else environment.core_abi_fingerprint
-                    ),
-                    supported_tags=self._supported_tags,
-                )
-            capability_report = validate_plugin_capabilities(
-                record.manifest,
-                core_provided=self._core_capabilities,
-            )
-        except BackendPluginCapabilityError as exc:
-            return self._reject(
-                record, exc, PluginCompatibilityStatus.INCOMPATIBLE
-            )
-        except (BackendPluginCompatibilityError, BackendPluginProtocolError) as exc:
-            if (
-                isinstance(exc, BackendPluginCompatibilityError)
-                and exc.dimension.startswith("wheel platform")
-            ):
+        outcome = evaluate_record_preflight(
+            record,
+            environment,
+            preflight_profile=self._preflight_profile,
+            core_abi_fingerprint=self._core_abi_fingerprint,
+            supported_tags=self._supported_tags,
+            core_capabilities=self._core_capabilities,
+        )
+        if outcome.error is not None:
+            if outcome.reject_distribution:
                 self._reject_manifest_scope(
-                    exc,
-                    PluginCompatibilityStatus.INCOMPATIBLE,
+                    outcome.error,
+                    outcome.compatibility_status,
                     distribution=record.distribution,
-                    specialize_error=True,
+                    specialize_error=outcome.specialize_error,
                 )
                 return self._records[record.record_id]
             return self._reject(
-                record, exc, PluginCompatibilityStatus.INCOMPATIBLE
-            )
-        except BackendPluginError as exc:
-            return self._reject(
-                record, exc, PluginCompatibilityStatus.NOT_CHECKED
-            )
-        except Exception as exc:
-            error = BackendPluginCompatibilityError(
-                "pre-load validation",
-                "all compatibility checks complete without an internal error",
-                f"<error: {exc}>",
-                plugin_id=record.plugin_id,
-                entry_point=record.entry_point_name,
-                remediation=(
-                    "Repair the backend distribution metadata or report this "
-                    "validator failure; the plugin was not imported."
-                ),
-            )
-            return self._reject(
-                record, error, PluginCompatibilityStatus.INCOMPATIBLE
+                record,
+                outcome.error,
+                outcome.compatibility_status,
             )
 
         if not can_transition(
@@ -929,8 +595,8 @@ class BackendPluginRegistry:
                 record,
                 state=PluginLifecycleState.VALIDATED,
                 compatibility_status=PluginCompatibilityStatus.COMPATIBLE,
-                compatibility_report=report,
-                capability_report=capability_report,
+                compatibility_report=outcome.compatibility_report,
+                capability_report=outcome.capability_report,
             )
         )
 
@@ -1016,21 +682,7 @@ class BackendPluginRegistry:
         record: BackendPluginRecord,
         target: PluginLifecycleState,
     ) -> None:
-        source = record.source or PluginSource.MANIFEST
-        if not can_transition(record.state, target, source):
-            raise BackendPluginLifecycleError(
-                f"Invalid backend plugin lifecycle transition: "
-                f"{record.state.value} -> {target.value}",
-                plugin_id=record.plugin_id,
-                entry_point=record.entry_point_name,
-                field="state",
-                expected=target.value,
-                actual=record.state.value,
-                remediation=(
-                    "Use Registry validate/load/register operations in order; "
-                    "do not mutate plugin state directly."
-                ),
-            )
+        _ensure_transition(record, target)
 
     def load(self, identifier: str) -> BackendPluginRecord:
         """Import one plugin only after its applicable pre-load gate passes."""
@@ -1073,8 +725,7 @@ class BackendPluginRegistry:
             self._loading.add(record.record_id)
             try:
                 try:
-                    loaded = record.entry_point.load()
-                    plugin = loaded() if isinstance(loaded, type) else loaded
+                    plugin = _load_plugin_object(record.entry_point)
                 except Exception as exc:
                     error = BackendPluginLoadError(
                         f"Failed to load backend plugin "
@@ -1167,34 +818,24 @@ class BackendPluginRegistry:
             self._registering.add(record.record_id)
             try:
                 plugin = record.plugin_object
-                values: Dict[str, Any] = {}
-                field_errors: Dict[str, str] = {}
-                for name in ("compiler_cls", "driver_cls"):
-                    try:
-                        values[name] = getattr(plugin, name, None)
-                    except Exception as exc:
-                        field_errors[name] = str(exc)
-                missing = tuple(
-                    name for name, value in values.items() if not value
-                )
-                invalid = tuple(
-                    name
-                    for name, value in values.items()
-                    if value is not None and not isinstance(value, type)
-                )
-                if missing or invalid or field_errors:
+                interface = _inspect_runtime_interfaces(plugin)
+                if (
+                    interface.missing_fields
+                    or interface.invalid_fields
+                    or interface.field_errors
+                ):
                     error = BackendPluginInterfaceError(
-                        missing,
-                        invalid_fields=invalid,
-                        field_errors=field_errors,
+                        interface.missing_fields,
+                        invalid_fields=interface.invalid_fields,
+                        field_errors=dict(interface.field_errors),
                         plugin_id=record.plugin_id,
                         entry_point=record.entry_point_name,
                     )
                     self._reject(record, error, record.compatibility_status)
                     raise error
 
-                compiler_cls = values["compiler_cls"]
-                driver_cls = values["driver_cls"]
+                compiler_cls = interface.compiler_cls
+                driver_cls = interface.driver_cls
                 initialized = False
                 if record.source is PluginSource.MANIFEST:
                     try:
@@ -1243,17 +884,7 @@ class BackendPluginRegistry:
                             initializer(initialization_context)
                             initialized = True
                         except Exception as exc:
-                            shutdown_called = False
-                            try:
-                                shutdown = getattr(plugin, "shutdown", None)
-                            except Exception:
-                                shutdown = None
-                            if callable(shutdown):
-                                try:
-                                    shutdown()
-                                    shutdown_called = True
-                                except Exception:
-                                    pass
+                            shutdown_called = _best_effort_shutdown(plugin)
                             current = replace(
                                 self._records.get(record.record_id, record),
                                 shutdown_called=shutdown_called,
