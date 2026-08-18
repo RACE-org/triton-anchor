@@ -92,9 +92,29 @@ def plan_distribution_rejections(
         )
 
 
+def plan_process_rejections(
+    records: Iterable[RejectableRecord],
+    error: BackendPluginError,
+    compatibility_status: PluginCompatibilityStatus,
+) -> Iterator[RecordRejectionPlan]:
+    """Yield ordered updates for the process-wide Manifest validation scope."""
+    for candidate in records:
+        if (
+            candidate.source is not PluginSource.MANIFEST
+            or candidate.state is not PluginLifecycleState.DISCOVERED
+        ):
+            continue
+        yield plan_record_rejection(
+            candidate,
+            error,
+            compatibility_status,
+        )
+
+
 __all__ = [
     "RecordRejectionPlan",
     "RejectableRecord",
     "plan_distribution_rejections",
+    "plan_process_rejections",
     "plan_record_rejection",
 ]

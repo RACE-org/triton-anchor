@@ -53,6 +53,7 @@ from ._registry_preflight import evaluate_record_preflight
 from ._registry_rejections import (
     RecordRejectionPlan as _RecordRejectionPlan,
     plan_distribution_rejections as _plan_distribution_rejections,
+    plan_process_rejections as _plan_process_rejections,
     plan_record_rejection as _plan_record_rejection,
 )
 from ._registry_selection_state import (
@@ -530,6 +531,18 @@ class BackendPluginRegistry:
                 compatibility_status,
             )
 
+    def _reject_process_scope(
+        self,
+        error: BackendPluginError,
+        compatibility_status: PluginCompatibilityStatus,
+    ) -> None:
+        for plan in _plan_process_rejections(
+            self._state.records_snapshot(),
+            error,
+            compatibility_status,
+        ):
+            self._apply_rejection_plan(plan)
+
     def _apply_validation_rejection(
         self,
         record: BackendPluginRecord,
@@ -539,7 +552,7 @@ class BackendPluginRegistry:
         if error is None:
             return record
         if plan.reject_process:
-            self._reject_manifest_scope(
+            self._reject_process_scope(
                 error,
                 plan.compatibility_status,
             )
