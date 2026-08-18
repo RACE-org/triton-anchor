@@ -1,5 +1,6 @@
 """Focused W8 tests for pure, deterministic backend selection."""
 
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -349,6 +350,50 @@ def test_decision_is_independent_of_input_enumeration_order():
     assert forward == reverse
     assert forward.to_dict() == reverse.to_dict()
     assert_never_loaded(low, high)
+
+
+def test_selection_decision_to_dict_has_stable_normalized_shape():
+    plugin = record(
+        "mock",
+        capabilities=("runtime.launch",),
+        priority=3,
+    )
+
+    decision = select_backend(
+        (plugin,),
+        target="mock",
+        kernel_required_capabilities=("runtime.launch",),
+    )
+    payload = decision.to_dict()
+
+    assert payload == {
+        "record_id": "vendor-mock:mock",
+        "registry_key": "vendor.mock",
+        "plugin_id": "vendor.mock",
+        "entry_point": "mock",
+        "target": "mock",
+        "method": "sole_candidate",
+        "selector": None,
+        "priority": 3,
+        "is_legacy": False,
+        "candidate_record_ids": ["vendor-mock:mock"],
+        "capabilities": {
+            "plugin_id": "vendor.mock",
+            "entry_point": "mock",
+            "compatible": True,
+            "core_provided": [],
+            "plugin_provided": ["runtime.launch"],
+            "plugin_required": [],
+            "kernel_required": ["runtime.launch"],
+            "kernel_available": ["runtime.launch"],
+            "missing": [],
+            "missing_for_plugin": [],
+            "missing_for_kernel": [],
+        },
+    }
+    assert "record" not in payload
+    assert json.loads(json.dumps(payload)) == payload
+    assert_never_loaded(plugin)
 
 
 @pytest.mark.parametrize(

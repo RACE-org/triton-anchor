@@ -84,9 +84,19 @@
       "python/triton_anchor/tests/test_backend_registry.py::test_every_declared_version_dimension_rejects_before_import",
       "python/triton_anchor/tests/test_backend_registry.py::test_subprocess_is_rejected_until_ir_contract_is_versioned",
       "python/triton_anchor/tests/test_backend_registry.py::test_load_register_diagnostics_and_reset_are_idempotent",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_entry_point_load_failure_is_terminal_and_structured",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_initialize_failure_rejects_and_runs_best_effort_shutdown",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_diagnostics_failure_is_reported_without_rejecting_plugin",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_shutdown_failure_is_returned_after_registry_state_is_cleared",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_reset_allows_fresh_rediscovery_and_reselection",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_reset_waits_for_load_then_leaves_no_inflight_state",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_reset_waits_for_register_then_leaves_no_inflight_state",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_full_preflight_reports_first_failure_from_multiple_faults",
+      "python/triton_anchor/tests/test_backend_registry_resilience.py::test_backend_plugin_record_to_dict_is_stable_normalized_public_view",
       "python/triton_anchor/tests/test_backend_registry_selection.py::test_registry_selects_unique_priority_and_loads_only_winner",
       "python/triton_anchor/tests/test_backend_selection.py::test_python_selector_overrides_environment_and_manifest_priority",
       "python/triton_anchor/tests/test_backend_selection.py::test_decision_is_independent_of_input_enumeration_order",
+      "python/triton_anchor/tests/test_backend_selection.py::test_selection_decision_to_dict_has_stable_normalized_shape",
       "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_registry_reset_clears_adapter_and_lazy_driver",
       "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_concurrent_reset_invalidates_cached_selection_snapshot",
       "python/triton_anchor/tests/test_setup_metadata.py::test_setup_preserves_ttgpu_package_data_switch"
@@ -110,14 +120,14 @@
     }
   ],
   "recorded_results": {
-    "recorded_on": "2026-08-17",
+    "recorded_on": "2026-08-18",
     "environment": {
       "python": "3.12.3",
       "platform": "linux_x86_64"
     },
     "fast_gate": {
       "status": "passed",
-      "tests_passed": 242
+      "tests_passed": 256
     },
     "ac1_rejection_matrix": {
       "status": "passed",

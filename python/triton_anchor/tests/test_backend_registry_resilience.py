@@ -1,0 +1,518 @@
+"""Failure and reset contracts for behavior-preserving Registry refactors."""
+
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+
+import pytest
+
+from triton_anchor.backends import (
+    BackendPluginCompatibilityError,
+    BackendPluginLifecycleError,
+    BackendPluginLoadError,
+    BackendPluginProtocolError,
+    BackendPluginRegistry,
+    PluginCompatibilityStatus,
+    PluginLifecycleState,
+    SelectionMethod,
+)
+from triton_anchor.tests.test_backend_registry import (
+    DummyCompiler,
+    DummyDriver,
+    FakeDistribution,
+    HookPlugin,
+    RuntimePlugin,
+    SUPPORTED_TAG,
+    VALID_WHEEL,
+    core_environment,
+    make_registry,
+    manifest,
+    plugin_record,
+)
+
+
+ERROR_JSON_FIELDS = {
+    "code",
+    "message",
+    "plugin_id",
+    "entry_point",
+    "detail",
+    "field",
+    "expected",
+    "actual",
+    "remediation",
+}
+
+RECORD_JSON_FIELDS = {
+    "record_id",
+    "registry_key",
+    "plugin_id",
+    "entry_point",
+    "entry_point_value",
+    "distribution_name",
+    "distribution_version",
+    "source",
+    "state",
+    "compatibility_status",
+    "manifest",
+    "compatibility_report",
+    "capability_report",
+    "errors",
+    "loaded",
+    "registered",
+    "compiler_cls",
+    "driver_cls",
+    "initialized",
+    "shutdown_called",
+    "selected_targets",
+}
+
+
+class RaisingEntryPoint:
+    group = "triton.backends"
+
+    def __init__(self, name, error):
+        self.name = name
+        self.value = "vendor_backend." + name
+        self.error = error
+        self.load_calls = 0
+
+    def load(self):
+        self.load_calls += 1
+        raise self.error
+
+
+class BlockingEntryPoint:
+    group = "triton.backends"
+
+    def __init__(self, name, plugin, entered, release):
+        self.name = name
+        self.value = "vendor_backend." + name
+        self.plugin = plugin
+        self.entered = entered
+        self.release = release
+        self.load_calls = 0
+
+    def load(self):
+        self.load_calls += 1
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("load test barrier timed out")
+        return self.plugin
+
+
+class FailingInitializePlugin(RuntimePlugin):
+    def __init__(self):
+        self.initialize_calls = 0
+        self.shutdown_calls = 0
+
+    def initialize(self, context):
+        self.initialize_calls += 1
+        raise RuntimeError("initialize failed")
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+
+class FailingDiagnosticsPlugin(RuntimePlugin):
+    def __init__(self):
+        self.diagnostic_calls = 0
+
+    def diagnostics(self):
+        self.diagnostic_calls += 1
+        raise RuntimeError("diagnostics failed")
+
+
+class FailingShutdownPlugin(RuntimePlugin):
+    def __init__(self):
+        self.shutdown_calls = 0
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+        raise RuntimeError("shutdown failed")
+
+
+class BlockingInitializePlugin(RuntimePlugin):
+    def __init__(self, entered, release):
+        self.entered = entered
+        self.release = release
+        self.initialize_calls = 0
+        self.shutdown_calls = 0
+
+    def initialize(self, context):
+        self.initialize_calls += 1
+        self.entered.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("initialize test barrier timed out")
+
+    def shutdown(self):
+        self.shutdown_calls += 1
+
+
+def distribution_for_plugin(tmp_path, plugin):
+    return FakeDistribution(
+        tmp_path,
+        manifest=manifest(plugin_record()),
+        entry_points=(("mock", plugin),),
+    )
+
+
+def assert_structured_error(payload, *, code, field):
+    assert set(payload) == ERROR_JSON_FIELDS
+    assert payload["code"] == code
+    assert payload["field"] == field
+    assert payload["plugin_id"] == "vendor.mock"
+    assert payload["entry_point"] == "mock"
+    assert isinstance(payload["message"], str) and payload["message"]
+    assert payload["expected"]
+    assert payload["actual"]
+    assert payload["remediation"]
+
+
+def test_entry_point_load_failure_is_terminal_and_structured(tmp_path):
+    distribution = distribution_for_plugin(tmp_path, RuntimePlugin())
+    load_error = RuntimeError("entry point failed")
+    entry_point = RaisingEntryPoint("mock", load_error)
+    distribution.entry_points = [entry_point]
+    registry = make_registry((distribution,))
+    discovered = registry.discover()[0]
+
+    with pytest.raises(BackendPluginLoadError) as caught:
+        registry.load(discovered.registry_key)
+
+    rejected = registry.inspect(discovered.record_id)
+    payload = caught.value.to_dict()
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.COMPATIBLE
+    )
+    assert rejected.to_dict()["errors"] == [payload]
+    assert_structured_error(
+        payload,
+        code="backend_plugin_load_error",
+        field="entry_point.load",
+    )
+
+    with pytest.raises(BackendPluginLoadError):
+        registry.load(discovered.record_id)
+    assert entry_point.load_calls == 1
+
+
+def test_initialize_failure_rejects_and_runs_best_effort_shutdown(tmp_path):
+    plugin = FailingInitializePlugin()
+    distribution = distribution_for_plugin(tmp_path, plugin)
+    registry = make_registry((distribution,))
+    discovered = registry.discover()[0]
+
+    with pytest.raises(BackendPluginLifecycleError) as caught:
+        registry.register(discovered.registry_key)
+
+    rejected = registry.inspect(discovered.record_id)
+    payload = caught.value.to_dict()
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert rejected.initialized is False
+    assert rejected.shutdown_called is True
+    assert plugin.initialize_calls == 1
+    assert plugin.shutdown_calls == 1
+    assert distribution.entry_points[0].load_calls == 1
+    assert_structured_error(
+        payload,
+        code="backend_plugin_lifecycle_error",
+        field="initialize",
+    )
+
+    with pytest.raises(BackendPluginLifecycleError):
+        registry.register(discovered.record_id)
+    assert plugin.initialize_calls == 1
+    assert plugin.shutdown_calls == 1
+
+
+def test_diagnostics_failure_is_reported_without_rejecting_plugin(tmp_path):
+    plugin = FailingDiagnosticsPlugin()
+    distribution = distribution_for_plugin(tmp_path, plugin)
+    registry = make_registry((distribution,))
+    registered = registry.register(registry.discover()[0].registry_key)
+
+    result = registry.diagnostics(registered.record_id)
+
+    payload = result["plugin_diagnostics"]["error"]
+    assert_structured_error(
+        payload,
+        code="backend_plugin_lifecycle_error",
+        field="diagnostics",
+    )
+    assert registry.inspect(registered.record_id).state is (
+        PluginLifecycleState.REGISTERED
+    )
+    assert plugin.diagnostic_calls == 1
+    assert distribution.entry_points[0].load_calls == 1
+
+
+def test_shutdown_failure_is_returned_after_registry_state_is_cleared(
+    tmp_path,
+):
+    plugin = FailingShutdownPlugin()
+    distribution = distribution_for_plugin(tmp_path, plugin)
+    registry = make_registry((distribution,))
+    registry.register(registry.discover()[0].registry_key)
+
+    errors = registry.reset()
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], BackendPluginLifecycleError)
+    assert_structured_error(
+        errors[0].to_dict(),
+        code="backend_plugin_lifecycle_error",
+        field="shutdown",
+    )
+    assert plugin.shutdown_calls == 1
+    assert registry.get_selection("mock") is None
+    assert registry.discover()[0].state is PluginLifecycleState.DISCOVERED
+    assert registry.reset() == ()
+    assert plugin.shutdown_calls == 1
+
+
+def test_reset_allows_fresh_rediscovery_and_reselection(tmp_path):
+    plugin = HookPlugin()
+    distribution = distribution_for_plugin(tmp_path, plugin)
+    provider_calls = 0
+
+    def distribution_provider():
+        nonlocal provider_calls
+        provider_calls += 1
+        return (distribution,)
+
+    registry = BackendPluginRegistry(
+        distribution_provider=distribution_provider,
+        environment_provider=core_environment,
+        supported_tags=(SUPPORTED_TAG,),
+        preflight_profile="full",
+    )
+
+    first = registry.select("mock", environment={})
+    assert first.method is SelectionMethod.SOLE_CANDIDATE
+    assert registry.reset() == ()
+    assert registry.get_selection("mock") is None
+
+    rediscovered = registry.discover()[0]
+    assert rediscovered.state is PluginLifecycleState.DISCOVERED
+    second = registry.select("mock", environment={})
+
+    assert second.method is SelectionMethod.SOLE_CANDIDATE
+    assert second.record.state is PluginLifecycleState.SELECTED
+    assert provider_calls == 2
+    assert distribution.entry_points[0].load_calls == 2
+    assert len(plugin.initialize_calls) == 2
+    assert plugin.shutdown_calls == 1
+    assert registry.reset() == ()
+    assert plugin.shutdown_calls == 2
+
+
+def test_reset_waits_for_load_then_leaves_no_inflight_state(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    distribution = distribution_for_plugin(tmp_path, RuntimePlugin())
+    entry_point = BlockingEntryPoint(
+        "mock",
+        RuntimePlugin(),
+        entered,
+        release,
+    )
+    distribution.entry_points = [entry_point]
+    registry = make_registry((distribution,))
+    discovered = registry.discover()[0]
+    reset_started = threading.Event()
+
+    def reset_registry():
+        reset_started.set()
+        return registry.reset()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        load_future = executor.submit(registry.load, discovered.registry_key)
+        reset_future = None
+        try:
+            assert entered.wait(timeout=5)
+            reset_future = executor.submit(reset_registry)
+            assert reset_started.wait(timeout=5)
+            assert not reset_future.done()
+        finally:
+            release.set()
+        loaded = load_future.result(timeout=5)
+        assert reset_future is not None
+        reset_errors = reset_future.result(timeout=5)
+
+    assert loaded.state is PluginLifecycleState.LOADED
+    assert reset_errors == ()
+    rediscovered = registry.discover()[0]
+    assert rediscovered.state is PluginLifecycleState.DISCOVERED
+    assert registry.load(rediscovered.registry_key).state is (
+        PluginLifecycleState.LOADED
+    )
+    assert entry_point.load_calls == 2
+    assert registry.reset() == ()
+
+
+def test_reset_waits_for_register_then_leaves_no_inflight_state(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    plugin = BlockingInitializePlugin(entered, release)
+    distribution = distribution_for_plugin(tmp_path, plugin)
+    registry = make_registry((distribution,))
+    discovered = registry.discover()[0]
+    reset_started = threading.Event()
+
+    def reset_registry():
+        reset_started.set()
+        return registry.reset()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        register_future = executor.submit(
+            registry.register,
+            discovered.registry_key,
+        )
+        reset_future = None
+        try:
+            assert entered.wait(timeout=5)
+            reset_future = executor.submit(reset_registry)
+            assert reset_started.wait(timeout=5)
+            assert not reset_future.done()
+        finally:
+            release.set()
+        registered = register_future.result(timeout=5)
+        assert reset_future is not None
+        reset_errors = reset_future.result(timeout=5)
+
+    assert registered.state is PluginLifecycleState.REGISTERED
+    assert reset_errors == ()
+    assert plugin.shutdown_calls == 1
+    rediscovered = registry.discover()[0]
+    assert rediscovered.state is PluginLifecycleState.DISCOVERED
+    assert registry.register(rediscovered.registry_key).state is (
+        PluginLifecycleState.REGISTERED
+    )
+    assert distribution.entry_points[0].load_calls == 2
+    assert plugin.initialize_calls == 2
+    assert registry.reset() == ()
+    assert plugin.shutdown_calls == 2
+
+
+@pytest.mark.parametrize(
+    "first_failure,error_type,expected_field",
+    [
+        (
+            "wheel",
+            BackendPluginCompatibilityError,
+            "wheel platform tag",
+        ),
+        (
+            "provenance",
+            BackendPluginCompatibilityError,
+            "Core build provenance",
+        ),
+        ("protocol", BackendPluginProtocolError, "backend_protocol"),
+        (
+            "core",
+            BackendPluginCompatibilityError,
+            "triton-anchor Core version",
+        ),
+        (
+            "triton",
+            BackendPluginCompatibilityError,
+            "Triton version",
+        ),
+    ],
+)
+def test_full_preflight_reports_first_failure_from_multiple_faults(
+    tmp_path,
+    first_failure,
+    error_type,
+    expected_field,
+):
+    declaration = plugin_record(
+        backend_protocol=">=2.0,<3.0",
+        requires_core=">=9.0",
+        requires_triton={"version": ">=9.0"},
+        requires_llvm_version=">=20.0",
+    )
+    environment = core_environment()
+    wheel_text = VALID_WHEEL
+    if first_failure == "wheel":
+        wheel_text = (
+            "Wheel-Version: 1.0\n"
+            "Root-Is-Purelib: true\n"
+            "Tag: cp39-cp39-win_amd64\n"
+        )
+    elif first_failure == "provenance":
+        environment = replace(environment, build_info_generated=False)
+    elif first_failure == "core":
+        declaration["backend_protocol"] = ">=1.0,<2.0"
+    elif first_failure == "triton":
+        declaration["backend_protocol"] = ">=1.0,<2.0"
+        declaration["requires_core"] = ">=0.2,<0.3"
+
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(declaration),
+        wheel_text=wheel_text,
+    )
+    registry = make_registry((distribution,), environment=environment)
+    discovered = registry.discover()[0]
+
+    with pytest.raises(error_type) as caught:
+        registry.load(discovered.registry_key)
+
+    rejected = registry.inspect(discovered.record_id)
+    assert caught.value.to_dict()["field"] == expected_field
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.INCOMPATIBLE
+    )
+    assert distribution.entry_points[0].load_calls == 0
+
+
+def test_backend_plugin_record_to_dict_is_stable_normalized_public_view(
+    tmp_path,
+):
+    plugin = HookPlugin()
+    distribution = distribution_for_plugin(tmp_path, plugin)
+    registry = make_registry((distribution,))
+
+    discovered = registry.discover()[0].to_dict()
+
+    assert set(discovered) == RECORD_JSON_FIELDS
+    assert discovered["source"] == "manifest"
+    assert discovered["state"] == "discovered"
+    assert discovered["compatibility_status"] == "not_checked"
+    assert discovered["manifest"] == {
+        "plugin_id": "vendor.mock",
+        "entry_point": "mock",
+        "backend_protocol": ">=1.0,<2.0",
+        "targets": ["mock"],
+        "capabilities": [],
+        "requires_capabilities": [],
+        "isolation_mode": "python_only",
+        "priority": 0,
+    }
+    assert discovered["errors"] == []
+    assert discovered["loaded"] is False
+    assert discovered["registered"] is False
+    assert discovered["selected_targets"] == []
+    assert json.loads(json.dumps(discovered)) == discovered
+
+    registered = registry.register(discovered["registry_key"]).to_dict()
+
+    assert set(registered) == RECORD_JSON_FIELDS
+    assert registered["state"] == "registered"
+    assert registered["compatibility_status"] == "compatible"
+    assert registered["loaded"] is True
+    assert registered["registered"] is True
+    assert registered["initialized"] is True
+    assert registered["compiler_cls"].endswith(DummyCompiler.__name__)
+    assert registered["driver_cls"].endswith(DummyDriver.__name__)
+    assert registered["selected_targets"] == []
+    assert json.loads(json.dumps(registered)) == registered
