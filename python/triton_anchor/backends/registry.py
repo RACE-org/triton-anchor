@@ -52,6 +52,7 @@ from ._registry_lifecycle_selection import (
 from ._registry_preflight import evaluate_record_preflight
 from ._registry_rejections import (
     RecordRejectionPlan as _RecordRejectionPlan,
+    plan_conflict_rejection as _plan_conflict_rejection,
     plan_distribution_rejections as _plan_distribution_rejections,
     plan_process_rejections as _plan_process_rejections,
     plan_record_rejection as _plan_record_rejection,
@@ -467,15 +468,9 @@ class BackendPluginRegistry:
         """Mark every record involved in one fatal conflict REJECTED."""
         for conflicted_id in conflict.record_ids:
             conflicted = self._state.get_record(conflicted_id)
-            if (
-                conflicted is not None
-                and conflicted.state is not PluginLifecycleState.REJECTED
-            ):
-                self._reject(
-                    conflicted,
-                    error,
-                    conflicted.compatibility_status,
-                )
+            plan = _plan_conflict_rejection(conflicted, error)
+            if plan is not None:
+                self._apply_rejection_plan(plan)
 
     def _reject_all_fatal_conflicts(self, records) -> None:
         """Mark every record in any fatal static conflict REJECTED."""

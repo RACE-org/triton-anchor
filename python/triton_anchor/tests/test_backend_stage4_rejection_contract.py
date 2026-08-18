@@ -5,7 +5,10 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 import triton_anchor.backends.registry as registry_module
-from triton_anchor.backends._registry_rejections import plan_record_rejection
+from triton_anchor.backends._registry_rejections import (
+    plan_conflict_rejection,
+    plan_record_rejection,
+)
 from triton_anchor.backends import (
     BackendPluginCompatibilityError,
     BackendPluginConflictError,
@@ -360,6 +363,44 @@ def test_multi_conflict_keeps_only_first_kind_error_and_preserves_status(
         registry.select("same", environment={})
     assert all(len(record.errors) == 1 for record in registry.list())
     assert _entry_point_load_count(first, second) == 0
+
+
+def test_conflict_rejection_plan_preserves_status_and_skips_terminal_records(
+    tmp_path,
+):
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(plugin_record()),
+    )
+    registry = make_registry((distribution,))
+    record = replace(
+        registry.discover()[0],
+        compatibility_status=PluginCompatibilityStatus.COMPATIBLE,
+    )
+    error = BackendPluginConflictError(
+        "planned conflict",
+        plugin_id=record.plugin_id,
+        entry_point=record.entry_point_name,
+    )
+
+    plan = plan_conflict_rejection(record, error)
+
+    assert plan is not None
+    assert plan.record is record
+    assert plan.error is error
+    assert plan.compatibility_status is PluginCompatibilityStatus.COMPATIBLE
+    assert plan_conflict_rejection(None, error) is None
+    assert (
+        plan_conflict_rejection(
+            replace(record, state=PluginLifecycleState.REJECTED),
+            error,
+        )
+        is None
+    )
+    assert registry.inspect(record.record_id).state is (
+        PluginLifecycleState.DISCOVERED
+    )
+    assert _entry_point_load_count(distribution) == 0
 
 
 def test_validate_strict_finishes_snapshot_then_raises_first_record_error(

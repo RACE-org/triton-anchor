@@ -27,6 +27,7 @@ class RejectableRecord(Protocol):
     state: PluginLifecycleState
     distribution: object
     entry_point_name: str
+    compatibility_status: PluginCompatibilityStatus
 
     @property
     def plugin_id(self) -> Optional[str]: ...
@@ -111,9 +112,24 @@ def plan_process_rejections(
         )
 
 
+def plan_conflict_rejection(
+    record: Optional[RejectableRecord],
+    error: BackendPluginError,
+) -> Optional[RecordRejectionPlan]:
+    """Plan one conflict rejection without re-reading Registry state."""
+    if record is None or record.state is PluginLifecycleState.REJECTED:
+        return None
+    return plan_record_rejection(
+        record,
+        error,
+        record.compatibility_status,
+    )
+
+
 __all__ = [
     "RecordRejectionPlan",
     "RejectableRecord",
+    "plan_conflict_rejection",
     "plan_distribution_rejections",
     "plan_process_rejections",
     "plan_record_rejection",
