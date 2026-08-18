@@ -15,8 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Container, Optional, Tuple
 
+# Kept in this internal module namespace for compatibility with the frozen
+# Stage 4 baseline; record-ID normalization now delegates to the leaf helper.
 from packaging.utils import canonicalize_name
 
+from . import _registry_identity as _identity
 from ._registry_state import RegistryState
 from .conflicts import ConflictReport, detect_conflicts
 from .errors import (
@@ -46,53 +49,17 @@ def distribution_identity(
     distribution: Any,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Read a distribution identity without importing plugin code."""
-    try:
-        metadata = getattr(distribution, "metadata", None)
-    except Exception:
-        metadata = None
-    name = None
-    if metadata is not None:
-        try:
-            name = metadata.get("Name")
-        except Exception:
-            name = None
-    if name is None:
-        try:
-            name = getattr(distribution, "name", None)
-        except Exception:
-            name = None
-    try:
-        version = getattr(distribution, "version", None)
-    except Exception:
-        version = None
-
-    try:
-        name_text = str(name) if name is not None else None
-    except Exception:
-        name_text = None
-    try:
-        version_text = str(version) if version is not None else None
-    except Exception:
-        version_text = None
-    return name_text, version_text
+    return _identity.distribution_identity(distribution)
 
 
 def entry_point_name(entry_point: Any) -> str:
     """Read and normalize an entry-point name defensively."""
-    try:
-        value = getattr(entry_point, "name", "")
-        return str(value) if value is not None else ""
-    except Exception:
-        return ""
+    return _identity.entry_point_name(entry_point)
 
 
 def entry_point_value(entry_point: Any) -> str:
     """Read and normalize an entry-point value defensively."""
-    try:
-        value = getattr(entry_point, "value", None)
-        return str(value) if value is not None else ""
-    except Exception:
-        return ""
+    return _identity.entry_point_value(entry_point)
 
 
 def record_metadata(
@@ -117,16 +84,12 @@ def allocate_record_id(
     entry_point: str,
 ) -> str:
     """Allocate the historical deterministic Registry record identity."""
-    distribution_key = canonicalize_name(
-        distribution_name or "unknown-distribution"
+    return _identity._allocate_record_id(
+        existing_ids,
+        distribution_name,
+        entry_point,
+        canonicalizer=canonicalize_name,
     )
-    base = f"{distribution_key}:{entry_point}"
-    candidate = base
-    suffix = 2
-    while candidate in existing_ids:
-        candidate = f"{base}#{suffix}"
-        suffix += 1
-    return candidate
 
 
 RecordFactory = Callable[..., Any]

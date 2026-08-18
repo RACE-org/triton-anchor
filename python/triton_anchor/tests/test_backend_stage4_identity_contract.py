@@ -288,6 +288,22 @@ def test_record_ids_canonicalize_and_ignore_version_value_and_plugin_id():
     )
 
 
+def test_catalog_record_id_allocator_uses_legacy_canonicalizer_binding(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        catalog_module,
+        "canonicalize_name",
+        lambda value: "patched-" + value,
+    )
+
+    assert catalog_module.allocate_record_id(
+        set(),
+        "Vendor_Backend",
+        "mock",
+    ) == "patched-Vendor_Backend:mock"
+
+
 def test_catalog_acceptance_preserves_original_object_identity():
     _, catalog = _catalog()
     distribution = _distribution()
