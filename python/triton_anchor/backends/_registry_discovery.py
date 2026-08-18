@@ -7,11 +7,19 @@ the callback supplied by that Registry.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, Callable, Container, Iterable, Optional, Tuple
+from typing import Any, Callable, Iterable, Optional
 
 from packaging.utils import canonicalize_name
+
+from ._registry_catalog import (
+    DiscoveryRecordMetadata,
+    allocate_record_id,
+    distribution_identity,
+    entry_point_name,
+    entry_point_value,
+    record_metadata,
+)
 
 from .errors import (
     BackendPluginDiscoveryError,
@@ -31,66 +39,6 @@ from .protocol import (
 
 
 BACKEND_ENTRY_POINT_GROUP = "triton.backends"
-
-
-@dataclass(frozen=True)
-class DiscoveryRecordMetadata:
-    """Normalized metadata used to construct one Registry record."""
-
-    entry_point_name: str
-    entry_point_value: str
-    distribution_name: Optional[str]
-    distribution_version: Optional[str]
-
-
-def distribution_identity(
-    distribution: Any,
-) -> Tuple[Optional[str], Optional[str]]:
-    try:
-        metadata = getattr(distribution, "metadata", None)
-    except Exception:
-        metadata = None
-    name = None
-    if metadata is not None:
-        try:
-            name = metadata.get("Name")
-        except Exception:
-            name = None
-    if name is None:
-        try:
-            name = getattr(distribution, "name", None)
-        except Exception:
-            name = None
-    try:
-        version = getattr(distribution, "version", None)
-    except Exception:
-        version = None
-
-    try:
-        name_text = str(name) if name is not None else None
-    except Exception:
-        name_text = None
-    try:
-        version_text = str(version) if version is not None else None
-    except Exception:
-        version_text = None
-    return name_text, version_text
-
-
-def entry_point_name(entry_point: Any) -> str:
-    try:
-        value = getattr(entry_point, "name", "")
-        return str(value) if value is not None else ""
-    except Exception:
-        return ""
-
-
-def entry_point_value(entry_point: Any) -> str:
-    try:
-        value = getattr(entry_point, "value", None)
-        return str(value) if value is not None else ""
-    except Exception:
-        return ""
 
 
 def source_hint(distribution: Any) -> Optional[PluginSource]:
@@ -128,38 +76,6 @@ def copy_manifest_error(
         remediation=error.remediation
         or "Fix the installed backend Manifest and reinstall its wheel.",
     )
-
-
-def record_metadata(
-    entry_point: Any,
-    distribution: Any,
-) -> DiscoveryRecordMetadata:
-    distribution_name, distribution_version = distribution_identity(
-        distribution
-    )
-    return DiscoveryRecordMetadata(
-        entry_point_name=entry_point_name(entry_point),
-        entry_point_value=entry_point_value(entry_point),
-        distribution_name=distribution_name,
-        distribution_version=distribution_version,
-    )
-
-
-def allocate_record_id(
-    existing_ids: Container[str],
-    distribution_name: Optional[str],
-    entry_point: str,
-) -> str:
-    distribution_key = canonicalize_name(
-        distribution_name or "unknown-distribution"
-    )
-    base = f"{distribution_key}:{entry_point}"
-    candidate = base
-    suffix = 2
-    while candidate in existing_ids:
-        candidate = f"{base}#{suffix}"
-        suffix += 1
-    return candidate
 
 
 StoreRecord = Callable[..., Any]
