@@ -8,10 +8,14 @@ order inside its existing ``RLock`` boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, Tuple
+from typing import Iterable, Iterator, Optional, Protocol, Tuple
 
-from .errors import BackendPluginError
-from .protocol import PluginCompatibilityStatus
+from .errors import BackendPluginCompatibilityError, BackendPluginError
+from .protocol import (
+    PluginCompatibilityStatus,
+    PluginLifecycleState,
+    PluginSource,
+)
 
 
 class RejectableRecord(Protocol):
@@ -19,6 +23,13 @@ class RejectableRecord(Protocol):
 
     record_id: str
     errors: Tuple[BackendPluginError, ...]
+    source: Optional[PluginSource]
+    state: PluginLifecycleState
+    distribution: object
+    entry_point_name: str
+
+    @property
+    def plugin_id(self) -> Optional[str]: ...
 
 
 @dataclass(frozen=True)
@@ -45,8 +56,45 @@ def plan_record_rejection(
     )
 
 
+def plan_distribution_rejections(
+    records: Iterable[RejectableRecord],
+    error: BackendPluginError,
+    compatibility_status: PluginCompatibilityStatus,
+    *,
+    distribution: object,
+    specialize_error: bool,
+) -> Iterator[RecordRejectionPlan]:
+    """Yield ordered updates for one exact distribution identity."""
+    for candidate in records:
+        if (
+            candidate.source is not PluginSource.MANIFEST
+            or candidate.state is not PluginLifecycleState.DISCOVERED
+            or candidate.distribution is not distribution
+        ):
+            continue
+        candidate_error = error
+        if (
+            specialize_error
+            and isinstance(error, BackendPluginCompatibilityError)
+        ):
+            candidate_error = BackendPluginCompatibilityError(
+                error.dimension,
+                error.expected,
+                error.actual,
+                plugin_id=candidate.plugin_id,
+                entry_point=candidate.entry_point_name,
+                remediation=error.remediation,
+            )
+        yield plan_record_rejection(
+            candidate,
+            candidate_error,
+            compatibility_status,
+        )
+
+
 __all__ = [
     "RecordRejectionPlan",
     "RejectableRecord",
+    "plan_distribution_rejections",
     "plan_record_rejection",
 ]

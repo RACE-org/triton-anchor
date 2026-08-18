@@ -52,6 +52,7 @@ from ._registry_lifecycle_selection import (
 from ._registry_preflight import evaluate_record_preflight
 from ._registry_rejections import (
     RecordRejectionPlan as _RecordRejectionPlan,
+    plan_distribution_rejections as _plan_distribution_rejections,
     plan_record_rejection as _plan_record_rejection,
 )
 from ._registry_selection_state import (
@@ -489,6 +490,17 @@ class BackendPluginRegistry:
         specialize_error: bool = False,
     ) -> None:
         """Fail closed for one shared validation scope without importing."""
+        if distribution is not None:
+            for plan in _plan_distribution_rejections(
+                self._state.records_snapshot(),
+                error,
+                compatibility_status,
+                distribution=distribution,
+                specialize_error=specialize_error,
+            ):
+                self._apply_rejection_plan(plan)
+            return
+
         for candidate in self._state.records_snapshot():
             if (
                 candidate.source is not PluginSource.MANIFEST
