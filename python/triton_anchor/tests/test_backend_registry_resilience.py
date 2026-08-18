@@ -2,7 +2,6 @@
 
 import json
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
@@ -170,6 +169,25 @@ def assert_structured_error(payload, *, code, field):
     assert payload["remediation"]
 
 
+def start_daemon_call(function, *, name):
+    """Run one potentially blocking call without letting a deadlock hang pytest."""
+    results = []
+    errors = []
+    completed = threading.Event()
+
+    def invoke():
+        try:
+            results.append(function())
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            completed.set()
+
+    thread = threading.Thread(target=invoke, name=name, daemon=True)
+    thread.start()
+    return thread, completed, results, errors
+
+
 def test_entry_point_load_failure_is_terminal_and_structured(tmp_path):
     distribution = distribution_for_plugin(tmp_path, RuntimePlugin())
     load_error = RuntimeError("entry point failed")
@@ -331,19 +349,34 @@ def test_reset_waits_for_load_then_leaves_no_inflight_state(tmp_path):
         reset_started.set()
         return registry.reset()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        load_future = executor.submit(registry.load, discovered.registry_key)
-        reset_future = None
-        try:
-            assert entered.wait(timeout=5)
-            reset_future = executor.submit(reset_registry)
-            assert reset_started.wait(timeout=5)
-            assert not reset_future.done()
-        finally:
-            release.set()
-        loaded = load_future.result(timeout=5)
-        assert reset_future is not None
-        reset_errors = reset_future.result(timeout=5)
+    load_thread, load_done, load_results, load_errors = start_daemon_call(
+        lambda: registry.load(discovered.registry_key),
+        name="registry-load",
+    )
+    assert entered.wait(timeout=5)
+    reset_thread, reset_done, reset_results, reset_failures = (
+        start_daemon_call(reset_registry, name="registry-reset-after-load")
+    )
+    try:
+        assert reset_started.wait(timeout=5)
+        # Waiting on the Event yields execution to the reset thread.  It must
+        # remain blocked until the in-lock entry-point callback is released.
+        assert not reset_done.wait(timeout=0.25)
+    finally:
+        release.set()
+
+    assert load_done.wait(timeout=5)
+    assert reset_done.wait(timeout=5)
+    load_thread.join(timeout=1)
+    reset_thread.join(timeout=1)
+    assert not load_thread.is_alive()
+    assert not reset_thread.is_alive()
+    assert load_errors == []
+    assert reset_failures == []
+    assert len(load_results) == 1
+    assert len(reset_results) == 1
+    loaded = load_results[0]
+    reset_errors = reset_results[0]
 
     assert loaded.state is PluginLifecycleState.LOADED
     assert reset_errors == ()
@@ -369,22 +402,35 @@ def test_reset_waits_for_register_then_leaves_no_inflight_state(tmp_path):
         reset_started.set()
         return registry.reset()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        register_future = executor.submit(
-            registry.register,
-            discovered.registry_key,
+    register_thread, register_done, register_results, register_errors = (
+        start_daemon_call(
+            lambda: registry.register(discovered.registry_key),
+            name="registry-register",
         )
-        reset_future = None
-        try:
-            assert entered.wait(timeout=5)
-            reset_future = executor.submit(reset_registry)
-            assert reset_started.wait(timeout=5)
-            assert not reset_future.done()
-        finally:
-            release.set()
-        registered = register_future.result(timeout=5)
-        assert reset_future is not None
-        reset_errors = reset_future.result(timeout=5)
+    )
+    assert entered.wait(timeout=5)
+    reset_thread, reset_done, reset_results, reset_failures = (
+        start_daemon_call(reset_registry, name="registry-reset-after-register")
+    )
+    try:
+        assert reset_started.wait(timeout=5)
+        # initialize() still owns the Registry lock, so reset cannot complete.
+        assert not reset_done.wait(timeout=0.25)
+    finally:
+        release.set()
+
+    assert register_done.wait(timeout=5)
+    assert reset_done.wait(timeout=5)
+    register_thread.join(timeout=1)
+    reset_thread.join(timeout=1)
+    assert not register_thread.is_alive()
+    assert not reset_thread.is_alive()
+    assert register_errors == []
+    assert reset_failures == []
+    assert len(register_results) == 1
+    assert len(reset_results) == 1
+    registered = register_results[0]
+    reset_errors = reset_results[0]
 
     assert registered.state is PluginLifecycleState.REGISTERED
     assert reset_errors == ()
