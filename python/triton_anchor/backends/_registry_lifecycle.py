@@ -1,4 +1,8 @@
-"""Load and lifecycle helpers called under the Registry's lock."""
+"""Load and lifecycle helpers used within Registry-owned lock boundaries.
+
+These helpers never acquire Registry locks themselves.  The facade retains its
+established RLock while calling plugin-related helpers and owns state changes.
+"""
 
 from __future__ import annotations
 
