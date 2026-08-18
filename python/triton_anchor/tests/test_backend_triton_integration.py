@@ -225,7 +225,103 @@ def test_w9_import_is_static_and_compiler_driver_share_priority_winner(
         "core Python SOABI",
         "core build platform",
     ]
-    assert bridge.backends["high"].record_id == high_record.record_id
+    assert bridge.backends == {}
+
+
+def test_w9_manifest_binding_preserves_same_key_manual_legacy_catalog(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv(BACKEND_SELECTOR_ENV, raising=False)
+    manifest_plugin, manifest_compiler, manifest_driver = runtime_plugin(
+        "Manifest"
+    )
+    distribution = distribution_for(
+        tmp_path,
+        "same",
+        plugin=manifest_plugin,
+        name="manifest-backend",
+    )
+    manual_plugin, manual_compiler, manual_driver = runtime_plugin("Manual")
+    registry = registry_for((distribution,))
+    package_name, bridge = load_bridge(monkeypatch, registry)
+    bridge.backends["same"] = bridge.Backend(
+        compiler=manual_plugin.compiler_cls,
+        driver=manual_plugin.driver_cls,
+    )
+
+    compiler = bridge.make_backend(Target("mock"))
+    active_driver = load_runtime_driver(
+        monkeypatch,
+        package_name,
+    )._create_driver()
+
+    assert isinstance(compiler, manifest_compiler)
+    assert isinstance(active_driver, manifest_driver)
+    assert bridge.backends["same"].compiler is manual_compiler
+    assert bridge.backends["same"].record_id is None
+    assert manual_driver.active_checks == 0
+
+    assert registry.reset() == ()
+    assert bridge.backends["same"].compiler is manual_compiler
+    assert bridge.backends["same"].record_id is None
+
+
+def test_w9_registry_legacy_catalog_entry_is_resettable(
+    tmp_path,
+    monkeypatch,
+):
+    plugin, compiler_cls, _ = runtime_plugin("RegistryLegacy")
+    distribution = FakeDistribution(
+        tmp_path / "registry-legacy",
+        name="registry-legacy-backend",
+        entry_points=(("registry-legacy", plugin),),
+    )
+    registry = registry_for((distribution,))
+    selector = registry.discover()[0].registry_key
+    monkeypatch.setenv(BACKEND_SELECTOR_ENV, selector)
+    _, bridge = load_bridge(monkeypatch, registry)
+
+    resolved = bridge.get_backend(Target("mock"))
+
+    assert resolved.compiler is compiler_cls
+    assert bridge.backends["registry-legacy"].compiler is compiler_cls
+    assert bridge.backends["registry-legacy"].record_id == resolved.record_id
+    assert distribution.entry_points[0].load_calls == 1
+
+    assert registry.reset() == ()
+    assert "registry-legacy" not in bridge.backends
+
+
+def test_w9_registry_legacy_does_not_replace_same_key_manual_catalog(
+    tmp_path,
+    monkeypatch,
+):
+    registry_plugin, registry_compiler, _ = runtime_plugin("RegistryLegacy")
+    distribution = FakeDistribution(
+        tmp_path / "registry-legacy",
+        name="registry-legacy-backend",
+        entry_points=(("same", registry_plugin),),
+    )
+    registry = registry_for((distribution,))
+    selector = registry.discover()[0].registry_key
+    monkeypatch.setenv(BACKEND_SELECTOR_ENV, selector)
+    _, bridge = load_bridge(monkeypatch, registry)
+    manual_plugin, manual_compiler, _ = runtime_plugin("ManualLegacy")
+    bridge.backends["same"] = bridge.Backend(
+        compiler=manual_plugin.compiler_cls,
+        driver=manual_plugin.driver_cls,
+    )
+
+    resolved = bridge.get_backend(Target("mock"))
+
+    assert resolved.compiler is registry_compiler
+    assert bridge.backends["same"].compiler is manual_compiler
+    assert bridge.backends["same"].record_id is None
+
+    assert registry.reset() == ()
+    assert bridge.backends["same"].compiler is manual_compiler
+    assert bridge.backends["same"].record_id is None
 
 
 def test_w9_triton_mismatch_is_rejected_before_import(
@@ -907,7 +1003,7 @@ def test_w9_registry_reset_clears_adapter_and_lazy_driver(
 
     assert runtime.driver.active.get_current_target() == Target("mock")
     assert runtime.driver.default._obj is not None
-    assert bridge.backends
+    assert bridge.backends == {}
 
     errors = registry.reset()
 
@@ -1204,6 +1300,265 @@ def test_w9_concurrent_reset_invalidates_cached_selection_snapshot(
         "selected_targets",
     }
     assert bridge.backends == {}
+
+
+def test_w9_legacy_generation_cleanup_does_not_remove_fresh_same_id_entry(
+    tmp_path,
+    monkeypatch,
+):
+    old_plugin, old_compiler, _ = runtime_plugin("OldLegacy")
+    distribution = FakeDistribution(
+        tmp_path / "legacy-aba",
+        name="legacy-aba-backend",
+        entry_points=(("legacy-aba", old_plugin),),
+    )
+    registry = registry_for((distribution,))
+    selector = registry.discover()[0].registry_key
+    monkeypatch.setenv(BACKEND_SELECTOR_ENV, selector)
+    _, bridge = load_bridge(monkeypatch, registry)
+    original_prune = bridge._prune_registry_backends
+    old_published = threading.Event()
+    release_old = threading.Event()
+    first_call = True
+
+    def pause_first_prune(current_registry):
+        nonlocal first_call
+        if first_call:
+            first_call = False
+            old_published.set()
+            assert release_old.wait(timeout=2)
+        return original_prune(current_registry)
+
+    monkeypatch.setattr(
+        bridge,
+        "_prune_registry_backends",
+        pause_first_prune,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stale = executor.submit(bridge.get_backend, Target("mock"))
+        assert old_published.wait(timeout=2)
+        assert bridge.backends["legacy-aba"].compiler is old_compiler
+
+        assert registry.reset() == ()
+        fresh_plugin, fresh_compiler, _ = runtime_plugin("FreshLegacy")
+        distribution.entry_points[0].loaded_object = fresh_plugin
+        fresh = bridge.get_backend(Target("mock"))
+        release_old.set()
+
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            stale.result(timeout=2)
+
+    assert caught.value.field == "registry generation"
+    assert fresh.compiler is fresh_compiler
+    assert bridge.backends["legacy-aba"].compiler is fresh_compiler
+    assert distribution.entry_points[0].load_calls == 2
+
+
+def test_w9_driver_candidates_fail_if_generation_changes_between_bindings(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv(BACKEND_SELECTOR_ENV, raising=False)
+    alpha_plugin, _, _ = runtime_plugin("Alpha", target_name="alpha")
+    beta_plugin, _, _ = runtime_plugin("Beta", target_name="beta")
+    alpha = distribution_for(
+        tmp_path,
+        "alpha",
+        plugin=alpha_plugin,
+        name="alpha-backend",
+        declaration=triton_plugin("alpha", targets=("alpha",)),
+    )
+    beta = distribution_for(
+        tmp_path,
+        "beta",
+        plugin=beta_plugin,
+        name="beta-backend",
+        declaration=triton_plugin("beta", targets=("beta",)),
+    )
+    registry = registry_for((alpha, beta))
+    _, bridge = load_bridge(monkeypatch, registry)
+    original_cache_decision = bridge._cache_decision
+    first_materialized = threading.Event()
+    continue_materialization = threading.Event()
+    materialized_count = 0
+
+    def pause_after_first_materialization(decision, **kwargs):
+        nonlocal materialized_count
+        backend = original_cache_decision(decision, **kwargs)
+        materialized_count += 1
+        if materialized_count == 1:
+            first_materialized.set()
+            assert continue_materialization.wait(timeout=2)
+        return backend
+
+    monkeypatch.setattr(
+        bridge,
+        "_cache_decision",
+        pause_after_first_materialization,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        candidates = executor.submit(bridge.get_driver_backends)
+        assert first_materialized.wait(timeout=2)
+        registry.select("alpha", environment={})
+        continue_materialization.set()
+
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            candidates.result(timeout=2)
+
+    assert caught.value.field == "registry generation"
+    assert [
+        alpha.entry_points[0].load_calls,
+        beta.entry_points[0].load_calls,
+    ] == [1, 1]
+    assert bridge.backends == {}
+
+
+def test_w9_failed_driver_batch_prunes_published_legacy_candidate(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv(BACKEND_SELECTOR_ENV, raising=False)
+    alpha_plugin, _, _ = runtime_plugin("AlphaLegacy", target_name="alpha")
+    beta_plugin, _, _ = runtime_plugin("BetaLegacy", target_name="beta")
+    manifest_plugin, _, _ = runtime_plugin(
+        "Manifest",
+        target_name="alpha",
+    )
+    alpha = FakeDistribution(
+        tmp_path / "alpha-legacy",
+        name="alpha-legacy-backend",
+        entry_points=(("alpha-legacy", alpha_plugin),),
+    )
+    beta = FakeDistribution(
+        tmp_path / "beta-legacy",
+        name="beta-legacy-backend",
+        entry_points=(("beta-legacy", beta_plugin),),
+    )
+    manifest_distribution = distribution_for(
+        tmp_path,
+        "manifest",
+        plugin=manifest_plugin,
+        name="manifest-backend",
+        declaration=triton_plugin("manifest", targets=("alpha",)),
+    )
+    registry = registry_for((alpha, beta, manifest_distribution))
+    records = {record.entry_point_name: record for record in registry.discover()}
+    registry.select(
+        "alpha",
+        explicit_selector=records["alpha-legacy"].record_id,
+        environment={},
+    )
+    registry.select(
+        "beta",
+        explicit_selector=records["beta-legacy"].record_id,
+        environment={},
+    )
+    _, bridge = load_bridge(monkeypatch, registry)
+    original_cache_decision = bridge._cache_decision
+    first_materialized = threading.Event()
+    continue_materialization = threading.Event()
+    materialized_count = 0
+
+    def pause_after_first_materialization(decision, **kwargs):
+        nonlocal materialized_count
+        backend = original_cache_decision(decision, **kwargs)
+        materialized_count += 1
+        if materialized_count == 1:
+            first_materialized.set()
+            assert continue_materialization.wait(timeout=2)
+        return backend
+
+    monkeypatch.setattr(
+        bridge,
+        "_cache_decision",
+        pause_after_first_materialization,
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        candidates = executor.submit(bridge.get_driver_backends)
+        assert first_materialized.wait(timeout=2)
+        assert "alpha-legacy" in bridge.backends
+        registry.select(
+            "alpha",
+            explicit_selector="vendor.manifest",
+            environment={},
+        )
+        continue_materialization.set()
+
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            candidates.result(timeout=2)
+
+    assert caught.value.field == "registry generation"
+    assert "alpha-legacy" not in bridge.backends
+    assert "beta-legacy" not in bridge.backends
+    assert [
+        alpha.entry_points[0].load_calls,
+        beta.entry_points[0].load_calls,
+        manifest_distribution.entry_points[0].load_calls,
+    ] == [1, 1, 1]
+
+
+def test_w9_stale_legacy_decision_failure_prunes_previous_projection(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv(BACKEND_SELECTOR_ENV, raising=False)
+    legacy_plugin, _, _ = runtime_plugin("Legacy")
+    legacy = FakeDistribution(
+        tmp_path / "legacy",
+        name="legacy-backend",
+        entry_points=(("legacy", legacy_plugin),),
+    )
+    manifest_plugin, _, _ = runtime_plugin("Manifest")
+    manifest_distribution = distribution_for(
+        tmp_path,
+        "manifest",
+        plugin=manifest_plugin,
+        name="manifest-backend",
+    )
+    registry = registry_for((legacy, manifest_distribution))
+    records = {record.entry_point_name: record for record in registry.discover()}
+    registry.select(
+        "mock",
+        explicit_selector=records["legacy"].record_id,
+        environment={},
+    )
+    _, bridge = load_bridge(monkeypatch, registry)
+    bridge.get_backend(Target("mock"))
+    assert "legacy" in bridge.backends
+
+    original_get_selection = registry.get_selection
+    stale_read = threading.Event()
+    winner_switched = threading.Event()
+
+    def paused_get_selection(target):
+        decision = original_get_selection(target)
+        stale_read.set()
+        assert winner_switched.wait(timeout=2)
+        return decision
+
+    monkeypatch.setattr(registry, "get_selection", paused_get_selection)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stale = executor.submit(bridge.get_backend, Target("mock"))
+        assert stale_read.wait(timeout=2)
+        registry.select(
+            "mock",
+            explicit_selector="vendor.manifest",
+            environment={},
+        )
+        winner_switched.set()
+
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            stale.result(timeout=2)
+
+    assert caught.value.field == "selected_targets"
+    assert "legacy" not in bridge.backends
+    assert [
+        legacy.entry_points[0].load_calls,
+        manifest_distribution.entry_points[0].load_calls,
+    ] == [1, 1]
 
 
 def test_w9_reset_shutdown_avoids_plugin_registry_lock_inversion(

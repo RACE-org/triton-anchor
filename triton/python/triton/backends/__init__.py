@@ -15,9 +15,17 @@ class Backend:
     entry_point_name: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class _BindingToken:
+    target: str
+    record_id: str
+    generation: int
+
+
 # Keep this public object stable: existing code may import it by reference or
-# add a manually managed Legacy backend.  Registry-backed entries are added
-# only after selection.
+# add a manually managed Legacy backend.  Selected Registry Legacy entries
+# may also be published when their key is not manually owned; Manifest
+# bindings remain transient Registry-derived values and are never stored here.
 backends: Dict[str, Backend] = {}
 
 
@@ -44,6 +52,30 @@ def _is_selected_record(record) -> bool:
     )
 
 
+def _is_registry_legacy(record) -> bool:
+    return (
+        record.manifest is None
+        and _enum_value(record.source) == "legacy"
+    )
+
+
+def _discard_if_same(name: str, expected: Backend) -> None:
+    if backends.get(name) is expected:
+        backends.pop(name, None)
+
+
+def _publish_registry_legacy(record, backend: Backend):
+    name = record.entry_point_name
+    existing = backends.get(name)
+    if (
+        name in backends
+        and getattr(existing, "record_id", None) is None
+    ):
+        return None
+    backends[name] = backend
+    return backend
+
+
 def _prune_registry_backends(registry) -> None:
     for name, backend in tuple(backends.items()):
         record_id = getattr(backend, "record_id", None)
@@ -52,17 +84,44 @@ def _prune_registry_backends(registry) -> None:
         try:
             record = registry.inspect(record_id)
         except Exception:
-            backends.pop(name, None)
+            _discard_if_same(name, backend)
             continue
-        if not _is_selected_record(record):
-            backends.pop(name, None)
+        if (
+            not _is_registry_legacy(record)
+            or not _is_selected_record(record)
+        ):
+            _discard_if_same(name, backend)
 
 
-def _cache_decision(decision) -> Backend:
+def _generation_error(record, token, actual_generation):
+    return _registry_api().BackendPluginLifecycleError(
+        "Backend selection was invalidated during consumption",
+        plugin_id=record.plugin_id,
+        entry_point=record.entry_point_name,
+        field="registry generation",
+        expected=str(token.generation),
+        actual=str(actual_generation),
+        remediation=(
+            "Retry backend resolution after the concurrent Registry "
+            "reset or selection change completes."
+        ),
+    )
+
+
+def _cache_decision(decision, *, expected_generation=None) -> Backend:
     registry = _registry()
-    generation = registry.generation
+    generation = (
+        registry.generation
+        if expected_generation is None
+        else expected_generation
+    )
+    token = _BindingToken(
+        target=decision.target,
+        record_id=decision.record_id,
+        generation=generation,
+    )
     try:
-        record = registry.inspect(decision.record_id)
+        record = registry.inspect(token.record_id)
     except Exception as exc:
         raise _registry_api().BackendPluginLifecycleError(
             "Backend selection was invalidated before consumption",
@@ -78,14 +137,15 @@ def _cache_decision(decision) -> Backend:
         ) from exc
     if (
         not _is_selected_record(record)
-        or decision.target not in record.selected_targets
+        or token.target not in record.selected_targets
     ):
+        _prune_registry_backends(registry)
         raise _registry_api().BackendPluginLifecycleError(
             "Backend selection changed before consumption",
             plugin_id=record.plugin_id,
             entry_point=record.entry_point_name,
             field="selected_targets",
-            expected=decision.target,
+            expected=token.target,
             actual=", ".join(record.selected_targets) or "<none>",
             remediation=(
                 "Retry backend resolution using the current Registry "
@@ -99,27 +159,20 @@ def _cache_decision(decision) -> Backend:
         plugin_id=record.plugin_id,
         entry_point_name=record.entry_point_name,
     )
-    backends[record.entry_point_name] = backend
+    actual_generation = registry.generation
+    if actual_generation != token.generation:
+        _prune_registry_backends(registry)
+        raise _generation_error(record, token, actual_generation)
+
+    published = None
+    if _is_registry_legacy(record):
+        published = _publish_registry_legacy(record, backend)
     _prune_registry_backends(registry)
-    if registry.generation != generation:
-        cached = backends.get(record.entry_point_name)
-        if (
-            cached is not None
-            and getattr(cached, "record_id", None) == record.record_id
-        ):
-            backends.pop(record.entry_point_name, None)
-        raise _registry_api().BackendPluginLifecycleError(
-            "Backend selection was invalidated during consumption",
-            plugin_id=record.plugin_id,
-            entry_point=record.entry_point_name,
-            field="registry generation",
-            expected=str(generation),
-            actual=str(registry.generation),
-            remediation=(
-                "Retry backend resolution after the concurrent Registry "
-                "reset or selection change completes."
-            ),
-        )
+    actual_generation = registry.generation
+    if actual_generation != token.generation:
+        if published is not None:
+            _discard_if_same(record.entry_point_name, published)
+        raise _generation_error(record, token, actual_generation)
     return backend
 
 
@@ -182,9 +235,12 @@ def _target_name(target) -> str:
     return getattr(target, "backend", None)
 
 
-def _manual_backends() -> Tuple[Backend, ...]:
+def _manual_backends(*, excluded_names=()) -> Tuple[Backend, ...]:
+    excluded = frozenset(excluded_names)
     result = []
     for name, backend in sorted(backends.items()):
+        if name in excluded:
+            continue
         if getattr(backend, "record_id", None) is not None:
             continue
         if (
@@ -199,7 +255,7 @@ def _manual_backends() -> Tuple[Backend, ...]:
 def _reset_backend_cache() -> None:
     for name, backend in tuple(backends.items()):
         if getattr(backend, "record_id", None) is not None:
-            backends.pop(name, None)
+            _discard_if_same(name, backend)
 
 
 def register_backend_reset_hook(callback) -> None:
@@ -355,17 +411,31 @@ def get_driver_backends() -> Tuple[Backend, ...]:
 
     selected = []
     selected_ids = set()
-    for decision in decisions:
-        if decision.record_id in selected_ids:
-            continue
-        selected.append(_cache_decision(decision))
-        selected_ids.add(decision.record_id)
+    selected_entry_point_names = set()
+    materialization_generation = registry.generation
+    try:
+        for decision in decisions:
+            if decision.record_id in selected_ids:
+                continue
+            selected.append(
+                _cache_decision(
+                    decision,
+                    expected_generation=materialization_generation,
+                )
+            )
+            selected_ids.add(decision.record_id)
+            selected_entry_point_names.add(decision.entry_point_name)
+    except Exception:
+        _prune_registry_backends(registry)
+        raise
 
     forced_selection = bool(python_explicit) or selector is not None
     if selected and forced_selection:
         return tuple(selected)
 
-    manual = _manual_backends()
+    manual = _manual_backends(
+        excluded_names=selected_entry_point_names,
+    )
     if selected:
         return tuple(selected) + manual
     rejected = tuple(

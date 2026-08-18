@@ -130,10 +130,9 @@ def run_probe():
 
         from triton.backends import backends as triton_backends
 
-        cached = triton_backends.get(ENTRY_POINT)
-        assert cached is not None
-        assert cached.compiler is compiler_cls
-        assert cached.record_id == selected.record_id
+        # Manifest bindings are transient projections of RegistryState.  The
+        # public mapping remains a Legacy compatibility catalog.
+        assert ENTRY_POINT not in triton_backends
 
         return {
             "plugin": DISTRIBUTION,
