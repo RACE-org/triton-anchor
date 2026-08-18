@@ -93,6 +93,17 @@
       "python/triton_anchor/tests/test_backend_registry_resilience.py::test_reset_waits_for_register_then_leaves_no_inflight_state",
       "python/triton_anchor/tests/test_backend_registry_resilience.py::test_full_preflight_reports_first_failure_from_multiple_faults",
       "python/triton_anchor/tests/test_backend_registry_resilience.py::test_backend_plugin_record_to_dict_is_stable_normalized_public_view",
+      "python/triton_anchor/tests/test_backend_registry_state.py::test_replace_record_synchronizes_decision_without_generation_change",
+      "python/triton_anchor/tests/test_backend_registry_state.py::test_clear_for_reset_preserves_epoch_hooks_and_resetting_marker",
+      "python/triton_anchor/tests/test_backend_registry_catalog.py::test_discovery_helper_and_catalog_preserve_stable_metadata_order",
+      "python/triton_anchor/tests/test_backend_registry_catalog.py::test_resolve_prefers_exact_record_id_and_preserves_error_fields",
+      "python/triton_anchor/tests/test_backend_registry_validator.py::test_success_plan_preserves_validator_order_arguments_and_reports",
+      "python/triton_anchor/tests/test_backend_registry_validator.py::test_process_environment_failure_is_explicit_and_plan_is_frozen",
+      "python/triton_anchor/tests/test_backend_registry_validator.py::test_triton_profile_rejects_subprocess_before_any_validator_call",
+      "python/triton_anchor/tests/test_backend_registry_lifecycle_selection.py::test_transition_plans_use_injected_validator_once_and_propagate_error",
+      "python/triton_anchor/tests/test_backend_registry_lifecycle_selection.py::test_selection_switch_rejects_active_previous_winner_before_side_effects",
+      "python/triton_anchor/tests/test_backend_registry_lifecycle_selection.py::test_previous_selection_release_preserves_target_order_and_demotion",
+      "python/triton_anchor/tests/test_backend_registry_lifecycle_selection.py::test_activation_preserves_conflict_order_and_selected_precondition",
       "python/triton_anchor/tests/test_backend_registry_selection.py::test_registry_selects_unique_priority_and_loads_only_winner",
       "python/triton_anchor/tests/test_backend_selection.py::test_python_selector_overrides_environment_and_manifest_priority",
       "python/triton_anchor/tests/test_backend_selection.py::test_decision_is_independent_of_input_enumeration_order",
@@ -127,7 +138,7 @@
     },
     "fast_gate": {
       "status": "passed",
-      "tests_passed": 256
+      "tests_passed": 302
     },
     "ac1_rejection_matrix": {
       "status": "passed",
