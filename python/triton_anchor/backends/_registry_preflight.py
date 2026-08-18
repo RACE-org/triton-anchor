@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, Protocol, Tuple
+from typing import Any, Callable, Iterable, Optional, Protocol, Tuple
 
 from packaging.tags import Tag
 
@@ -58,6 +58,15 @@ def evaluate_record_preflight(
     core_abi_fingerprint: Optional[str],
     supported_tags: Optional[Tuple[Tag, ...]],
     core_capabilities: Iterable[str],
+    compatibility_validator: Callable[..., CompatibilityReport] = (
+        validate_backend_plugin
+    ),
+    triton_version_validator: Callable[..., CompatibilityReport] = (
+        validate_triton_version_requirement
+    ),
+    capability_validator: Callable[..., CapabilityReport] = (
+        validate_plugin_capabilities
+    ),
 ) -> PreflightOutcome:
     """Evaluate compatibility without mutating Registry state."""
     try:
@@ -79,12 +88,12 @@ def evaluate_record_preflight(
                         "validation is enabled."
                     ),
                 )
-            report = validate_triton_version_requirement(
+            report = triton_version_validator(
                 record.manifest,
                 environment,
             )
         else:
-            report = validate_backend_plugin(
+            report = compatibility_validator(
                 record.manifest,
                 environment,
                 distribution=record.distribution,
@@ -95,7 +104,7 @@ def evaluate_record_preflight(
                 ),
                 supported_tags=supported_tags,
             )
-        capability_report = validate_plugin_capabilities(
+        capability_report = capability_validator(
             record.manifest,
             core_provided=core_capabilities,
         )

@@ -23,6 +23,7 @@ from packaging.utils import canonicalize_name
 from .capabilities import (
     CapabilityReport,
     evaluate_capabilities,
+    validate_plugin_capabilities,
 )
 from ._registry_discovery import (
     BACKEND_ENTRY_POINT_GROUP as _BACKEND_ENTRY_POINT_GROUP,
@@ -42,7 +43,11 @@ from ._registry_lifecycle import (
     load_plugin_object as _load_plugin_object,
 )
 from ._registry_preflight import evaluate_record_preflight
-from .compatibility import CompatibilityReport
+from .compatibility import (
+    CompatibilityReport,
+    validate_backend_plugin,
+    validate_triton_version_requirement,
+)
 from .conflicts import ConflictReport, detect_conflicts
 from .environment import CoreEnvironment, collect_core_environment
 from .errors import (
@@ -566,6 +571,9 @@ class BackendPluginRegistry:
             core_abi_fingerprint=self._core_abi_fingerprint,
             supported_tags=self._supported_tags,
             core_capabilities=self._core_capabilities,
+            compatibility_validator=validate_backend_plugin,
+            triton_version_validator=validate_triton_version_requirement,
+            capability_validator=validate_plugin_capabilities,
         )
         if outcome.error is not None:
             if outcome.reject_distribution:
@@ -682,7 +690,7 @@ class BackendPluginRegistry:
         record: BackendPluginRecord,
         target: PluginLifecycleState,
     ) -> None:
-        _ensure_transition(record, target)
+        _ensure_transition(record, target, transition_allowed=can_transition)
 
     def load(self, identifier: str) -> BackendPluginRecord:
         """Import one plugin only after its applicable pre-load gate passes."""

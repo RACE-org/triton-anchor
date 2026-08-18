@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Protocol, Tuple
+from typing import Any, Callable, Optional, Protocol, Tuple
 
 from .errors import BackendPluginLifecycleError
 from .protocol import PluginLifecycleState, PluginSource, can_transition
@@ -77,10 +77,14 @@ def best_effort_shutdown(plugin: Any) -> bool:
 def ensure_transition(
     record: LifecycleRecord,
     target: PluginLifecycleState,
+    *,
+    transition_allowed: Callable[
+        [PluginLifecycleState, PluginLifecycleState, PluginSource], bool
+    ] = can_transition,
 ) -> None:
     """Validate a lifecycle edge without mutating its record."""
     source = record.source or PluginSource.MANIFEST
-    if not can_transition(record.state, target, source):
+    if not transition_allowed(record.state, target, source):
         raise BackendPluginLifecycleError(
             f"Invalid backend plugin lifecycle transition: "
             f"{record.state.value} -> {target.value}",
