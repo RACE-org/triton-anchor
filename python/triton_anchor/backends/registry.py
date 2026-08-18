@@ -11,6 +11,7 @@ from typing import (
     Callable,
     Dict,
     Iterable,
+    List as _List,
     Mapping,
     Optional,
     Set,
@@ -1083,7 +1084,7 @@ class BackendPluginRegistry:
                 if identifier is not None
                 else self._state.records_snapshot()
             )
-            results = []
+            results: _List[Dict[str, Any]] = []
             for record in records:
                 result = record.to_dict()
                 result["plugin_diagnostics"] = None
@@ -1144,7 +1145,7 @@ class BackendPluginRegistry:
 
     def reset(self) -> Tuple[BackendPluginError, ...]:
         """Best-effort shutdown and clear state; Python modules stay imported."""
-        shutdown_errors = []
+        shutdown_errors: _List[BackendPluginError] = []
         reset_hooks: Tuple[Callable[[], None], ...] = ()
         shutdown_records: Tuple[BackendPluginRecord, ...] = ()
         reset_started = False

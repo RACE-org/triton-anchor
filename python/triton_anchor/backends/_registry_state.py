@@ -8,7 +8,16 @@ caller.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List as _List,
+    Optional,
+    Set as _Set,
+    Tuple,
+)
 
 from .errors import BackendPluginError
 from ._registry_selection_state import SelectionState
@@ -29,10 +38,10 @@ class RegistryState:
         self.__discovered = False
         self.__selections: Dict[str, SelectionState] = {}
         self.__generation = 0
-        self.__loading = set()
-        self.__registering = set()
+        self.__loading: _Set[str] = set()
+        self.__registering: _Set[str] = set()
         self.__resetting = False
-        self.__reset_hooks = []
+        self.__reset_hooks: _List[Callable[[], None]] = []
 
     def __contains__(self, record_id: object) -> bool:
         return self.contains_record(record_id)

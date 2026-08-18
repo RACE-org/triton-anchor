@@ -7,7 +7,7 @@ established RLock while calling plugin-related helpers and owns state changes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict as _Dict, Optional, Protocol, Tuple
 
 from .errors import BackendPluginLifecycleError
 from .protocol import PluginLifecycleState, PluginSource, can_transition
@@ -41,8 +41,8 @@ def load_plugin_object(entry_point: Any) -> Any:
 
 def inspect_runtime_interfaces(plugin: Any) -> RuntimeInterfaceInspection:
     """Read compiler/driver attributes in their established order."""
-    values = {}
-    field_errors = {}
+    values: _Dict[str, Any] = {}
+    field_errors: _Dict[str, str] = {}
     for name in ("compiler_cls", "driver_cls"):
         try:
             values[name] = getattr(plugin, name, None)
