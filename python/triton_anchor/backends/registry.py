@@ -13,6 +13,7 @@ from typing import (
     Iterable,
     Mapping,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -24,7 +25,7 @@ from .capabilities import (
     evaluate_capabilities,
     validate_plugin_capabilities,
 )
-from ._registry_catalog import RegistryCatalog
+from ._registry_catalog import RegistryCatalog as _RegistryCatalog
 from ._registry_discovery import (
     BACKEND_ENTRY_POINT_GROUP as _BACKEND_ENTRY_POINT_GROUP,
     copy_manifest_error as _copy_manifest_error,
@@ -41,18 +42,19 @@ from ._registry_lifecycle import (
     load_plugin_object as _load_plugin_object,
 )
 from ._registry_lifecycle_selection import (
-    plan_activation,
-    plan_load_precheck,
-    plan_previous_selection_release,
-    plan_register_precheck,
-    plan_selection_switch,
-    plan_winner_selection,
+    plan_activation as _plan_activation,
+    plan_load_precheck as _plan_load_precheck,
+    plan_previous_selection_release as _plan_previous_selection_release,
+    plan_register_precheck as _plan_register_precheck,
+    plan_selection_switch as _plan_selection_switch,
+    plan_winner_selection as _plan_winner_selection,
 )
-from ._registry_state import RegistryState
+from ._registry_preflight import evaluate_record_preflight
+from ._registry_state import RegistryState as _RegistryState
 from ._registry_validator import (
-    ValidationPlan,
-    plan_process_environment_failure,
-    plan_record_validation,
+    ValidationPlan as _ValidationPlan,
+    plan_process_environment_failure as _plan_process_environment_failure,
+    plan_record_validation as _plan_record_validation,
 )
 from .compatibility import (
     CompatibilityReport,
@@ -63,12 +65,14 @@ from .conflicts import ConflictReport, detect_conflicts
 from .environment import CoreEnvironment, collect_core_environment
 from .errors import (
     BackendPluginCompatibilityError,
+    BackendPluginConflictError,
     BackendPluginDiscoveryError,
     BackendPluginError,
     BackendPluginInterfaceError,
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
+    BackendPluginSelectionError,
 )
 from .manifest import BackendPluginManifest, load_distribution_manifest
 from .protocol import (
@@ -239,8 +243,8 @@ class BackendPluginRegistry:
                 "preflight_profile must be 'triton_version' or 'full'"
             )
         self._preflight_profile = preflight_profile
-        self._state = RegistryState()
-        self._catalog = RegistryCatalog(
+        self._state = _RegistryState()
+        self._catalog = _RegistryCatalog(
             self._state,
             record_factory=lambda **fields: BackendPluginRecord(**fields),
         )
@@ -488,7 +492,7 @@ class BackendPluginRegistry:
     def _apply_validation_rejection(
         self,
         record: BackendPluginRecord,
-        plan: ValidationPlan,
+        plan: _ValidationPlan,
     ) -> BackendPluginRecord:
         error = plan.error
         if error is None:
@@ -540,9 +544,9 @@ class BackendPluginRegistry:
         except BackendPluginError as exc:
             # CoreEnvironment is process-wide.  Preserve it as a Registry-level
             # diagnostic while ensuring no Manifest record can bypass the gate.
-            plan = plan_process_environment_failure(record, exc)
+            plan = _plan_process_environment_failure(record, exc)
             return self._apply_validation_rejection(record, plan)
-        plan = plan_record_validation(
+        plan = _plan_record_validation(
             record,
             environment,
             preflight_profile=self._preflight_profile,
@@ -665,7 +669,7 @@ class BackendPluginRegistry:
             self.discover()
             record = self._resolve(identifier)
             record = self._pre_import_fatal_conflict_gate(record)
-            plan = plan_load_precheck(
+            plan = _plan_load_precheck(
                 record,
                 is_loading=self._state.is_loading(record.record_id),
                 transition_validator=self._transition,
@@ -747,7 +751,7 @@ class BackendPluginRegistry:
         with self._lock:
             self._ensure_not_resetting("register")
             record = self.load(identifier)
-            plan = plan_register_precheck(
+            plan = _plan_register_precheck(
                 record,
                 is_registering=self._state.is_registering(record.record_id),
                 transition_validator=self._transition,
@@ -936,7 +940,7 @@ class BackendPluginRegistry:
                 and previous_record_id != decision.record_id
                 else None
             )
-            switch_plan = plan_selection_switch(
+            switch_plan = _plan_selection_switch(
                 target=target_name,
                 winner_record_id=decision.record_id,
                 previous_record_id=previous_record_id,
@@ -948,7 +952,7 @@ class BackendPluginRegistry:
                 previous = self._state.get_record(
                     switch_plan.previous_record_id
                 )
-                release_plan = plan_previous_selection_release(
+                release_plan = _plan_previous_selection_release(
                     target=target_name,
                     winner_record_id=selected.record_id,
                     previous_record=previous,
@@ -964,7 +968,7 @@ class BackendPluginRegistry:
                     )
 
             selected = self._state.get_record(selected.record_id)
-            winner_plan = plan_winner_selection(
+            winner_plan = _plan_winner_selection(
                 target=target_name,
                 winner=selected,
                 transition_validator=self._transition,
@@ -998,7 +1002,7 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("activate")
             self.discover()
             record = self._resolve(identifier)
-            plan = plan_activation(
+            plan = _plan_activation(
                 record,
                 self._state.records_snapshot(),
                 transition_validator=self._transition,
