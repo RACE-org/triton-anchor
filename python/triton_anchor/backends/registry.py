@@ -50,6 +50,11 @@ from ._registry_lifecycle_selection import (
     plan_winner_selection as _plan_winner_selection,
 )
 from ._registry_preflight import evaluate_record_preflight
+from ._registry_selection_state import (
+    SelectionState as _SelectionState,
+    materialize_selection_decision as _materialize_selection_decision,
+    selection_state_from_decision as _selection_state_from_decision,
+)
 from ._registry_state import RegistryState as _RegistryState
 from ._registry_validator import (
     ValidationPlan as _ValidationPlan,
@@ -412,6 +417,15 @@ class BackendPluginRegistry:
 
     def _replace(self, record: BackendPluginRecord) -> BackendPluginRecord:
         return self._state.replace_record(record)
+
+    def _materialize_selection(
+        self,
+        selection: _SelectionState,
+    ) -> SelectionDecision:
+        return _materialize_selection_decision(
+            selection,
+            self._state.get_record(selection.record_id),
+        )
 
     def _reject(
         self,
@@ -928,10 +942,10 @@ class BackendPluginRegistry:
             )
 
             target_name = decision.target
-            previous_decision = self._state.get_selection(target_name)
+            previous_selection = self._state.get_selection_state(target_name)
             previous_record_id = (
-                previous_decision.record_id
-                if previous_decision is not None
+                previous_selection.record_id
+                if previous_selection is not None
                 else None
             )
             previous = (
@@ -981,15 +995,21 @@ class BackendPluginRegistry:
                 )
             )
             decision = replace(decision, record=selected)
-            self._state.set_selection(target_name, decision)
+            selection = _selection_state_from_decision(decision)
+            self._state.set_selection_state(target_name, selection)
             if winner_plan.increment_generation:
                 self._state.increment_generation()
-            return decision
+            return self._materialize_selection(selection)
 
     def get_selection(self, target: str) -> Optional[SelectionDecision]:
         """Return the cached selection for one target without loading."""
         with self._lock:
-            return self._state.get_selection(target)
+            selection = self._state.get_selection_state(target)
+            return (
+                None
+                if selection is None
+                else self._materialize_selection(selection)
+            )
 
     def activate(self, identifier: str) -> BackendPluginRecord:
         """Mark one selected runtime pair active without reloading it.
@@ -1082,9 +1102,9 @@ class BackendPluginRegistry:
                 ],
                 "conflicts": self.conflicts().to_dict(),
                 "selections": {
-                    target: decision.to_dict()
-                    for target, decision in sorted(
-                        self._state.selections_snapshot()
+                    target: self._materialize_selection(selection).to_dict()
+                    for target, selection in sorted(
+                        self._state.selection_states_snapshot()
                     )
                 },
                 "plugins": results,

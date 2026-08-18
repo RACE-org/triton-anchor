@@ -8,10 +8,10 @@ caller.
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
 
 from .errors import BackendPluginError
+from ._registry_selection_state import SelectionState
 
 
 class RegistryState:
@@ -27,7 +27,7 @@ class RegistryState:
         self.__environment: Any = None
         self.__environment_error: Optional[BackendPluginError] = None
         self.__discovered = False
-        self.__selections: Dict[str, Any] = {}
+        self.__selections: Dict[str, SelectionState] = {}
         self.__generation = 0
         self.__loading = set()
         self.__registering = set()
@@ -54,11 +54,8 @@ class RegistryState:
         return record
 
     def replace_record(self, record: Any) -> Any:
-        """Replace a record and synchronize cached decision snapshots."""
+        """Replace the canonical record without changing selection identity."""
         self.__records[record.record_id] = record
-        for target, decision in tuple(self.__selections.items()):
-            if decision.record_id == record.record_id:
-                self.__selections[target] = replace(decision, record=record)
         return record
 
     def registry_errors_snapshot(self) -> Tuple[BackendPluginError, ...]:
@@ -95,16 +92,22 @@ class RegistryState:
     def mark_discovered(self) -> None:
         self.__discovered = True
 
-    def get_selection(self, target: str) -> Any:
+    def get_selection_state(self, target: str) -> Optional[SelectionState]:
         return self.__selections.get(target)
 
-    def selections_snapshot(self) -> Tuple[Tuple[str, Any], ...]:
+    def selection_states_snapshot(
+        self,
+    ) -> Tuple[Tuple[str, SelectionState], ...]:
         return tuple(self.__selections.items())
 
-    def set_selection(self, target: str, decision: Any) -> None:
-        self.__selections[target] = decision
+    def set_selection_state(
+        self,
+        target: str,
+        selection: SelectionState,
+    ) -> None:
+        self.__selections[target] = selection
 
-    def clear_selections(self) -> None:
+    def clear_selection_states(self) -> None:
         self.__selections.clear()
 
     @property
@@ -164,4 +167,4 @@ class RegistryState:
         self.__discovered = False
         self.__loading.clear()
         self.__registering.clear()
-        self.clear_selections()
+        self.clear_selection_states()

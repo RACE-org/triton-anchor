@@ -2,9 +2,11 @@
 
 from dataclasses import dataclass
 
+from triton_anchor.backends._registry_selection_state import SelectionState
 from triton_anchor.backends._registry_state import RegistryState
 from triton_anchor.backends.errors import BackendPluginError
 from triton_anchor.backends.registry import BackendPluginRegistry
+from triton_anchor.backends.selection import SelectionMethod
 
 
 @dataclass(frozen=True)
@@ -13,10 +15,20 @@ class Record:
     revision: int = 0
 
 
-@dataclass(frozen=True)
-class Decision:
-    record_id: str
-    record: Record
+def selection_state(record_id="alpha"):
+    return SelectionState(
+        target="mock",
+        record_id=record_id,
+        registry_key=record_id,
+        plugin_id=f"vendor.{record_id}",
+        entry_point_name=record_id,
+        method=SelectionMethod.SOLE_CANDIDATE,
+        selector=None,
+        priority=0,
+        is_legacy=False,
+        candidate_record_ids=(record_id,),
+        capability_report=None,
+    )
 
 
 def test_record_snapshots_are_stable_and_preserve_insertion_order():
@@ -53,32 +65,32 @@ def test_state_is_a_constant_time_container_for_record_id_allocation():
     )
 
 
-def test_replace_record_synchronizes_decision_without_generation_change():
+def test_replace_record_does_not_mutate_selection_or_generation():
     state = RegistryState()
     original = Record("alpha")
     updated = Record("alpha", revision=1)
+    selection = selection_state()
     state.insert_record(original)
-    state.set_selection("mock", Decision("alpha", original))
+    state.set_selection_state("mock", selection)
 
     state.replace_record(updated)
 
     assert state.get_record("alpha") is updated
-    assert state.get_selection("mock").record is updated
+    assert state.get_selection_state("mock") is selection
     assert state.generation == 0
 
 
 def test_selection_and_generation_mutations_are_explicit():
     state = RegistryState()
-    record = Record("alpha")
-    decision = Decision("alpha", record)
+    selection = selection_state()
 
-    state.set_selection("mock", decision)
-    assert state.selections_snapshot() == (("mock", decision),)
+    state.set_selection_state("mock", selection)
+    assert state.selection_states_snapshot() == (("mock", selection),)
     assert state.generation == 0
 
     state.increment_generation()
-    state.clear_selections()
-    assert state.get_selection("mock") is None
+    state.clear_selection_states()
+    assert state.get_selection_state("mock") is None
     assert state.generation == 1
 
 
@@ -114,7 +126,7 @@ def test_inflight_snapshots_are_immutable_and_independent():
 def test_clear_for_reset_preserves_epoch_hooks_and_resetting_marker():
     state = RegistryState()
     record = Record("alpha")
-    decision = Decision("alpha", record)
+    selection = selection_state()
     environment = object()
     environment_error = BackendPluginError("environment")
     hook_calls = []
@@ -127,7 +139,7 @@ def test_clear_for_reset_preserves_epoch_hooks_and_resetting_marker():
     state.cache_environment(environment)
     state.cache_environment_error(environment_error)
     state.mark_discovered()
-    state.set_selection("mock", decision)
+    state.set_selection_state("mock", selection)
     state.begin_loading("alpha")
     state.begin_registering("alpha")
     state.add_reset_hook(hook)
@@ -142,7 +154,7 @@ def test_clear_for_reset_preserves_epoch_hooks_and_resetting_marker():
     assert state.environment is None
     assert state.environment_error is None
     assert state.discovered is False
-    assert state.selections_snapshot() == ()
+    assert state.selection_states_snapshot() == ()
     assert state.loading_snapshot() == frozenset()
     assert state.registering_snapshot() == frozenset()
     assert state.reset_hooks_snapshot() == (hook,)
