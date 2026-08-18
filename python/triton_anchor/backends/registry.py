@@ -50,6 +50,10 @@ from ._registry_lifecycle_selection import (
     plan_winner_selection as _plan_winner_selection,
 )
 from ._registry_preflight import evaluate_record_preflight
+from ._registry_rejections import (
+    RecordRejectionPlan as _RecordRejectionPlan,
+    plan_record_rejection as _plan_record_rejection,
+)
 from ._registry_selection_state import (
     SelectionState as _SelectionState,
     materialize_selection_decision as _materialize_selection_decision,
@@ -433,12 +437,23 @@ class BackendPluginRegistry:
         error: BackendPluginError,
         compatibility_status: PluginCompatibilityStatus,
     ) -> BackendPluginRecord:
+        plan = _plan_record_rejection(
+            record,
+            error,
+            compatibility_status,
+        )
+        return self._apply_rejection_plan(plan)
+
+    def _apply_rejection_plan(
+        self,
+        plan: _RecordRejectionPlan,
+    ) -> BackendPluginRecord:
         return self._replace(
             replace(
-                record,
+                plan.record,
                 state=PluginLifecycleState.REJECTED,
-                compatibility_status=compatibility_status,
-                errors=record.errors + (error,),
+                compatibility_status=plan.compatibility_status,
+                errors=plan.record.errors + (plan.error,),
             )
         )
 

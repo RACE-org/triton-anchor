@@ -1,10 +1,11 @@
 """Characterize rejection behavior before the Stage 4 extraction."""
 
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
 import triton_anchor.backends.registry as registry_module
+from triton_anchor.backends._registry_rejections import plan_record_rejection
 from triton_anchor.backends import (
     BackendPluginCompatibilityError,
     BackendPluginConflictError,
@@ -87,6 +88,32 @@ def test_record_rejection_uses_exact_snapshot_and_appends_error_identity(
     assert current.errors[0] is previous_error
     assert current.errors[1] is rejection_error
     assert current.error is previous_error
+    assert _entry_point_load_count(distribution) == 0
+
+
+def test_record_rejection_plan_is_frozen_and_preserves_exact_inputs(tmp_path):
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(plugin_record()),
+    )
+    registry = make_registry((distribution,))
+    record = registry.discover()[0]
+    error = BackendPluginError("planned rejection")
+
+    plan = plan_record_rejection(
+        record,
+        error,
+        PluginCompatibilityStatus.NOT_CHECKED,
+    )
+
+    assert plan.record_id == record.record_id
+    assert plan.record is record
+    assert plan.error is error
+    assert plan.compatibility_status is PluginCompatibilityStatus.NOT_CHECKED
+    with pytest.raises(FrozenInstanceError):
+        plan.record_id = "changed"
+    assert registry.inspect(record.record_id) is record
+    assert record.state is PluginLifecycleState.DISCOVERED
     assert _entry_point_load_count(distribution) == 0
 
 
