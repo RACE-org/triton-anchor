@@ -40,8 +40,12 @@ from ._registry_lifecycle import (
     inspect_runtime_interfaces as _inspect_runtime_interfaces,
     load_plugin_object as _load_plugin_object,
 )
-from ._registry_preflight import evaluate_record_preflight
 from ._registry_state import RegistryState
+from ._registry_validator import (
+    ValidationPlan,
+    plan_process_environment_failure,
+    plan_record_validation,
+)
 from .compatibility import (
     CompatibilityReport,
     validate_backend_plugin,
@@ -474,6 +478,34 @@ class BackendPluginRegistry:
                 compatibility_status,
             )
 
+    def _apply_validation_rejection(
+        self,
+        record: BackendPluginRecord,
+        plan: ValidationPlan,
+    ) -> BackendPluginRecord:
+        error = plan.error
+        if error is None:
+            return record
+        if plan.reject_process:
+            self._reject_manifest_scope(
+                error,
+                plan.compatibility_status,
+            )
+            return self._state.get_record(record.record_id)
+        if plan.reject_distribution:
+            self._reject_manifest_scope(
+                error,
+                plan.compatibility_status,
+                distribution=plan.distribution,
+                specialize_error=plan.specialize_error,
+            )
+            return self._state.get_record(record.record_id)
+        return self._reject(
+            record,
+            error,
+            plan.compatibility_status,
+        )
+
     def _validate_record(
         self, record: BackendPluginRecord
     ) -> BackendPluginRecord:
@@ -501,12 +533,9 @@ class BackendPluginRegistry:
         except BackendPluginError as exc:
             # CoreEnvironment is process-wide.  Preserve it as a Registry-level
             # diagnostic while ensuring no Manifest record can bypass the gate.
-            self._reject_manifest_scope(
-                exc,
-                PluginCompatibilityStatus.INCOMPATIBLE,
-            )
-            return self._state.get_record(record.record_id)
-        outcome = evaluate_record_preflight(
+            plan = plan_process_environment_failure(record, exc)
+            return self._apply_validation_rejection(record, plan)
+        plan = plan_record_validation(
             record,
             environment,
             preflight_profile=self._preflight_profile,
@@ -517,20 +546,8 @@ class BackendPluginRegistry:
             triton_version_validator=validate_triton_version_requirement,
             capability_validator=validate_plugin_capabilities,
         )
-        if outcome.error is not None:
-            if outcome.reject_distribution:
-                self._reject_manifest_scope(
-                    outcome.error,
-                    outcome.compatibility_status,
-                    distribution=record.distribution,
-                    specialize_error=outcome.specialize_error,
-                )
-                return self._state.get_record(record.record_id)
-            return self._reject(
-                record,
-                outcome.error,
-                outcome.compatibility_status,
-            )
+        if plan.error is not None:
+            return self._apply_validation_rejection(record, plan)
 
         if not can_transition(
             record.state, PluginLifecycleState.VALIDATED, PluginSource.MANIFEST
@@ -545,8 +562,8 @@ class BackendPluginRegistry:
                 record,
                 state=PluginLifecycleState.VALIDATED,
                 compatibility_status=PluginCompatibilityStatus.COMPATIBLE,
-                compatibility_report=outcome.compatibility_report,
-                capability_report=outcome.capability_report,
+                compatibility_report=plan.compatibility_report,
+                capability_report=plan.capability_report,
             )
         )
 
