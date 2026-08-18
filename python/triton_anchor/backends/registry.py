@@ -40,6 +40,14 @@ from ._registry_lifecycle import (
     inspect_runtime_interfaces as _inspect_runtime_interfaces,
     load_plugin_object as _load_plugin_object,
 )
+from ._registry_lifecycle_selection import (
+    plan_activation,
+    plan_load_precheck,
+    plan_previous_selection_release,
+    plan_register_precheck,
+    plan_selection_switch,
+    plan_winner_selection,
+)
 from ._registry_state import RegistryState
 from ._registry_validator import (
     ValidationPlan,
@@ -55,7 +63,6 @@ from .conflicts import ConflictReport, detect_conflicts
 from .environment import CoreEnvironment, collect_core_environment
 from .errors import (
     BackendPluginCompatibilityError,
-    BackendPluginConflictError,
     BackendPluginDiscoveryError,
     BackendPluginError,
     BackendPluginInterfaceError,
@@ -658,37 +665,13 @@ class BackendPluginRegistry:
             self.discover()
             record = self._resolve(identifier)
             record = self._pre_import_fatal_conflict_gate(record)
-
-            if record.state is PluginLifecycleState.REJECTED:
-                if record.error is not None:
-                    raise record.error
-                raise BackendPluginLoadError(
-                    "Rejected backend plugin cannot be loaded",
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                )
-            if record.state in {
-                PluginLifecycleState.LOADED,
-                PluginLifecycleState.REGISTERED,
-                PluginLifecycleState.SELECTED,
-                PluginLifecycleState.ACTIVE,
-            }:
+            plan = plan_load_precheck(
+                record,
+                is_loading=self._state.is_loading(record.record_id),
+                transition_validator=self._transition,
+            )
+            if plan.return_existing:
                 return record
-
-            if self._state.is_loading(record.record_id):
-                raise BackendPluginLifecycleError(
-                    "Recursive backend plugin load is not allowed",
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                    field="load",
-                    expected="one non-reentrant load operation",
-                    actual="recursive load",
-                    remediation=(
-                        "Do not call Registry load/register for the same plugin "
-                        "from its entry-point loader or constructor."
-                    ),
-                )
-            self._transition(record, PluginLifecycleState.LOADED)
             self._state.begin_loading(record.record_id)
             try:
                 try:
@@ -764,26 +747,13 @@ class BackendPluginRegistry:
         with self._lock:
             self._ensure_not_resetting("register")
             record = self.load(identifier)
-            if record.state in {
-                PluginLifecycleState.REGISTERED,
-                PluginLifecycleState.SELECTED,
-                PluginLifecycleState.ACTIVE,
-            }:
+            plan = plan_register_precheck(
+                record,
+                is_registering=self._state.is_registering(record.record_id),
+                transition_validator=self._transition,
+            )
+            if plan.return_existing:
                 return record
-            if self._state.is_registering(record.record_id):
-                raise BackendPluginLifecycleError(
-                    "Recursive backend plugin registration is not allowed",
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                    field="register",
-                    expected="one non-reentrant registration operation",
-                    actual="recursive registration",
-                    remediation=(
-                        "Do not call Registry register for the same plugin from "
-                        "runtime attributes or initialize()."
-                    ),
-                )
-            self._transition(record, PluginLifecycleState.REGISTERED)
             self._state.begin_registering(record.record_id)
             try:
                 plugin = record.plugin_object
@@ -955,100 +925,61 @@ class BackendPluginRegistry:
 
             target_name = decision.target
             previous_decision = self._state.get_selection(target_name)
-            if (
-                previous_decision is not None
-                and previous_decision.record_id != decision.record_id
-            ):
-                previous = self._state.get_record(previous_decision.record_id)
-                if (
-                    previous is not None
-                    and previous.state is PluginLifecycleState.ACTIVE
-                ):
-                    raise BackendPluginLifecycleError(
-                        "Cannot switch an ACTIVE backend selection",
-                        plugin_id=previous.plugin_id,
-                        entry_point=previous.entry_point_name,
-                        field="active selection",
-                        expected=previous.record_id,
-                        actual=decision.record_id,
-                        remediation=(
-                            "Reset the Registry-backed runtime driver before "
-                            "selecting a different plugin for this target."
-                        ),
-                    )
+            previous_record_id = (
+                previous_decision.record_id
+                if previous_decision is not None
+                else None
+            )
+            previous = (
+                self._state.get_record(previous_record_id)
+                if previous_record_id is not None
+                and previous_record_id != decision.record_id
+                else None
+            )
+            switch_plan = plan_selection_switch(
+                target=target_name,
+                winner_record_id=decision.record_id,
+                previous_record_id=previous_record_id,
+                previous_record=previous,
+            )
 
             selected = self.register(decision.record_id)
-            if (
-                previous_decision is not None
-                and previous_decision.record_id != selected.record_id
-            ):
-                previous = self._state.get_record(previous_decision.record_id)
-                if previous is not None:
-                    remaining_targets = tuple(
-                        item
-                        for item in previous.selected_targets
-                        if item != target_name
-                    )
-                    previous_state = previous.state
-                    if (
-                        previous_state
-                        in {
-                            PluginLifecycleState.SELECTED,
-                            PluginLifecycleState.ACTIVE,
-                        }
-                        and not remaining_targets
-                    ):
-                        self._transition(
-                            previous,
-                            PluginLifecycleState.REGISTERED,
-                        )
-                        previous_state = PluginLifecycleState.REGISTERED
+            if switch_plan.changes_winner:
+                previous = self._state.get_record(
+                    switch_plan.previous_record_id
+                )
+                release_plan = plan_previous_selection_release(
+                    target=target_name,
+                    winner_record_id=selected.record_id,
+                    previous_record=previous,
+                    transition_validator=self._transition,
+                )
+                if release_plan is not None:
                     self._replace(
                         replace(
                             previous,
-                            state=previous_state,
-                            selected_targets=remaining_targets,
+                            state=release_plan.state,
+                            selected_targets=release_plan.selected_targets,
                         )
                     )
 
             selected = self._state.get_record(selected.record_id)
-            selected_targets = tuple(
-                sorted(set(selected.selected_targets).union({target_name}))
+            winner_plan = plan_winner_selection(
+                target=target_name,
+                winner=selected,
+                transition_validator=self._transition,
             )
-            selected_state = selected.state
-            if selected_state is PluginLifecycleState.REGISTERED:
-                self._transition(
-                    selected,
-                    PluginLifecycleState.SELECTED,
-                )
-                selected_state = PluginLifecycleState.SELECTED
-            elif selected_state not in {
-                PluginLifecycleState.SELECTED,
-                PluginLifecycleState.ACTIVE,
-            }:
-                raise BackendPluginLifecycleError(
-                    "Selected backend is not registered",
-                    plugin_id=selected.plugin_id,
-                    entry_point=selected.entry_point_name,
-                    field="state",
-                    expected="registered, selected, or active",
-                    actual=selected_state.value,
-                    remediation=(
-                        "Use Registry.select() so validation, loading, and "
-                        "registration complete before state selection."
-                    ),
-                )
-
             selected = self._replace(
                 replace(
                     selected,
-                    state=selected_state,
-                    selected_targets=selected_targets,
+                    state=winner_plan.state,
+                    selected_targets=winner_plan.selected_targets,
                 )
             )
             decision = replace(decision, record=selected)
             self._state.set_selection(target_name, decision)
-            self._state.increment_generation()
+            if winner_plan.increment_generation:
+                self._state.increment_generation()
             return decision
 
     def get_selection(self, target: str) -> Optional[SelectionDecision]:
@@ -1067,51 +998,15 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("activate")
             self.discover()
             record = self._resolve(identifier)
-            other_active = tuple(
-                candidate
-                for candidate in self._state.records_snapshot()
-                if (
-                    candidate.record_id != record.record_id
-                    and candidate.state is PluginLifecycleState.ACTIVE
-                )
+            plan = plan_activation(
+                record,
+                self._state.records_snapshot(),
+                transition_validator=self._transition,
             )
-            if other_active:
-                active_ids = tuple(
-                    sorted(candidate.record_id for candidate in other_active)
-                )
-                raise BackendPluginConflictError(
-                    "Cannot activate more than one backend plugin: "
-                    + ", ".join(active_ids + (record.record_id,)),
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                    field="active",
-                    expected="one ACTIVE backend plugin",
-                    actual=", ".join(active_ids + (record.record_id,)),
-                    remediation=(
-                        "Keep the current active driver or explicitly reset "
-                        "runtime state before activating another backend."
-                    ),
-                )
-
-            if record.state is PluginLifecycleState.ACTIVE:
+            if plan.return_existing:
                 return record
-            if record.state is not PluginLifecycleState.SELECTED:
-                raise BackendPluginLifecycleError(
-                    "Backend plugin must be selected before activation",
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                    field="state",
-                    expected=PluginLifecycleState.SELECTED.value,
-                    actual=record.state.value,
-                    remediation=(
-                        "Resolve the backend through Registry.select() before "
-                        "constructing and activating its runtime driver."
-                    ),
-                )
-
-            self._transition(record, PluginLifecycleState.ACTIVE)
             return self._replace(
-                replace(record, state=PluginLifecycleState.ACTIVE)
+                replace(record, state=plan.transition_to)
             )
 
     def diagnostics(self, identifier: Optional[str] = None) -> Any:
