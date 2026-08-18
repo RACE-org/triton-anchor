@@ -93,8 +93,17 @@
       "python/triton_anchor/tests/test_backend_registry_resilience.py::test_reset_waits_for_register_then_leaves_no_inflight_state",
       "python/triton_anchor/tests/test_backend_registry_resilience.py::test_full_preflight_reports_first_failure_from_multiple_faults",
       "python/triton_anchor/tests/test_backend_registry_resilience.py::test_backend_plugin_record_to_dict_is_stable_normalized_public_view",
-      "python/triton_anchor/tests/test_backend_registry_state.py::test_replace_record_synchronizes_decision_without_generation_change",
+      "python/triton_anchor/tests/test_backend_registry_state.py::test_replace_record_does_not_mutate_selection_or_generation",
       "python/triton_anchor/tests/test_backend_registry_state.py::test_clear_for_reset_preserves_epoch_hooks_and_resetting_marker",
+      "python/triton_anchor/tests/test_backend_registry_selection_state.py::test_selection_state_drops_only_the_record_snapshot",
+      "python/triton_anchor/tests/test_backend_registry_selection_state.py::test_materialization_uses_current_record_without_changing_public_view",
+      "python/triton_anchor/tests/test_backend_stage3_state_source.py::test_current_selection_materializes_active_record_without_generation_change",
+      "python/triton_anchor/tests/test_backend_stage3_state_source.py::test_multi_target_current_decisions_share_latest_record_snapshot",
+      "python/triton_anchor/tests/test_backend_stage3_state_source.py::test_generation_and_reset_hook_order_remain_facade_owned",
+      "python/triton_anchor/tests/test_backend_stage3_concurrency.py::test_concurrent_activation_has_exactly_one_active_record",
+      "python/triton_anchor/tests/test_backend_stage3_concurrency.py::test_select_holding_registry_lock_completes_before_waiting_reset",
+      "python/triton_anchor/tests/test_backend_stage3_concurrency.py::test_select_during_reset_hook_fails_then_succeeds_after_reset",
+      "python/triton_anchor/tests/test_backend_stage3_concurrency.py::test_reset_hook_failure_keeps_order_and_does_not_skip_shutdown",
       "python/triton_anchor/tests/test_backend_registry_catalog.py::test_discovery_helper_and_catalog_preserve_stable_metadata_order",
       "python/triton_anchor/tests/test_backend_registry_catalog.py::test_resolve_prefers_exact_record_id_and_preserves_error_fields",
       "python/triton_anchor/tests/test_backend_registry_validator.py::test_success_plan_preserves_validator_order_arguments_and_reports",
@@ -110,6 +119,13 @@
       "python/triton_anchor/tests/test_backend_selection.py::test_selection_decision_to_dict_has_stable_normalized_shape",
       "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_registry_reset_clears_adapter_and_lazy_driver",
       "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_concurrent_reset_invalidates_cached_selection_snapshot",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_manifest_binding_preserves_same_key_manual_legacy_catalog",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_registry_legacy_catalog_entry_is_resettable",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_registry_legacy_does_not_replace_same_key_manual_catalog",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_legacy_generation_cleanup_does_not_remove_fresh_same_id_entry",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_driver_candidates_fail_if_generation_changes_between_bindings",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_failed_driver_batch_prunes_published_legacy_candidate",
+      "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_stale_legacy_decision_failure_prunes_previous_projection",
       "python/triton_anchor/tests/test_setup_metadata.py::test_setup_preserves_ttgpu_package_data_switch"
     ]
   },
@@ -138,7 +154,7 @@
     },
     "fast_gate": {
       "status": "passed",
-      "tests_passed": 302
+      "tests_passed": 318
     },
     "ac1_rejection_matrix": {
       "status": "passed",

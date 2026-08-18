@@ -100,7 +100,7 @@ def test_refactor_baseline_manifest_is_self_contained_and_t10_2_free():
         assert "t10.2" not in " ".join(gate["argv"]).lower()
 
     results = baseline["recorded_results"]
-    assert results["fast_gate"] == {"status": "passed", "tests_passed": 302}
+    assert results["fast_gate"] == {"status": "passed", "tests_passed": 318}
     assert results["ac1_rejection_matrix"]["artifact_case_count"] == 33
     assert results["ac1_rejection_matrix"][
         "static_rejection_entry_point_load_calls"
