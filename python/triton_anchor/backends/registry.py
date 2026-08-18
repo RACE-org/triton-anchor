@@ -35,6 +35,12 @@ from ._registry_discovery import (
     entry_point_value as _entry_point_value,
     source_hint as _source_hint,
 )
+from ._registry_diagnostics import (
+    diagnostics_attribute_failure as _diagnostics_attribute_failure,
+    diagnostics_callback_failure as _diagnostics_callback_failure,
+    normalize_diagnostics_value as _normalize_diagnostics_value,
+    project_registry_diagnostics as _project_registry_diagnostics,
+)
 from ._registry_lifecycle import (
     best_effort_shutdown as _best_effort_shutdown,
     ensure_transition as _ensure_transition,
@@ -1089,61 +1095,52 @@ class BackendPluginRegistry:
                     )
                 except Exception as exc:
                     diagnostics = None
-                    result["plugin_diagnostics"] = {
-                        "error": BackendPluginLifecycleError(
+                    result["plugin_diagnostics"] = (
+                        _diagnostics_attribute_failure(
                             f"Unable to inspect backend diagnostics hook: {exc}",
                             plugin_id=record.plugin_id,
                             entry_point=record.entry_point_name,
-                            field="diagnostics",
-                            expected="a callable hook or no hook",
                             actual=f"<error: {exc}>",
-                            remediation=(
-                                "Fix the diagnostics attribute so inspection "
-                                "does not raise."
-                            ),
-                        ).to_dict()
-                    }
+                        )
+                    )
                 if callable(diagnostics):
                     try:
                         value = diagnostics()
                         result["plugin_diagnostics"] = (
-                            dict(value) if isinstance(value, Mapping) else value
+                            _normalize_diagnostics_value(value)
                         )
                     except Exception as exc:
-                        result["plugin_diagnostics"] = {
-                            "error": BackendPluginLifecycleError(
+                        result["plugin_diagnostics"] = (
+                            _diagnostics_callback_failure(
                                 f"Backend plugin diagnostics() failed: {exc}",
                                 plugin_id=record.plugin_id,
                                 entry_point=record.entry_point_name,
-                                field="diagnostics",
-                                expected="a diagnostic result",
                                 actual=f"<error: {exc}>",
-                                remediation="Fix diagnostics() so it is read-only.",
-                            ).to_dict()
-                        }
+                            )
+                        )
                 results.append(result)
             if identifier is not None:
                 return results[0]
-            return {
-                "preflight_profile": self._preflight_profile,
-                "core_abi_fingerprint": (
+            return _project_registry_diagnostics(
+                preflight_profile=self._preflight_profile,
+                core_abi_fingerprint=(
                     self._state.environment.core_abi_fingerprint
                     if self._state.environment is not None
                     else None
                 ),
-                "registry_errors": [
+                registry_errors=[
                     error.to_dict()
                     for error in self._state.registry_errors_snapshot()
                 ],
-                "conflicts": self.conflicts().to_dict(),
-                "selections": {
+                conflicts=self.conflicts().to_dict(),
+                selections={
                     target: self._materialize_selection(selection).to_dict()
                     for target, selection in sorted(
                         self._state.selection_states_snapshot()
                     )
                 },
-                "plugins": results,
-            }
+                plugins=results,
+            )
 
     def reset(self) -> Tuple[BackendPluginError, ...]:
         """Best-effort shutdown and clear state; Python modules stay imported."""
