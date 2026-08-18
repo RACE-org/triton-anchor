@@ -24,15 +24,14 @@ from .capabilities import (
     evaluate_capabilities,
     validate_plugin_capabilities,
 )
+from ._registry_catalog import RegistryCatalog
 from ._registry_discovery import (
     BACKEND_ENTRY_POINT_GROUP as _BACKEND_ENTRY_POINT_GROUP,
-    allocate_record_id as _allocate_record_id,
     copy_manifest_error as _copy_manifest_error,
     discover_distributions as _discover_distributions,
     distribution_identity as _distribution_identity,
     entry_point_name as _entry_point_name,
     entry_point_value as _entry_point_value,
-    record_metadata as _record_metadata,
     source_hint as _source_hint,
 )
 from ._registry_lifecycle import (
@@ -59,7 +58,6 @@ from .errors import (
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
-    BackendPluginSelectionError,
 )
 from .manifest import BackendPluginManifest, load_distribution_manifest
 from .protocol import (
@@ -231,6 +229,10 @@ class BackendPluginRegistry:
             )
         self._preflight_profile = preflight_profile
         self._state = RegistryState()
+        self._catalog = RegistryCatalog(
+            self._state,
+            record_factory=lambda **fields: BackendPluginRecord(**fields),
+        )
         self._lock = threading.RLock()
 
     def _ensure_not_resetting(self, operation: str) -> None:
@@ -297,7 +299,7 @@ class BackendPluginRegistry:
         self._state.append_registry_error(error)
 
     def _allocate_record_id(self, distribution_name: Optional[str], name: str) -> str:
-        return _allocate_record_id(self._state, distribution_name, name)
+        return self._catalog.allocate_record_id(distribution_name, name)
 
     def _store_record(
         self,
@@ -310,25 +312,15 @@ class BackendPluginRegistry:
         compatibility_status: PluginCompatibilityStatus,
         error: Optional[BackendPluginError] = None,
     ) -> BackendPluginRecord:
-        metadata = _record_metadata(entry_point, distribution)
-        record = BackendPluginRecord(
-            record_id=self._allocate_record_id(
-                metadata.distribution_name,
-                metadata.entry_point_name,
-            ),
-            entry_point_name=metadata.entry_point_name,
-            entry_point_value=metadata.entry_point_value,
-            distribution_name=metadata.distribution_name,
-            distribution_version=metadata.distribution_version,
-            source=source,
-            state=state,
-            compatibility_status=compatibility_status,
+        return self._catalog.accept_discovery_result(
             entry_point=entry_point,
             distribution=distribution,
+            source=source,
             manifest=manifest,
-            errors=(error,) if error is not None else (),
+            state=state,
+            compatibility_status=compatibility_status,
+            error=error,
         )
-        return self._state.insert_record(record)
 
     def discover(self, *, strict: bool = False) -> Tuple[BackendPluginRecord, ...]:
         """Discover backend metadata without importing backend code."""
@@ -383,44 +375,13 @@ class BackendPluginRegistry:
         with self._lock:
             if not self._state.discovered:
                 self.discover()
-            return self._state.records_snapshot()
+            return self._catalog.list_snapshot()
 
     def list_plugins(self) -> Tuple[BackendPluginRecord, ...]:
         return self.list()
 
     def _resolve(self, identifier: str) -> BackendPluginRecord:
-        if self._state.contains_record(identifier):
-            return self._state.get_record(identifier)
-        matches = tuple(
-            record
-            for record in self._state.records_snapshot()
-            if record.registry_key == identifier
-        )
-        if not matches:
-            raise BackendPluginSelectionError(
-                f"Unknown backend plugin record '{identifier}'",
-                field="registry_key",
-                expected="an existing record_id or unique registry_key",
-                actual=identifier,
-                remediation=(
-                    "Call registry.list() and use one of the reported record_id "
-                    "or registry_key values."
-                ),
-            )
-        if len(matches) > 1:
-            raise BackendPluginConflictError(
-                f"Backend plugin key '{identifier}' is ambiguous across records: "
-                + ", ".join(record.record_id for record in matches),
-                plugin_id=identifier,
-                field="registry_key",
-                expected="a unique plugin identity",
-                actual=", ".join(record.record_id for record in matches),
-                remediation=(
-                    "Use a record_id for inspection now; W7 will report and "
-                    "govern the underlying identity conflict."
-                ),
-            )
-        return matches[0]
+        return self._catalog.resolve(identifier)
 
     def inspect(self, identifier: str) -> BackendPluginRecord:
         """Return one record without validating or importing it."""
@@ -432,7 +393,7 @@ class BackendPluginRegistry:
         """Return deterministic W7 static conflicts without loading plugins."""
         with self._lock:
             self.discover()
-            return detect_conflicts(self._state.records_snapshot())
+            return self._catalog.conflict_view()
 
     def _replace(self, record: BackendPluginRecord) -> BackendPluginRecord:
         return self._state.replace_record(record)
