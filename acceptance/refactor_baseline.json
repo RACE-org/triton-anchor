@@ -126,7 +126,17 @@
       "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_driver_candidates_fail_if_generation_changes_between_bindings",
       "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_failed_driver_batch_prunes_published_legacy_candidate",
       "python/triton_anchor/tests/test_backend_triton_integration.py::test_w9_stale_legacy_decision_failure_prunes_previous_projection",
-      "python/triton_anchor/tests/test_setup_metadata.py::test_setup_preserves_ttgpu_package_data_switch"
+      "python/triton_anchor/tests/test_setup_metadata.py::test_setup_preserves_ttgpu_package_data_switch",
+      "python/triton_anchor/tests/test_backend_stage4_identity_contract.py::test_record_ids_canonicalize_and_ignore_version_value_and_plugin_id",
+      "python/triton_anchor/tests/test_backend_stage4_identity_contract.py::test_catalog_exact_record_id_precedes_cross_alias_but_selection_rejects_it",
+      "python/triton_anchor/tests/test_backend_stage4_identity_contract.py::test_legacy_identity_import_aliases_and_registry_namespace_are_frozen",
+      "python/triton_anchor/tests/test_backend_stage4_rejection_contract.py::test_record_rejection_uses_exact_snapshot_and_appends_error_identity",
+      "python/triton_anchor/tests/test_backend_stage4_rejection_contract.py::test_distribution_scope_uses_identity_and_specializes_discovered_manifest_errors",
+      "python/triton_anchor/tests/test_backend_stage4_rejection_contract.py::test_process_environment_failure_rejects_only_discovered_manifests_once",
+      "python/triton_anchor/tests/test_backend_stage4_rejection_contract.py::test_multi_conflict_keeps_only_first_kind_error_and_preserves_status",
+      "python/triton_anchor/tests/test_backend_stage4_diagnostics_contract.py::test_aggregate_preserves_plugin_callback_and_selection_target_order_when_one_hook_fails",
+      "python/triton_anchor/tests/test_backend_stage4_diagnostics_contract.py::test_cross_thread_reset_waits_for_diagnostics_callback_rlock",
+      "python/triton_anchor/tests/test_backend_stage4_diagnostics_contract.py::test_registry_internal_modules_do_not_reverse_import_registry_facade"
     ]
   },
   "slow_gates": [
@@ -154,7 +164,7 @@
     },
     "fast_gate": {
       "status": "passed",
-      "tests_passed": 318
+      "tests_passed": 354
     },
     "ac1_rejection_matrix": {
       "status": "passed",
