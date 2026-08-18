@@ -13,7 +13,6 @@ from typing import (
     Iterable,
     Mapping,
     Optional,
-    Set,
     Tuple,
 )
 
@@ -43,6 +42,7 @@ from ._registry_lifecycle import (
     load_plugin_object as _load_plugin_object,
 )
 from ._registry_preflight import evaluate_record_preflight
+from ._registry_state import RegistryState
 from .compatibility import (
     CompatibilityReport,
     validate_backend_plugin,
@@ -230,21 +230,11 @@ class BackendPluginRegistry:
                 "preflight_profile must be 'triton_version' or 'full'"
             )
         self._preflight_profile = preflight_profile
-        self._records: Dict[str, BackendPluginRecord] = {}
-        self._registry_errors: Tuple[BackendPluginError, ...] = ()
-        self._environment: Optional[CoreEnvironment] = None
-        self._environment_error: Optional[BackendPluginError] = None
-        self._discovered = False
-        self._loading: Set[str] = set()
-        self._registering: Set[str] = set()
-        self._selections: Dict[str, SelectionDecision] = {}
-        self._reset_hooks: list = []
-        self._resetting = False
-        self._generation = 0
+        self._state = RegistryState()
         self._lock = threading.RLock()
 
     def _ensure_not_resetting(self, operation: str) -> None:
-        if self._resetting:
+        if self._state.resetting:
             raise BackendPluginLifecycleError(
                 "Backend Registry operation is not allowed during reset",
                 field=operation,
@@ -262,20 +252,19 @@ class BackendPluginRegistry:
             raise TypeError("reset hook must be callable")
         with self._lock:
             self._ensure_not_resetting("register_reset_hook")
-            if callback not in self._reset_hooks:
-                self._reset_hooks.append(callback)
+            self._state.add_reset_hook(callback)
 
     @property
     def generation(self) -> int:
         """Return the Registry epoch used to invalidate W9 adapter snapshots."""
         with self._lock:
-            return self._generation
+            return self._state.generation
 
     def _get_environment(self) -> CoreEnvironment:
-        if self._environment is not None:
-            return self._environment
-        if self._environment_error is not None:
-            raise self._environment_error
+        if self._state.environment is not None:
+            return self._state.environment
+        if self._state.environment_error is not None:
+            raise self._state.environment_error
         try:
             environment = self._environment_provider()
         except Exception as exc:
@@ -288,7 +277,7 @@ class BackendPluginRegistry:
                     "metadata can be read before validating plugins."
                 ),
             )
-            self._environment_error = error
+            self._state.cache_environment_error(error)
             self._record_registry_error(error)
             raise error from exc
         if not isinstance(environment, CoreEnvironment):
@@ -298,18 +287,17 @@ class BackendPluginRegistry:
                 type(environment).__name__,
                 remediation="Return a CoreEnvironment from environment_provider.",
             )
-            self._environment_error = error
+            self._state.cache_environment_error(error)
             self._record_registry_error(error)
             raise error
-        self._environment = environment
+        self._state.cache_environment(environment)
         return environment
 
     def _record_registry_error(self, error: BackendPluginError) -> None:
-        if all(existing is not error for existing in self._registry_errors):
-            self._registry_errors += (error,)
+        self._state.append_registry_error(error)
 
     def _allocate_record_id(self, distribution_name: Optional[str], name: str) -> str:
-        return _allocate_record_id(self._records, distribution_name, name)
+        return _allocate_record_id(self._state, distribution_name, name)
 
     def _store_record(
         self,
@@ -340,14 +328,13 @@ class BackendPluginRegistry:
             manifest=manifest,
             errors=(error,) if error is not None else (),
         )
-        self._records[record.record_id] = record
-        return record
+        return self._state.insert_record(record)
 
     def discover(self, *, strict: bool = False) -> Tuple[BackendPluginRecord, ...]:
         """Discover backend metadata without importing backend code."""
         with self._lock:
             self._ensure_not_resetting("discover")
-            if self._discovered:
+            if self._state.discovered:
                 records = self.list()
                 if strict:
                     self._raise_first_discovery_error(records)
@@ -366,7 +353,7 @@ class BackendPluginRegistry:
                         "discovering backend plugins."
                     ),
                 )
-                self._registry_errors = (error,)
+                self._state.replace_registry_errors((error,))
                 raise error from exc
 
             _discover_distributions(
@@ -375,7 +362,7 @@ class BackendPluginRegistry:
                 record_registry_error=self._record_registry_error,
                 load_manifest=load_distribution_manifest,
             )
-            self._discovered = True
+            self._state.mark_discovered()
             records = self.list()
             if strict:
                 self._raise_first_discovery_error(records)
@@ -384,8 +371,9 @@ class BackendPluginRegistry:
     def _raise_first_discovery_error(
         self, records: Tuple[BackendPluginRecord, ...]
     ) -> None:
-        if self._registry_errors:
-            raise self._registry_errors[0]
+        registry_errors = self._state.registry_errors_snapshot()
+        if registry_errors:
+            raise registry_errors[0]
         for record in records:
             if record.state is PluginLifecycleState.REJECTED and record.error:
                 raise record.error
@@ -393,19 +381,19 @@ class BackendPluginRegistry:
     def list(self) -> Tuple[BackendPluginRecord, ...]:
         """Return immutable record snapshots without validation or loading."""
         with self._lock:
-            if not self._discovered:
+            if not self._state.discovered:
                 self.discover()
-            return tuple(self._records.values())
+            return self._state.records_snapshot()
 
     def list_plugins(self) -> Tuple[BackendPluginRecord, ...]:
         return self.list()
 
     def _resolve(self, identifier: str) -> BackendPluginRecord:
-        if identifier in self._records:
-            return self._records[identifier]
+        if self._state.contains_record(identifier):
+            return self._state.get_record(identifier)
         matches = tuple(
             record
-            for record in self._records.values()
+            for record in self._state.records_snapshot()
             if record.registry_key == identifier
         )
         if not matches:
@@ -444,17 +432,10 @@ class BackendPluginRegistry:
         """Return deterministic W7 static conflicts without loading plugins."""
         with self._lock:
             self.discover()
-            return detect_conflicts(self._records.values())
+            return detect_conflicts(self._state.records_snapshot())
 
     def _replace(self, record: BackendPluginRecord) -> BackendPluginRecord:
-        self._records[record.record_id] = record
-        for target, decision in tuple(self._selections.items()):
-            if decision.record_id == record.record_id:
-                self._selections[target] = replace(
-                    decision,
-                    record=record,
-                )
-        return record
+        return self._state.replace_record(record)
 
     def _reject(
         self,
@@ -478,7 +459,7 @@ class BackendPluginRegistry:
     ) -> None:
         """Mark every record involved in one fatal conflict REJECTED."""
         for conflicted_id in conflict.record_ids:
-            conflicted = self._records.get(conflicted_id)
+            conflicted = self._state.get_record(conflicted_id)
             if (
                 conflicted is not None
                 and conflicted.state is not PluginLifecycleState.REJECTED
@@ -503,7 +484,7 @@ class BackendPluginRegistry:
         specialize_error: bool = False,
     ) -> None:
         """Fail closed for one shared validation scope without importing."""
-        for candidate in tuple(self._records.values()):
+        for candidate in self._state.records_snapshot():
             if (
                 candidate.source is not PluginSource.MANIFEST
                 or candidate.state is not PluginLifecycleState.DISCOVERED
@@ -563,7 +544,7 @@ class BackendPluginRegistry:
                 exc,
                 PluginCompatibilityStatus.INCOMPATIBLE,
             )
-            return self._records[record.record_id]
+            return self._state.get_record(record.record_id)
         outcome = evaluate_record_preflight(
             record,
             environment,
@@ -583,7 +564,7 @@ class BackendPluginRegistry:
                     distribution=record.distribution,
                     specialize_error=outcome.specialize_error,
                 )
-                return self._records[record.record_id]
+                return self._state.get_record(record.record_id)
             return self._reject(
                 record,
                 outcome.error,
@@ -624,7 +605,7 @@ class BackendPluginRegistry:
                     raise record.error
                 return record
 
-            for record in tuple(self._records.values()):
+            for record in self._state.records_snapshot():
                 self._validate_record(record)
             records = self.list()
             if strict:
@@ -663,7 +644,7 @@ class BackendPluginRegistry:
             and record.manifest.isolation_mode
             is PluginIsolationMode.NATIVE_IN_PROCESS
         ):
-            for candidate in tuple(self._records.values()):
+            for candidate in self._state.records_snapshot():
                 if (
                     candidate.record_id == record.record_id
                     or candidate.source is not PluginSource.MANIFEST
@@ -675,9 +656,9 @@ class BackendPluginRegistry:
                     continue
                 self._validate_record(candidate)
 
-        record = self._records[record.record_id]
+        record = self._state.get_record(record.record_id)
         for conflict in detect_conflicts(
-            self._records.values()
+            self._state.records_snapshot()
         ).fatal_conflicts:
             if record.record_id in conflict.record_ids:
                 error = conflict.to_error()
@@ -716,7 +697,7 @@ class BackendPluginRegistry:
             }:
                 return record
 
-            if record.record_id in self._loading:
+            if self._state.is_loading(record.record_id):
                 raise BackendPluginLifecycleError(
                     "Recursive backend plugin load is not allowed",
                     plugin_id=record.plugin_id,
@@ -730,7 +711,7 @@ class BackendPluginRegistry:
                     ),
                 )
             self._transition(record, PluginLifecycleState.LOADED)
-            self._loading.add(record.record_id)
+            self._state.begin_loading(record.record_id)
             try:
                 try:
                     plugin = _load_plugin_object(record.entry_point)
@@ -748,7 +729,9 @@ class BackendPluginRegistry:
                             "dependencies and reinstall it."
                         ),
                     )
-                    current = self._records.get(record.record_id, record)
+                    current = self._state.get_record(record.record_id)
+                    if current is None:
+                        current = record
                     self._reject(
                         current,
                         error,
@@ -756,7 +739,7 @@ class BackendPluginRegistry:
                     )
                     raise error from exc
 
-                current = self._records.get(record.record_id)
+                current = self._state.get_record(record.record_id)
                 if (
                     current is None
                     or current.state is PluginLifecycleState.REJECTED
@@ -791,7 +774,7 @@ class BackendPluginRegistry:
                     )
                 )
             finally:
-                self._loading.discard(record.record_id)
+                self._state.end_loading(record.record_id)
 
     def register(
         self,
@@ -809,7 +792,7 @@ class BackendPluginRegistry:
                 PluginLifecycleState.ACTIVE,
             }:
                 return record
-            if record.record_id in self._registering:
+            if self._state.is_registering(record.record_id):
                 raise BackendPluginLifecycleError(
                     "Recursive backend plugin registration is not allowed",
                     plugin_id=record.plugin_id,
@@ -823,7 +806,7 @@ class BackendPluginRegistry:
                     ),
                 )
             self._transition(record, PluginLifecycleState.REGISTERED)
-            self._registering.add(record.record_id)
+            self._state.begin_registering(record.record_id)
             try:
                 plugin = record.plugin_object
                 interface = _inspect_runtime_interfaces(plugin)
@@ -893,9 +876,11 @@ class BackendPluginRegistry:
                             initialized = True
                         except Exception as exc:
                             shutdown_called = _best_effort_shutdown(plugin)
+                            current = self._state.get_record(record.record_id)
+                            if current is None:
+                                current = record
                             current = replace(
-                                self._records.get(record.record_id, record),
-                                shutdown_called=shutdown_called,
+                                current, shutdown_called=shutdown_called
                             )
                             self._replace(current)
                             error = BackendPluginLifecycleError(
@@ -917,7 +902,7 @@ class BackendPluginRegistry:
                             )
                             raise error from exc
 
-                current = self._records.get(record.record_id)
+                current = self._state.get_record(record.record_id)
                 if (
                     current is None
                     or current.state is PluginLifecycleState.REJECTED
@@ -954,7 +939,7 @@ class BackendPluginRegistry:
                     )
                 )
             finally:
-                self._registering.discard(record.record_id)
+                self._state.end_registering(record.record_id)
 
     def select(
         self,
@@ -991,12 +976,12 @@ class BackendPluginRegistry:
             )
 
             target_name = decision.target
-            previous_decision = self._selections.get(target_name)
+            previous_decision = self._state.get_selection(target_name)
             if (
                 previous_decision is not None
                 and previous_decision.record_id != decision.record_id
             ):
-                previous = self._records.get(previous_decision.record_id)
+                previous = self._state.get_record(previous_decision.record_id)
                 if (
                     previous is not None
                     and previous.state is PluginLifecycleState.ACTIVE
@@ -1019,7 +1004,7 @@ class BackendPluginRegistry:
                 previous_decision is not None
                 and previous_decision.record_id != selected.record_id
             ):
-                previous = self._records.get(previous_decision.record_id)
+                previous = self._state.get_record(previous_decision.record_id)
                 if previous is not None:
                     remaining_targets = tuple(
                         item
@@ -1048,7 +1033,7 @@ class BackendPluginRegistry:
                         )
                     )
 
-            selected = self._records[selected.record_id]
+            selected = self._state.get_record(selected.record_id)
             selected_targets = tuple(
                 sorted(set(selected.selected_targets).union({target_name}))
             )
@@ -1084,14 +1069,14 @@ class BackendPluginRegistry:
                 )
             )
             decision = replace(decision, record=selected)
-            self._selections[target_name] = decision
-            self._generation += 1
+            self._state.set_selection(target_name, decision)
+            self._state.increment_generation()
             return decision
 
     def get_selection(self, target: str) -> Optional[SelectionDecision]:
         """Return the cached selection for one target without loading."""
         with self._lock:
-            return self._selections.get(target)
+            return self._state.get_selection(target)
 
     def activate(self, identifier: str) -> BackendPluginRecord:
         """Mark one selected runtime pair active without reloading it.
@@ -1106,7 +1091,7 @@ class BackendPluginRegistry:
             record = self._resolve(identifier)
             other_active = tuple(
                 candidate
-                for candidate in self._records.values()
+                for candidate in self._state.records_snapshot()
                 if (
                     candidate.record_id != record.record_id
                     and candidate.state is PluginLifecycleState.ACTIVE
@@ -1158,7 +1143,7 @@ class BackendPluginRegistry:
             records = (
                 (self._resolve(identifier),)
                 if identifier is not None
-                else tuple(self._records.values())
+                else self._state.records_snapshot()
             )
             results = []
             for record in records:
@@ -1210,17 +1195,20 @@ class BackendPluginRegistry:
             return {
                 "preflight_profile": self._preflight_profile,
                 "core_abi_fingerprint": (
-                    self._environment.core_abi_fingerprint
-                    if self._environment is not None
+                    self._state.environment.core_abi_fingerprint
+                    if self._state.environment is not None
                     else None
                 ),
                 "registry_errors": [
-                    error.to_dict() for error in self._registry_errors
+                    error.to_dict()
+                    for error in self._state.registry_errors_snapshot()
                 ],
                 "conflicts": self.conflicts().to_dict(),
                 "selections": {
                     target: decision.to_dict()
-                    for target, decision in sorted(self._selections.items())
+                    for target, decision in sorted(
+                        self._state.selections_snapshot()
+                    )
                 },
                 "plugins": results,
             }
@@ -1234,7 +1222,9 @@ class BackendPluginRegistry:
         try:
             with self._lock:
                 self._ensure_not_resetting("reset")
-                if self._loading or self._registering:
+                loading = self._state.loading_snapshot()
+                registering = self._state.registering_snapshot()
+                if loading or registering:
                     raise BackendPluginLifecycleError(
                         "Cannot reset the Registry during plugin load or "
                         "registration",
@@ -1242,36 +1232,29 @@ class BackendPluginRegistry:
                         expected="no in-progress plugin lifecycle operation",
                         actual=(
                             "loading="
-                            + ",".join(sorted(self._loading))
+                            + ",".join(sorted(loading))
                             + "; registering="
-                            + ",".join(sorted(self._registering))
+                            + ",".join(sorted(registering))
                         ),
                         remediation=(
                             "Complete the current load/register callback before "
                             "resetting the Registry."
                         ),
                 )
-                self._resetting = True
+                self._state.begin_reset()
                 reset_started = True
                 shutdown_records = tuple(
                     record
-                    for record in self._records.values()
+                    for record in self._state.records_snapshot()
                     if (
                         record.source is PluginSource.MANIFEST
                         and record.plugin_object is not None
                         and not record.shutdown_called
                     )
                 )
-                reset_hooks = tuple(self._reset_hooks)
-                self._records.clear()
-                self._registry_errors = ()
-                self._environment = None
-                self._environment_error = None
-                self._discovered = False
-                self._loading.clear()
-                self._registering.clear()
-                self._selections.clear()
-                self._generation += 1
+                reset_hooks = self._state.reset_hooks_snapshot()
+                self._state.clear_for_reset()
+                self._state.increment_generation()
 
             # W9 hooks may hold their own lazy-cache locks.  Run them after
             # releasing the Registry lock to avoid Registry/LazyProxy lock
@@ -1347,7 +1330,7 @@ class BackendPluginRegistry:
         finally:
             if reset_started:
                 with self._lock:
-                    self._resetting = False
+                    self._state.end_reset()
 
 
 backend_plugin_registry = BackendPluginRegistry()
