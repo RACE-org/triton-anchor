@@ -74,6 +74,20 @@ class HookPlugin(RuntimePlugin):
         return {"healthy": True}
 
 
+class ProtocolDiagnosticsPlugin(RuntimePlugin):
+    def __init__(self, value=None, *, fail_on_read=False):
+        self.value = value if value is not None else {"healthy": True}
+        self.fail_on_read = fail_on_read
+        self.diagnostic_reads = 0
+
+    @property
+    def diagnostics(self):
+        self.diagnostic_reads += 1
+        if self.fail_on_read:
+            raise AssertionError("diagnostics must not be read")
+        return lambda: self.value
+
+
 class BrokenRuntimePlugin:
     compiler_cls = DummyCompiler
     driver_cls = "not-a-class"
@@ -206,6 +220,91 @@ def build_test_shared_library(
     return output
 
 
+def build_test_shared_library_with_dependency(
+    root,
+    relative_path,
+    *,
+    dependency,
+):
+    output = Path(root) / relative_path
+    output.parent.mkdir(parents=True, exist_ok=True)
+    source = output.with_suffix(".c")
+    source.write_text(
+        "extern int private_toolchain_symbol(void);\n"
+        "int vendor_test_entry(void) { return private_toolchain_symbol(); }\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "cc",
+            "-shared",
+            "-fPIC",
+            "-Wl,-soname,libvendor_test.so",
+            "-o",
+            str(output),
+            str(source),
+            str(dependency),
+        ],
+        check=True,
+    )
+    return output
+
+
+def build_test_shared_library_with_unresolved_symbol(
+    root,
+    relative_path,
+    *,
+    missing_symbol="definitely_missing_symbol",
+):
+    output = Path(root) / relative_path
+    output.parent.mkdir(parents=True, exist_ok=True)
+    source = output.with_suffix(".c")
+    source.write_text(
+        "extern int {0}(void);\n"
+        "int vendor_test_entry(void) {{ return {0}(); }}\n".format(
+            missing_symbol
+        ),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "cc",
+            "-shared",
+            "-fPIC",
+            "-Wl,-soname,libvendor_test.so",
+            "-o",
+            str(output),
+            str(source),
+        ],
+        check=True,
+    )
+    return output
+
+
+def build_test_shared_library_with_libc_reference(root, relative_path):
+    output = Path(root) / relative_path
+    output.parent.mkdir(parents=True, exist_ok=True)
+    source = output.with_suffix(".c")
+    source.write_text(
+        "#include <stdio.h>\n"
+        "int vendor_test_entry(void) { return puts(\"validated\"); }\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "cc",
+            "-shared",
+            "-fPIC",
+            "-Wl,-soname,libvendor_test.so",
+            "-o",
+            str(output),
+            str(source),
+        ],
+        check=True,
+    )
+    return output
+
+
 def plugin_record(
     entry_point="mock",
     *,
@@ -291,7 +390,7 @@ def test_discovery_is_python38_safe_deterministic_and_import_free(tmp_path):
         supported_tags=(SUPPORTED_TAG,),
     )
 
-    records = registry.discover()
+    records = registry.list_plugins()
     assert [record.record_id for record in records] == [
         "alpha-backend:alpha",
         "alpha-backend:zeta",
@@ -620,6 +719,278 @@ def test_missing_native_file_rejects_only_its_plugin_record(tmp_path):
 
 
 @pytest.mark.parametrize(
+    "specifier,compatible",
+    [
+        pytest.param("==1.0", True, id="current-supported"),
+        pytest.param("==0.9", False, id="core-newer-than-plugin"),
+    ],
+)
+def test_exact_backend_protocol_boundary_is_checked_without_import(
+    tmp_path,
+    specifier,
+    compatible,
+):
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(plugin_record(backend_protocol=specifier)),
+    )
+    registry = make_registry((distribution,))
+    record = registry.discover()[0]
+
+    if compatible:
+        validated = registry.validate(record.record_id)
+        assert validated.state is PluginLifecycleState.VALIDATED
+        protocol_check = next(
+            check
+            for check in validated.compatibility_report.checks
+            if check.dimension == "Backend Plugin Protocol"
+        )
+        assert protocol_check.expected == specifier
+        assert protocol_check.actual == "1.0"
+    else:
+        with pytest.raises(BackendPluginProtocolError) as caught:
+            registry.validate(record.record_id)
+        assert caught.value.field == "backend_protocol"
+        assert caught.value.expected == specifier
+        assert caught.value.actual == "1.0"
+        assert registry.inspect(record.record_id).state is (
+            PluginLifecycleState.REJECTED
+        )
+
+    assert distribution.entry_points[0].load_calls == 0
+
+
+@pytest.mark.parametrize(
+    "actual_protocol,expected_actual",
+    [
+        pytest.param(None, "<unknown>", id="missing"),
+        pytest.param("not-a-version", "not-a-version", id="malformed"),
+    ],
+)
+def test_unknown_or_malformed_core_protocol_fails_closed_before_import(
+    tmp_path,
+    actual_protocol,
+    expected_actual,
+):
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(plugin_record()),
+    )
+    environment = replace(
+        core_environment(),
+        backend_protocol_version=actual_protocol,
+    )
+    registry = make_registry((distribution,), environment=environment)
+    record = registry.discover()[0]
+
+    with pytest.raises(BackendPluginProtocolError) as caught:
+        registry.validate(record.record_id)
+
+    rejected = registry.inspect(record.record_id)
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.INCOMPATIBLE
+    )
+    assert caught.value.field == "backend_protocol"
+    assert caught.value.expected == ">=1.0,<2.0"
+    assert caught.value.actual == expected_actual
+    assert caught.value.remediation
+    assert distribution.entry_points[0].load_calls == 0
+
+
+def test_registry_protocol_add_uses_default_without_reading_hook(tmp_path):
+    plugin = ProtocolDiagnosticsPlugin(fail_on_read=True)
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(producer_protocol_version="1.0")
+        ),
+        entry_points=(("mock", plugin),),
+    )
+    environment = replace(core_environment(), backend_protocol_version="1.1")
+    registry = make_registry((distribution,), environment=environment)
+    record = registry.discover()[0]
+
+    registered = registry.register(record.registry_key)
+    diagnostics = registry.diagnostics(record.registry_key)
+
+    assert registered.state is PluginLifecycleState.REGISTERED
+    assert diagnostics["plugin_diagnostics"] == {}
+    assert diagnostics["protocol_field_diagnostics"] == []
+    assert plugin.diagnostic_reads == 0
+    assert distribution.entry_points[0].load_calls == 1
+
+
+def test_registry_protocol_older_consumer_ignores_new_field_without_reading_hook(
+    tmp_path,
+):
+    plugin = ProtocolDiagnosticsPlugin(fail_on_read=True)
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(producer_protocol_version="1.1")
+        ),
+        entry_points=(("mock", plugin),),
+    )
+    environment = replace(core_environment(), backend_protocol_version="1.0")
+    registry = make_registry((distribution,), environment=environment)
+    record = registry.discover()[0]
+
+    registered = registry.register(record.registry_key)
+    diagnostics = registry.diagnostics(record.registry_key)
+
+    assert registered.state is PluginLifecycleState.REGISTERED
+    assert diagnostics["plugin_diagnostics"] is None
+    assert diagnostics["protocol_field_diagnostics"] == []
+    assert plugin.diagnostic_reads == 0
+    assert distribution.entry_points[0].load_calls == 1
+
+
+def test_registry_protocol_deprecation_warning_is_observable(tmp_path):
+    plugin = ProtocolDiagnosticsPlugin({"healthy": True})
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(producer_protocol_version="1.2")
+        ),
+        entry_points=(("mock", plugin),),
+    )
+    environment = replace(core_environment(), backend_protocol_version="1.2")
+    registry = make_registry((distribution,), environment=environment)
+    record = registry.discover()[0]
+
+    registered = registry.register(record.registry_key)
+    diagnostics = registry.diagnostics(record.registry_key)
+
+    assert registered.state is PluginLifecycleState.REGISTERED
+    assert diagnostics["plugin_diagnostics"] == {"healthy": True}
+    assert len(diagnostics["protocol_field_diagnostics"]) == 1
+    warning = diagnostics["protocol_field_diagnostics"][0]
+    assert warning["code"] == "backend_plugin_protocol_field_deprecated"
+    assert warning["severity"] == "warning"
+    assert warning["field"] == "diagnostics"
+    assert warning["producer_protocol_version"] == "1.2"
+    assert warning["consumer_protocol_version"] == "1.2"
+    assert plugin.diagnostic_reads == 1
+    assert distribution.entry_points[0].load_calls == 1
+
+
+def test_registry_protocol_removed_major_ignores_removed_field_without_reading_hook(
+    tmp_path,
+):
+    plugin = ProtocolDiagnosticsPlugin(fail_on_read=True)
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(
+                backend_protocol=">=2.0,<3.0",
+                producer_protocol_version="2.0",
+            )
+        ),
+        entry_points=(("mock", plugin),),
+    )
+    environment = replace(core_environment(), backend_protocol_version="2.0")
+    registry = make_registry((distribution,), environment=environment)
+    record = registry.discover()[0]
+
+    registered = registry.register(record.registry_key)
+    diagnostics = registry.diagnostics(record.registry_key)
+
+    assert registered.state is PluginLifecycleState.REGISTERED
+    assert diagnostics["plugin_diagnostics"] is None
+    assert diagnostics["protocol_field_diagnostics"] == []
+    assert plugin.diagnostic_reads == 0
+    assert distribution.entry_points[0].load_calls == 1
+
+
+@pytest.mark.parametrize(
+    "producer_version,consumer_version,expected",
+    [
+        pytest.param("2.0", "1.2", ">=1.0,<2.0", id="newer-producer"),
+        pytest.param("1.2", "2.0", ">=2.0,<3.0", id="older-producer"),
+    ],
+)
+def test_registry_protocol_major_mismatch_rejects_before_load(
+    tmp_path,
+    producer_version,
+    consumer_version,
+    expected,
+):
+    plugin = ProtocolDiagnosticsPlugin(fail_on_read=True)
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(
+                backend_protocol=">=1.0,<3.0",
+                producer_protocol_version=producer_version,
+            )
+        ),
+        entry_points=(("mock", plugin),),
+    )
+    environment = replace(
+        core_environment(), backend_protocol_version=consumer_version
+    )
+    registry = make_registry((distribution,), environment=environment)
+    record = registry.discover()[0]
+
+    with pytest.raises(BackendPluginProtocolError) as caught:
+        registry.validate(record.record_id)
+
+    rejected = registry.inspect(record.record_id)
+    assert caught.value.field == "backend_protocol"
+    assert caught.value.expected == expected
+    assert caught.value.actual == producer_version
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.INCOMPATIBLE
+    )
+    assert plugin.diagnostic_reads == 0
+    assert distribution.entry_points[0].load_calls == 0
+
+
+def test_registry_protocol_same_major_removed_field_is_forbidden_before_load(
+    tmp_path,
+):
+    plugin = ProtocolDiagnosticsPlugin(fail_on_read=True)
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(producer_protocol_version="1.9")
+        ),
+        entry_points=(("mock", plugin),),
+    )
+    environment = replace(core_environment(), backend_protocol_version="1.9")
+    registry = BackendPluginRegistry(
+        distribution_provider=lambda: (distribution,),
+        environment_provider=lambda: environment,
+        supported_tags=(SUPPORTED_TAG, NATIVE_TAG),
+        preflight_profile="full",
+        removed_protocol_fields=("diagnostics",),
+    )
+    record = registry.discover()[0]
+
+    with pytest.raises(BackendPluginProtocolError) as caught:
+        registry.validate(record.record_id)
+
+    rejected = registry.inspect(record.record_id)
+    payload = caught.value.to_dict()
+    assert payload["code"] == "backend_plugin_protocol_error"
+    assert payload["field"] == "backend_protocol"
+    assert payload["diagnostics"][0]["code"] == (
+        "backend_plugin_protocol_field_removal_forbidden"
+    )
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.INCOMPATIBLE
+    )
+    assert plugin.diagnostic_reads == 0
+    assert distribution.entry_points[0].load_calls == 0
+
+
+@pytest.mark.parametrize(
     "case,error_type,expected_field",
     [
         ("protocol", BackendPluginProtocolError, "backend_protocol"),
@@ -926,6 +1297,180 @@ def test_native_architecture_mismatch_is_rejected_before_import(
         registry.load(record.record_id)
 
     assert caught.value.dimension == "native architecture"
+    assert distribution.entry_points[0].load_calls == 0
+
+
+@pytest.mark.parametrize(
+    "soname",
+    [
+        "libLLVM.so",
+        "libLLVM-19.so",
+        "libLLVMCore.so",
+        "libMLIR.so",
+        "libMLIR-19.so",
+        "libMLIRIR.so",
+    ],
+)
+def test_private_toolchain_dt_needed_is_rejected_before_import(
+    tmp_path,
+    soname,
+):
+    dependency = build_test_shared_library(
+        tmp_path / "external-dependency",
+        soname,
+        soname=soname,
+        symbol="private_toolchain_symbol",
+    )
+    plugin_root = tmp_path / "plugin"
+    declared = "vendor_backend/lib/libvendor.so"
+    build_test_shared_library_with_dependency(
+        plugin_root,
+        declared,
+        dependency=dependency,
+    )
+    distribution = FakeDistribution(
+        plugin_root,
+        manifest=manifest(
+            plugin_record(
+                isolation_mode="native_in_process",
+                native_libraries=[declared],
+                abi_fingerprint=TEST_ABI_FINGERPRINT,
+            )
+        ),
+        record_files=(declared,),
+        wheel_text=NATIVE_WHEEL,
+    )
+    registry = make_registry((distribution,))
+    record = registry.discover()[0]
+
+    with pytest.raises(BackendPluginCompatibilityError) as caught:
+        registry.load(record.record_id)
+
+    rejected = registry.inspect(record.record_id)
+    assert caught.value.dimension == "native toolchain dependencies"
+    assert caught.value.field == "native toolchain dependencies"
+    assert caught.value.expected == (
+        "no private LLVM/MLIR shared-library dependency"
+    )
+    assert caught.value.actual == soname
+    assert caught.value.remediation
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.INCOMPATIBLE
+    )
+    assert distribution.entry_points[0].load_calls == 0
+
+
+def test_missing_dt_needed_dependency_is_rejected_before_import(tmp_path):
+    soname = "libtriton_anchor_missing_dep_fixture.so"
+    dependency = build_test_shared_library(
+        tmp_path / "external-dependency",
+        soname,
+        soname=soname,
+        symbol="private_toolchain_symbol",
+    )
+    plugin_root = tmp_path / "plugin"
+    declared = "vendor_backend/lib/libvendor.so"
+    build_test_shared_library_with_dependency(
+        plugin_root,
+        declared,
+        dependency=dependency,
+    )
+    distribution = FakeDistribution(
+        plugin_root,
+        manifest=manifest(
+            plugin_record(
+                isolation_mode="native_in_process",
+                native_libraries=[declared],
+                abi_fingerprint=TEST_ABI_FINGERPRINT,
+            )
+        ),
+        record_files=(declared,),
+        wheel_text=NATIVE_WHEEL,
+    )
+    registry = make_registry((distribution,))
+    record = registry.discover()[0]
+
+    with pytest.raises(BackendPluginCompatibilityError) as caught:
+        registry.validate(record.record_id)
+
+    rejected = registry.inspect(record.record_id)
+    diagnostic = caught.value.to_dict()
+    assert diagnostic["code"] == "backend_plugin_native_loadability_error"
+    assert diagnostic["field"] == "native_libraries.DT_NEEDED"
+    assert diagnostic["library"] == declared
+    assert diagnostic["missing_dependency"] == soname
+    assert diagnostic["validation_stage"] == "pre-import-native-loader"
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.INCOMPATIBLE
+    )
+    assert distribution.entry_points[0].load_calls == 0
+
+
+def test_unresolved_dynamic_symbol_is_rejected_before_import(tmp_path):
+    missing_symbol = "definitely_missing_symbol"
+    declared = "vendor_backend/lib/libvendor.so"
+    build_test_shared_library_with_unresolved_symbol(
+        tmp_path,
+        declared,
+        missing_symbol=missing_symbol,
+    )
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(
+                isolation_mode="native_in_process",
+                native_libraries=[declared],
+                abi_fingerprint=TEST_ABI_FINGERPRINT,
+            )
+        ),
+        record_files=(declared,),
+        wheel_text=NATIVE_WHEEL,
+    )
+    registry = make_registry((distribution,))
+    record = registry.discover()[0]
+
+    with pytest.raises(BackendPluginCompatibilityError) as caught:
+        registry.validate(record.record_id)
+
+    rejected = registry.inspect(record.record_id)
+    diagnostic = caught.value.to_dict()
+    assert diagnostic["code"] == "backend_plugin_native_loadability_error"
+    assert diagnostic["field"] == "native_libraries.undefined_symbols"
+    assert diagnostic["library"] == declared
+    assert diagnostic["unresolved_symbol"] == missing_symbol
+    assert diagnostic["validation_stage"] == "pre-import-native-loader"
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.INCOMPATIBLE
+    )
+    assert distribution.entry_points[0].load_calls == 0
+
+
+def test_loader_probe_does_not_reject_resolved_external_symbols(tmp_path):
+    declared = "vendor_backend/lib/libvendor.so"
+    build_test_shared_library_with_libc_reference(tmp_path, declared)
+    distribution = FakeDistribution(
+        tmp_path,
+        manifest=manifest(
+            plugin_record(
+                isolation_mode="native_in_process",
+                native_libraries=[declared],
+                abi_fingerprint=TEST_ABI_FINGERPRINT,
+            )
+        ),
+        record_files=(declared,),
+        wheel_text=NATIVE_WHEEL,
+    )
+    registry = make_registry((distribution,))
+
+    record = registry.validate()[0]
+
+    assert record.state is PluginLifecycleState.VALIDATED
     assert distribution.entry_points[0].load_calls == 0
 
 

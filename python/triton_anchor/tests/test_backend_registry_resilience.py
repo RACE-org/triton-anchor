@@ -57,6 +57,7 @@ RECORD_JSON_FIELDS = {
     "manifest",
     "compatibility_report",
     "capability_report",
+    "protocol_field_diagnostics",
     "errors",
     "loaded",
     "registered",
@@ -249,6 +250,37 @@ def test_initialize_failure_rejects_and_runs_best_effort_shutdown(tmp_path):
     assert plugin.shutdown_calls == 1
 
 
+def test_noncallable_initialize_is_structured_and_rejected(tmp_path):
+    plugin = HookPlugin()
+    plugin.initialize = object()
+    distribution = distribution_for_plugin(tmp_path, plugin)
+    registry = make_registry((distribution,))
+    discovered = registry.discover()[0]
+
+    with pytest.raises(BackendPluginLifecycleError) as caught:
+        registry.register(discovered.registry_key)
+
+    rejected = registry.inspect(discovered.record_id)
+    payload = caught.value.to_dict()
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert (
+        rejected.compatibility_status
+        is PluginCompatibilityStatus.COMPATIBLE
+    )
+    assert rejected.initialized is False
+    assert rejected.shutdown_called is False
+    assert rejected.to_dict()["errors"] == [payload]
+    assert plugin.initialize_calls == []
+    assert plugin.shutdown_calls == 0
+    assert distribution.entry_points[0].load_calls == 1
+    assert_structured_error(
+        payload,
+        code="backend_plugin_lifecycle_error",
+        field="initialize",
+    )
+    assert payload["actual"] == "object"
+
+
 def test_diagnostics_failure_is_reported_without_rejecting_plugin(tmp_path):
     plugin = FailingDiagnosticsPlugin()
     distribution = distribution_for_plugin(tmp_path, plugin)
@@ -328,6 +360,169 @@ def test_reset_allows_fresh_rediscovery_and_reselection(tmp_path):
     assert plugin.shutdown_calls == 1
     assert registry.reset() == ()
     assert plugin.shutdown_calls == 2
+
+
+def test_registry_instances_isolate_state_load_and_reset(tmp_path):
+    first_plugin = HookPlugin()
+    second_plugin = HookPlugin()
+    first_distribution = distribution_for_plugin(
+        tmp_path / "first",
+        first_plugin,
+    )
+    second_distribution = distribution_for_plugin(
+        tmp_path / "second",
+        second_plugin,
+    )
+    first_registry = make_registry((first_distribution,))
+    second_registry = make_registry((second_distribution,))
+
+    first_discovered = first_registry.discover()[0]
+    second_discovered = second_registry.discover()[0]
+    assert first_discovered.record_id == second_discovered.record_id
+    assert first_discovered.registry_key == second_discovered.registry_key
+
+    first_registry.select("mock", environment={})
+
+    assert first_registry.inspect(first_discovered.record_id).state is (
+        PluginLifecycleState.SELECTED
+    )
+    assert second_registry.inspect(second_discovered.record_id).state is (
+        PluginLifecycleState.DISCOVERED
+    )
+    assert first_distribution.entry_points[0].load_calls == 1
+    assert second_distribution.entry_points[0].load_calls == 0
+    assert len(first_plugin.initialize_calls) == 1
+    assert second_plugin.initialize_calls == []
+
+    second_registry.select("mock", environment={})
+    second_generation = second_registry.generation
+    second_selection = second_registry.get_selection("mock").to_dict()
+    second_record = second_registry.inspect(
+        second_discovered.record_id
+    ).to_dict()
+
+    assert first_registry.reset() == ()
+
+    assert first_registry.get_selection("mock") is None
+    assert first_plugin.shutdown_calls == 1
+    assert second_registry.generation == second_generation
+    assert second_registry.get_selection("mock").to_dict() == second_selection
+    assert (
+        second_registry.inspect(second_discovered.record_id).to_dict()
+        == second_record
+    )
+    assert second_distribution.entry_points[0].load_calls == 1
+    assert len(second_plugin.initialize_calls) == 1
+    assert second_plugin.shutdown_calls == 0
+
+    rediscovered = first_registry.discover()[0]
+    assert rediscovered.state is PluginLifecycleState.DISCOVERED
+    assert first_distribution.entry_points[0].load_calls == 1
+    assert len(first_plugin.initialize_calls) == 1
+    assert second_registry.inspect(second_discovered.record_id).state is (
+        PluginLifecycleState.SELECTED
+    )
+
+    assert first_registry.reset() == ()
+    assert second_registry.reset() == ()
+    assert second_plugin.shutdown_calls == 1
+
+
+def test_two_plugins_keep_selection_capabilities_and_lifecycle_isolated(
+    tmp_path,
+):
+    alpha_plugin = HookPlugin()
+    beta_plugin = HookPlugin()
+    alpha_distribution = FakeDistribution(
+        tmp_path / "alpha",
+        name="alpha-backend",
+        manifest=manifest(
+            plugin_record(
+                "alpha",
+                plugin_id="vendor.alpha",
+                targets=["alpha"],
+                capabilities=["feature.alpha"],
+            )
+        ),
+        entry_points=(("alpha", alpha_plugin),),
+    )
+    beta_distribution = FakeDistribution(
+        tmp_path / "beta",
+        name="beta-backend",
+        manifest=manifest(
+            plugin_record(
+                "beta",
+                plugin_id="vendor.beta",
+                targets=["beta"],
+                capabilities=["feature.beta"],
+            )
+        ),
+        entry_points=(("beta", beta_plugin),),
+    )
+    registry = make_registry((beta_distribution, alpha_distribution))
+
+    records = registry.discover()
+    assert [record.plugin_id for record in records] == [
+        "vendor.alpha",
+        "vendor.beta",
+    ]
+    assert registry.conflicts().ok
+    assert [
+        alpha_distribution.entry_points[0].load_calls,
+        beta_distribution.entry_points[0].load_calls,
+    ] == [0, 0]
+
+    alpha = registry.select(
+        "alpha",
+        explicit_selector="vendor.alpha",
+        kernel_required_capabilities=("feature.alpha",),
+        environment={},
+    )
+
+    assert alpha.plugin_id == "vendor.alpha"
+    assert registry.inspect("vendor.alpha").state is PluginLifecycleState.SELECTED
+    assert registry.inspect("vendor.beta").state is PluginLifecycleState.VALIDATED
+    assert [
+        alpha_distribution.entry_points[0].load_calls,
+        beta_distribution.entry_points[0].load_calls,
+    ] == [1, 0]
+    assert len(alpha_plugin.initialize_calls) == 1
+    assert alpha_plugin.initialize_calls[0]["record_id"] == alpha.record_id
+    assert beta_plugin.initialize_calls == []
+
+    beta = registry.select(
+        "beta",
+        explicit_selector="vendor.beta",
+        kernel_required_capabilities=("feature.beta",),
+        environment={},
+    )
+
+    assert beta.plugin_id == "vendor.beta"
+    assert registry.inspect("vendor.alpha").selected_targets == ("alpha",)
+    assert registry.inspect("vendor.beta").selected_targets == ("beta",)
+    assert [
+        alpha_distribution.entry_points[0].load_calls,
+        beta_distribution.entry_points[0].load_calls,
+    ] == [1, 1]
+    assert len(alpha_plugin.initialize_calls) == 1
+    assert len(beta_plugin.initialize_calls) == 1
+    assert alpha_plugin.initialize_calls[0]["record_id"] == alpha.record_id
+    assert beta_plugin.initialize_calls[0]["record_id"] == beta.record_id
+
+    assert registry.diagnostics("vendor.alpha")["plugin_diagnostics"] == {
+        "healthy": True
+    }
+    assert alpha_plugin.diagnostic_calls == 1
+    assert beta_plugin.diagnostic_calls == 0
+    assert registry.diagnostics("vendor.beta")["plugin_diagnostics"] == {
+        "healthy": True
+    }
+    assert alpha_plugin.diagnostic_calls == 1
+    assert beta_plugin.diagnostic_calls == 1
+
+    assert registry.reset() == ()
+    assert alpha_plugin.shutdown_calls == 1
+    assert beta_plugin.shutdown_calls == 1
 
 
 def test_reset_waits_for_load_then_leaves_no_inflight_state(tmp_path):
@@ -538,6 +733,7 @@ def test_backend_plugin_record_to_dict_is_stable_normalized_public_view(
         "plugin_id": "vendor.mock",
         "entry_point": "mock",
         "backend_protocol": ">=1.0,<2.0",
+        "producer_protocol_version": None,
         "targets": ["mock"],
         "capabilities": [],
         "requires_capabilities": [],

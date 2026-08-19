@@ -28,7 +28,7 @@ ARTIFACT_CASES = (
     "malformed_json", "coverage_error", "missing_abi", "path_escape",
     "missing_native", "hidden_native",
     "record_tamper", "bad_elf", "wrong_arch", "wrong_wheel_tag",
-    "subprocess_contract",
+    "subprocess_contract", "missing_dt_needed", "unresolved_symbol",
 )
 LEGACY_CASES = (
     "legacy_bad_interface", "legacy_missing_compiler",

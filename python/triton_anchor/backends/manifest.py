@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from .._version import BACKEND_MANIFEST_SCHEMA_VERSION
 from .errors import BackendPluginManifestError
@@ -24,6 +25,7 @@ _PLUGIN_FIELDS = {
     "vendor",
     "entry_point",
     "backend_protocol",
+    "producer_protocol_version",
     "requires_core",
     "requires_triton",
     "requires_llvm_version",
@@ -74,6 +76,7 @@ class BackendPluginManifest:
     requires_triton: TritonRequirement
     targets: Tuple[str, ...]
     isolation_mode: PluginIsolationMode
+    producer_protocol_version: Optional[str] = None
     display_name: Optional[str] = None
     vendor: Optional[str] = None
     requires_core: Optional[str] = None
@@ -299,6 +302,44 @@ def _optional_version_specifier(
                 "omit this optional constraint."
             ),
         ) from exc
+    return value
+
+
+def _optional_exact_version(
+    data: Mapping[str, Any],
+    field_name: str,
+    *,
+    plugin_id: Optional[str] = None,
+) -> Optional[str]:
+    value = _optional_string(data, field_name, plugin_id=plugin_id)
+    if value is None:
+        return None
+    try:
+        version = Version(value)
+    except InvalidVersion as exc:
+        raise BackendPluginManifestError(
+            f"Manifest field '{field_name}' must be an exact PEP 440 version",
+            plugin_id=plugin_id,
+            field=field_name,
+            expected="an exact PEP 440 version",
+            actual=value,
+            remediation=(
+                f"Set '{field_name}' to an exact producer protocol version "
+                "such as '1.0', not a range or arbitrary label."
+            ),
+        ) from exc
+    if str(version) != value:
+        raise BackendPluginManifestError(
+            f"Manifest field '{field_name}' must be a normalized exact PEP 440 version",
+            plugin_id=plugin_id,
+            field=field_name,
+            expected="an exact PEP 440 version",
+            actual=value,
+            remediation=(
+                f"Use the normalized exact version '{version}' for "
+                f"'{field_name}'."
+            ),
+        )
     return value
 
 
@@ -571,6 +612,9 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
         vendor=_optional_string(data, "vendor", plugin_id=plugin_id),
         entry_point=entry_point,
         backend_protocol=backend_protocol,
+        producer_protocol_version=_optional_exact_version(
+            data, "producer_protocol_version", plugin_id=plugin_id
+        ),
         requires_core=_optional_version_specifier(
             data, "requires_core", plugin_id=plugin_id
         ),

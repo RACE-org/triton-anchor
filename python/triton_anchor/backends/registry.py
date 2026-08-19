@@ -95,11 +95,14 @@ from .errors import (
 )
 from .manifest import BackendPluginManifest, load_distribution_manifest
 from .protocol import (
+    DIAGNOSTICS_FIELD_POLICY as _DIAGNOSTICS_FIELD_POLICY,
     PluginCompatibilityStatus,
     PluginIsolationMode,
     PluginLifecycleState,
     PluginSource,
+    ProtocolFieldStatus as _ProtocolFieldStatus,
     can_transition,
+    consume_protocol_field as _consume_protocol_field,
 )
 from .selection import SelectionDecision, select_backend
 
@@ -124,6 +127,7 @@ class BackendPluginRecord:
     manifest: Optional[BackendPluginManifest] = None
     compatibility_report: Optional[CompatibilityReport] = None
     capability_report: Optional[CapabilityReport] = None
+    protocol_field_diagnostics: Tuple[Any, ...] = ()
     errors: Tuple[BackendPluginError, ...] = ()
     plugin_object: Any = field(default=None, repr=False, compare=False)
     compiler_cls: Optional[type] = field(default=None, repr=False, compare=False)
@@ -158,6 +162,7 @@ class BackendPluginRecord:
                 "plugin_id": self.manifest.plugin_id,
                 "entry_point": self.manifest.entry_point,
                 "backend_protocol": self.manifest.backend_protocol,
+                "producer_protocol_version": self.manifest.producer_protocol_version,
                 "targets": list(self.manifest.targets),
                 "capabilities": list(self.manifest.capabilities),
                 "requires_capabilities": list(
@@ -188,6 +193,12 @@ class BackendPluginRecord:
                 if self.capability_report is not None
                 else None
             ),
+            "protocol_field_diagnostics": [
+                diagnostic.to_dict()
+                if hasattr(diagnostic, "to_dict")
+                else diagnostic
+                for diagnostic in self.protocol_field_diagnostics
+            ],
             "errors": [error.to_dict() for error in self.errors],
             "loaded": self.plugin_object is not None,
             "registered": (
@@ -242,6 +253,7 @@ class BackendPluginRegistry:
         supported_tags: Optional[Iterable[Tag]] = None,
         core_capabilities: Iterable[str] = (),
         preflight_profile: str = "full",
+        removed_protocol_fields: Iterable[str] = (),
     ) -> None:
         self._distribution_provider = (
             distribution_provider or importlib.metadata.distributions
@@ -262,6 +274,7 @@ class BackendPluginRegistry:
                 "preflight_profile must be 'triton_version' or 'full'"
             )
         self._preflight_profile = preflight_profile
+        self._removed_protocol_fields = tuple(removed_protocol_fields)
         self._state = _RegistryState()
         self._catalog = _RegistryCatalog(
             self._state,
@@ -609,6 +622,7 @@ class BackendPluginRegistry:
             core_abi_fingerprint=self._core_abi_fingerprint,
             supported_tags=self._supported_tags,
             core_capabilities=self._core_capabilities,
+            removed_protocol_fields=self._removed_protocol_fields,
             compatibility_validator=validate_backend_plugin,
             triton_version_validator=validate_triton_version_requirement,
             capability_validator=validate_plugin_capabilities,
@@ -631,6 +645,7 @@ class BackendPluginRegistry:
                 compatibility_status=PluginCompatibilityStatus.COMPATIBLE,
                 compatibility_report=plan.compatibility_report,
                 capability_report=plan.capability_report,
+                protocol_field_diagnostics=plan.protocol_field_diagnostics,
             )
         )
 
@@ -1075,6 +1090,23 @@ class BackendPluginRegistry:
                 replace(record, state=plan.transition_to)
             )
 
+    def _protocol_diagnostics_field_result(
+        self,
+        record: BackendPluginRecord,
+    ) -> Any:
+        if (
+            record.manifest is None
+            or record.manifest.producer_protocol_version is None
+        ):
+            return None
+        environment = self._get_environment()
+        return _consume_protocol_field(
+            record.plugin_object,
+            producer_protocol_version=record.manifest.producer_protocol_version,
+            consumer_protocol_version=environment.backend_protocol_version,
+            policy=_DIAGNOSTICS_FIELD_POLICY,
+        )
+
     def diagnostics(self, identifier: Optional[str] = None) -> Any:
         """Return static state and optional loaded-plugin diagnostics."""
         with self._lock:
@@ -1088,6 +1120,28 @@ class BackendPluginRegistry:
             for record in records:
                 result = record.to_dict()
                 result["plugin_diagnostics"] = None
+                protocol_result = self._protocol_diagnostics_field_result(record)
+                if protocol_result is not None:
+                    if protocol_result.status is _ProtocolFieldStatus.COMPATIBLE_DEFAULT:
+                        result["plugin_diagnostics"] = _normalize_diagnostics_value(
+                            protocol_result.value
+                        )
+                    elif protocol_result.status in {
+                        _ProtocolFieldStatus.COMPATIBLE_PRESERVED,
+                        _ProtocolFieldStatus.ACCEPTED_WITH_DEPRECATION_DIAGNOSTIC,
+                    }:
+                        result["plugin_diagnostics"] = _normalize_diagnostics_value(
+                            protocol_result.value
+                        )
+                        diagnostics = (
+                            record.protocol_field_diagnostics
+                            or protocol_result.diagnostics
+                        )
+                        result["protocol_field_diagnostics"] = [
+                            diagnostic.to_dict() for diagnostic in diagnostics
+                        ]
+                    results.append(result)
+                    continue
                 try:
                     diagnostics = (
                         getattr(record.plugin_object, "diagnostics", None)

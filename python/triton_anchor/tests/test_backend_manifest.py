@@ -344,6 +344,47 @@ def test_invalid_triton_specifier_is_a_manifest_error():
         parse_manifest(data)
 
 
+def test_malformed_backend_protocol_specifier_is_structured_manifest_error():
+    data = valid_manifest()
+    data["plugins"][0]["backend_protocol"] = "not a specifier"
+
+    with pytest.raises(BackendPluginManifestError) as caught:
+        parse_manifest(data)
+
+    diagnostic = caught.value.to_dict()
+    assert diagnostic["code"] == "backend_plugin_manifest_error"
+    assert diagnostic["field"] == "backend_protocol"
+    assert diagnostic["expected"] == "a valid PEP 440 version specifier"
+    assert diagnostic["actual"] == "not a specifier"
+    assert diagnostic["remediation"]
+
+
+def test_manifest_records_exact_producer_protocol_version():
+    data = valid_manifest()
+    data["plugins"][0]["producer_protocol_version"] = "1.2"
+
+    plugin = parse_manifest(data).plugins[0]
+
+    assert plugin.producer_protocol_version == "1.2"
+    assert "producer_protocol_version" not in plugin.extensions
+
+
+@pytest.mark.parametrize("value", [">=1.0,<2.0", "not-a-version"])
+def test_producer_protocol_version_must_be_exact(value):
+    data = valid_manifest()
+    data["plugins"][0]["producer_protocol_version"] = value
+
+    with pytest.raises(BackendPluginManifestError) as caught:
+        parse_manifest(data)
+
+    diagnostic = caught.value.to_dict()
+    assert diagnostic["code"] == "backend_plugin_manifest_error"
+    assert diagnostic["field"] == "producer_protocol_version"
+    assert diagnostic["expected"] == "an exact PEP 440 version"
+    assert diagnostic["actual"] == value
+    assert diagnostic["remediation"]
+
+
 @pytest.mark.parametrize(
     "field",
     [

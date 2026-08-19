@@ -15,6 +15,7 @@ from .errors import (
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
+    BackendPluginNativeLoadabilityError,
     BackendPluginProtocolError,
     BackendPluginSelectionError,
 )
@@ -110,6 +111,7 @@ __all__ = [
     "BackendPluginLifecycleError",
     "BackendPluginLoadError",
     "BackendPluginManifestError",
+    "BackendPluginNativeLoadabilityError",
     "BackendPluginProtocolError",
     "BackendPluginSelectionError",
     "BackendPluginManifest",

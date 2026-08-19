@@ -8,6 +8,7 @@ from importlib import metadata
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 import w10_native_wheel_probe as w10_support
@@ -28,6 +29,14 @@ CASES = {
     "wrong_arch": ("BackendPluginCompatibilityError", "native architecture"),
     "wrong_wheel_tag": ("BackendPluginCompatibilityError", "wheel platform tag"),
     "subprocess_contract": ("BackendPluginCompatibilityError", "subprocess IR contract"),
+    "missing_dt_needed": (
+        "BackendPluginNativeLoadabilityError",
+        "native_libraries.DT_NEEDED",
+    ),
+    "unresolved_symbol": (
+        "BackendPluginNativeLoadabilityError",
+        "native_libraries.undefined_symbols",
+    ),
 }
 
 
@@ -55,6 +64,55 @@ def _rehash(distribution, changed_path, record_name):
         raise AssertionError(record_name)
     with record_path.open("w", encoding="utf-8", newline="") as stream:
         csv.writer(stream, lineterminator="\n").writerows(rows)
+
+
+def _compile_missing_dependency_fixture(root):
+    dependency = root / "external" / "libtriton_anchor_missing_dep_fixture.so"
+    dependency.parent.mkdir(parents=True, exist_ok=True)
+    dep_source = dependency.with_suffix(".c")
+    dep_source.write_text("int private_toolchain_symbol(void) { return 7; }\n", encoding="utf-8")
+    subprocess.run([
+        "cc", "-shared", "-fPIC",
+        "-Wl,-soname,libtriton_anchor_missing_dep_fixture.so",
+        "-o", str(dependency), str(dep_source),
+    ], check=True)
+    source = root / "missing_dt_needed.c"
+    source.write_text(
+        "extern int private_toolchain_symbol(void);\n"
+        "int triton_anchor_ac2_native_alpha_symbol(void) { return private_toolchain_symbol(); }\n",
+        encoding="utf-8",
+    )
+    return source, dependency
+
+
+def _compile_unresolved_symbol_fixture(root):
+    source = root / "unresolved_symbol.c"
+    source.write_text(
+        "extern int definitely_missing_symbol(void);\n"
+        "int triton_anchor_ac2_native_alpha_symbol(void) { return definitely_missing_symbol(); }\n",
+        encoding="utf-8",
+    )
+    return source, None
+
+
+def _replace_native_fixture(case, native_path):
+    if case == "missing_dt_needed":
+        source, dependency = _compile_missing_dependency_fixture(native_path.parent)
+        command = [
+            "cc", "-shared", "-fPIC",
+            "-Wl,-soname,libtriton_anchor_ac2_native_alpha.so",
+            "-o", str(native_path), str(source), str(dependency),
+        ]
+    elif case == "unresolved_symbol":
+        source, _ = _compile_unresolved_symbol_fixture(native_path.parent)
+        command = [
+            "cc", "-shared", "-fPIC",
+            "-Wl,-soname,libtriton_anchor_ac2_native_alpha.so",
+            "-o", str(native_path), str(source),
+        ]
+    else:
+        raise AssertionError(case)
+    subprocess.run(command, check=True)
 
 
 def _mutate(case, distribution):
@@ -99,6 +157,10 @@ def _mutate(case, distribution):
         lines = ["Tag: cp312-cp312-win_amd64" if line.startswith("Tag:") else line for line in lines]
         wheel_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         _rehash(distribution, wheel_path, wheel_name)
+        return
+    elif case in {"missing_dt_needed", "unresolved_symbol"}:
+        _replace_native_fixture(case, native_path)
+        _rehash(distribution, native_path, native_name)
         return
     elif case == "subprocess_contract":
         plugin["isolation_mode"] = "subprocess"

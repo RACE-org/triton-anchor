@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 from .errors import (
     BackendPluginCompatibilityError,
     BackendPluginManifestError,
+    BackendPluginNativeLoadabilityError,
 )
 from .manifest import BackendPluginManifest
 from .protocol import PluginIsolationMode
@@ -48,8 +49,15 @@ _NEEDED_PATTERN = re.compile(
     r"\(NEEDED\).*Shared library: \[([^\]]+)\]"
 )
 _FORBIDDEN_TOOLCHAIN_DEPENDENCY = re.compile(
-    r"^(?:lib)?(?:LLVM|MLIR)(?:[-.]|$)",
+    r"^(?:lib)?(?:LLVM|MLIR)[A-Za-z0-9_]*(?:[-.].*)?$",
     flags=re.IGNORECASE,
+)
+_MISSING_DEPENDENCY_PATTERN = re.compile(
+    r"^\s*(?P<library>\S+)\s+=>\s+not found\s*$",
+    flags=re.MULTILINE,
+)
+_UNRESOLVED_SYMBOL_PATTERN = re.compile(
+    r"undefined symbol:\s*(?P<symbol>[A-Za-z_][A-Za-z0-9_]*)"
 )
 
 
@@ -444,6 +452,100 @@ def _run_tool(
     return completed.stdout
 
 
+def _run_loader_probe(
+    plugin: BackendPluginManifest,
+    relative_path: str,
+    path: Path,
+) -> None:
+    ldd = shutil.which("ldd")
+    if ldd is None:
+        raise BackendPluginCompatibilityError(
+            "native loader probe tools",
+            "ldd available",
+            "ldd=<missing>",
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
+            remediation=(
+                "Install the platform dynamic-loader probe tools in the validation "
+                "environment; native plugins fail closed without them."
+            ),
+        )
+    environment = dict(os.environ)
+    environment["LC_ALL"] = "C"
+    try:
+        completed = subprocess.run(
+            [ldd, "-r", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            universal_newlines=True,
+            env=environment,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BackendPluginCompatibilityError(
+            "native loader probe",
+            "a completed import-free loader resolution probe",
+            "<error: {}>".format(exc),
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
+            remediation=(
+                "Repair the validation environment so native loadability can be "
+                "probed before plugin import."
+            ),
+        ) from exc
+
+    output = "\n".join(
+        item for item in (completed.stdout, completed.stderr) if item
+    )
+    missing_match = _MISSING_DEPENDENCY_PATTERN.search(output)
+    if missing_match is not None:
+        missing = missing_match.group("library")
+        raise BackendPluginNativeLoadabilityError(
+            "native loader dependency resolution",
+            "all DT_NEEDED entries resolve before plugin import",
+            missing,
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
+            field="native_libraries.DT_NEEDED",
+            library=relative_path,
+            missing_dependency=missing,
+            probe="ldd -r",
+            probe_returncode=completed.returncode,
+        )
+    symbol_match = _UNRESOLVED_SYMBOL_PATTERN.search(output)
+    if symbol_match is not None:
+        symbol = symbol_match.group("symbol")
+        raise BackendPluginNativeLoadabilityError(
+            "native loader relocation resolution",
+            "all non-weak dynamic relocations resolve before plugin import",
+            symbol,
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
+            field="native_libraries.undefined_symbols",
+            library=relative_path,
+            unresolved_symbol=symbol,
+            probe="ldd -r",
+            probe_returncode=completed.returncode,
+        )
+    if completed.returncode != 0:
+        detail = output.strip()
+        raise BackendPluginCompatibilityError(
+            "native loader probe",
+            "a successful import-free loader resolution probe",
+            "ldd exited {}: {}".format(
+                completed.returncode,
+                detail or "<no diagnostic>",
+            ),
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
+            remediation=(
+                "Rebuild the native library so platform loader validation succeeds "
+                "before plugin import."
+            ),
+        )
+
+
 def _normalize_machine(machine: str, elf_class: str) -> str:
     lowered = machine.strip().lower()
     if "x86-64" in lowered or "amd x86-64" in lowered:
@@ -567,6 +669,8 @@ def _inspect_elf(
                 "second LLVM/MLIR implementation into the host process."
             ),
         )
+
+    _run_loader_probe(plugin, relative_path, path)
 
     exported = set()
     for line in symbols.splitlines():

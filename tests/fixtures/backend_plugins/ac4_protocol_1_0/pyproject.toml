@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triton-anchor-ac4-protocol-backend"
+version = "1.0.0"
+requires-python = ">=3.8"
+
+[project.entry-points."triton.backends"]
+ac4_protocol = "ac4_protocol_backend"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ac4_protocol_backend = ["triton_anchor_backend.json"]

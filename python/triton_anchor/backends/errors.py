@@ -172,9 +172,11 @@ class BackendPluginProtocolError(BackendPluginError):
         *,
         plugin_id: Optional[str] = None,
         entry_point: Optional[str] = None,
+        diagnostics: Iterable[Any] = (),
     ) -> None:
         self.expected = expected
         self.actual = actual
+        self.diagnostics = tuple(diagnostics)
         super().__init__(
             f"Incompatible Backend Plugin Protocol: expected {expected}, got {actual}",
             plugin_id=plugin_id,
@@ -192,6 +194,11 @@ class BackendPluginProtocolError(BackendPluginError):
     def to_dict(self) -> Dict[str, Any]:
         result = super().to_dict()
         result.update({"expected": self.expected, "actual": self.actual})
+        if self.diagnostics:
+            result["diagnostics"] = [
+                item.to_dict() if hasattr(item, "to_dict") else item
+                for item in self.diagnostics
+            ]
         return result
 
 
@@ -237,6 +244,64 @@ class BackendPluginCompatibilityError(BackendPluginError):
                 "actual": self.actual,
             }
         )
+        return result
+
+
+class BackendPluginNativeLoadabilityError(BackendPluginCompatibilityError):
+    """A native artifact cannot be resolved by the platform loader pre-import."""
+
+    code = "backend_plugin_native_loadability_error"
+
+    def __init__(
+        self,
+        dimension: str,
+        expected: str,
+        actual: str,
+        *,
+        plugin_id: Optional[str] = None,
+        entry_point: Optional[str] = None,
+        field: str,
+        library: str,
+        missing_dependency: Optional[str] = None,
+        unresolved_symbol: Optional[str] = None,
+        validation_stage: str = "pre-import-native-loader",
+        probe: Optional[str] = None,
+        probe_returncode: Optional[int] = None,
+        remediation: Optional[str] = None,
+    ) -> None:
+        self.library = library
+        self.missing_dependency = missing_dependency
+        self.unresolved_symbol = unresolved_symbol
+        self.validation_stage = validation_stage
+        self.probe = probe
+        self.probe_returncode = probe_returncode
+        super().__init__(
+            dimension,
+            expected,
+            actual,
+            plugin_id=plugin_id,
+            entry_point=entry_point,
+            remediation=remediation
+            or (
+                "Rebuild and package the native library so all loader-visible "
+                "dependencies and relocations resolve before plugin import."
+            ),
+        )
+        self.field = field
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result["field"] = self.field
+        result["library"] = self.library
+        result["validation_stage"] = self.validation_stage
+        if self.missing_dependency is not None:
+            result["missing_dependency"] = self.missing_dependency
+        if self.unresolved_symbol is not None:
+            result["unresolved_symbol"] = self.unresolved_symbol
+        if self.probe is not None:
+            result["probe"] = self.probe
+        if self.probe_returncode is not None:
+            result["probe_returncode"] = self.probe_returncode
         return result
 
 

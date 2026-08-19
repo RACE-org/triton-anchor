@@ -27,7 +27,14 @@ from .errors import (
     BackendPluginProtocolError,
 )
 from .manifest import BackendPluginManifest
-from .protocol import PluginCompatibilityStatus, PluginIsolationMode
+from .protocol import (
+    DIAGNOSTICS_FIELD_POLICY,
+    PluginCompatibilityStatus,
+    PluginIsolationMode,
+    ProtocolFieldDiagnostic,
+    consume_protocol_field,
+    evaluate_protocol_field_removal,
+)
 
 
 class ValidationRecord(Protocol):
@@ -56,6 +63,7 @@ class ValidationOutcome:
 
     compatibility_report: Optional[CompatibilityReport] = None
     capability_report: Optional[CapabilityReport] = None
+    protocol_field_diagnostics: Tuple[ProtocolFieldDiagnostic, ...] = ()
     errors: Tuple[BackendPluginError, ...] = ()
     compatibility_status: PluginCompatibilityStatus = (
         PluginCompatibilityStatus.COMPATIBLE
@@ -109,6 +117,10 @@ class ValidationPlan:
         return self.outcome.capability_report
 
     @property
+    def protocol_field_diagnostics(self) -> Tuple[ProtocolFieldDiagnostic, ...]:
+        return self.outcome.protocol_field_diagnostics
+
+    @property
     def compatibility_status(self) -> PluginCompatibilityStatus:
         return self.outcome.compatibility_status
 
@@ -127,6 +139,59 @@ class ValidationPlan:
     @property
     def reject_process(self) -> bool:
         return self.rejection_scope is ValidationRejectionScope.PROCESS
+
+
+def _protocol_removal_error(
+    record: ValidationRecord,
+    diagnostics: Tuple[ProtocolFieldDiagnostic, ...],
+    consumer_protocol_version: str,
+) -> BackendPluginProtocolError:
+    return BackendPluginProtocolError(
+        "protocol field removal in a later major version",
+        consumer_protocol_version,
+        plugin_id=record.plugin_id,
+        entry_point=record.entry_point_name,
+        diagnostics=diagnostics,
+    )
+
+
+def _evaluate_protocol_fields(
+    record: ValidationRecord,
+    environment: CoreEnvironment,
+    removed_protocol_fields: Iterable[str],
+) -> Tuple[ProtocolFieldDiagnostic, ...]:
+    diagnostics = []
+    if DIAGNOSTICS_FIELD_POLICY.name in set(removed_protocol_fields):
+        removal = evaluate_protocol_field_removal(
+            environment.backend_protocol_version,
+            policy=DIAGNOSTICS_FIELD_POLICY,
+        )
+        if removal.diagnostics:
+            diagnostics.extend(removal.diagnostics)
+        if removal.status.value == "forbidden":
+            raise _protocol_removal_error(
+                record,
+                removal.diagnostics,
+                environment.backend_protocol_version,
+            )
+
+    producer_protocol_version = getattr(
+        record.manifest, "producer_protocol_version", None
+    )
+    if producer_protocol_version is None:
+        return tuple(diagnostics)
+    result = consume_protocol_field(
+        object(),
+        producer_protocol_version=producer_protocol_version,
+        consumer_protocol_version=environment.backend_protocol_version,
+        policy=DIAGNOSTICS_FIELD_POLICY,
+    )
+    if result.error is not None:
+        result.error.plugin_id = record.plugin_id
+        result.error.entry_point = record.entry_point_name
+        raise result.error
+    diagnostics.extend(result.diagnostics)
+    return tuple(diagnostics)
 
 
 def _rejected_plan(
@@ -176,6 +241,7 @@ def plan_record_validation(
     core_abi_fingerprint: Optional[str],
     supported_tags: Optional[Tuple[Tag, ...]],
     core_capabilities: Iterable[str],
+    removed_protocol_fields: Iterable[str] = (),
     compatibility_validator: Callable[..., CompatibilityReport] = (
         validate_backend_plugin
     ),
@@ -222,6 +288,11 @@ def plan_record_validation(
                 ),
                 supported_tags=supported_tags,
             )
+        protocol_field_diagnostics = _evaluate_protocol_fields(
+            record,
+            environment,
+            removed_protocol_fields,
+        )
         capability_report = capability_validator(
             record.manifest,
             core_provided=core_capabilities,
@@ -280,5 +351,6 @@ def plan_record_validation(
         outcome=ValidationOutcome(
             compatibility_report=compatibility_report,
             capability_report=capability_report,
+            protocol_field_diagnostics=protocol_field_diagnostics,
         ),
     )
