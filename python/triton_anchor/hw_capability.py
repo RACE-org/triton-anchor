@@ -19,9 +19,9 @@ Design decisions:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Optional, Set, Tuple, Literal
+from typing import TYPE_CHECKING, Optional, Set, Tuple, Literal, Any, List
 
 if TYPE_CHECKING:
     from .anchor_ir import AnchorIRTrack
@@ -108,7 +108,11 @@ class GPGPUCapability:
 # ═══════════════════════════════════════════════════════════════════════
 # HWCapability — the unified hardware descriptor
 # ═══════════════════════════════════════════════════════════════════════
-
+@dataclass(frozen=True)
+class _Diagnostic:
+    status: Literal["ok", "warning", "error"]
+    check: str
+    message: str
 
 @dataclass
 class HWCapability:
@@ -149,7 +153,12 @@ class HWCapability:
     ptr_model: Literal["structured", "axis_info", "hybrid", "gpu"]
 
     # ── Adapter Override ─────────────────────────────────────────────
-    preferred_adapter: Optional[str] = None  # e.g. "triton-shared", "triton-linalg"
+    preferred_adapter: Optional[str] = None  # e.g. "triton-shared"
+
+    # triton-shared lowering metadata for spine-style CPU/tensor backends.
+    arch_id: Optional[str] = None
+    force_vector_interleave: int = 2
+    num_threads: Optional[int] = None
 
     # ── Paradigm-Specific Capabilities (mutually exclusive) ──────────
     matrix_cap: Optional[MatrixCapability] = None  # AME
@@ -159,6 +168,10 @@ class HWCapability:
     # ── Optional Flags ───────────────────────────────────────────────
     enable_loop_unroll: bool = False
     num_cores: int = 1
+
+    # Internal construction mode used by diagnose_config().  Normal backend
+    # construction remains strict and raises immediately on invalid settings.
+    _validate_on_init: InitVar[bool] = True
 
     # ── Compatibility ────────────────────────────────────────────────
 
@@ -216,23 +229,15 @@ class HWCapability:
             ValueError: If paradigm-specific cap doesn't match compute_paradigm,
                 or if lowering_path is inconsistent.
         """
-        if self.compute_paradigm == ComputeParadigm.AME_MATRIX:
-            if self.matrix_cap is None:
-                raise ValueError(
-                    f"AME_MATRIX paradigm requires matrix_cap (hw: {self.name})"
-                )
+        errors = [
+            diagnostic
+            for diagnostic in self._collect_diagnostics(include_successes=False)
+            if diagnostic.status == "error"
+        ]
+        if errors:
+            raise ValueError(self._format_diagnostics(errors))
 
-        elif self.compute_paradigm == ComputeParadigm.TENSOR_PROCESSOR:
-            if self.tensor_cap is None:
-                raise ValueError(
-                    f"TENSOR_PROCESSOR paradigm requires tensor_cap (hw: {self.name})"
-                )
-
-        elif self.compute_paradigm == ComputeParadigm.GPGPU:
-            if self.gpgpu_cap is None:
-                raise ValueError(f"GPGPU paradigm requires gpgpu_cap (hw: {self.name})")
-
-    def __post_init__(self):
+    def __post_init__(self, _validate_on_init: bool):
         """Validate capability fields and resolve AnchorIRTrack.
 
         Design decision: compute_paradigm and anchor_ir_track are decoupled.
@@ -243,11 +248,17 @@ class HWCapability:
         if isinstance(self.anchor_ir_track, str):
             from .anchor_ir import AnchorIRTrack
 
-            object.__setattr__(
-                self, "anchor_ir_track", AnchorIRTrack(self.anchor_ir_track)
-            )
+            try:
+                object.__setattr__(
+                    self, "anchor_ir_track", AnchorIRTrack(self.anchor_ir_track)
+                )
+            except ValueError:
+                # Keep the invalid value so the non-throwing diagnostic path
+                # can report it together with all other configuration errors.
+                pass
 
-        self.validate()
+        if _validate_on_init:
+            self.validate()
 
     @property
     def lowering_path(self) -> str:
@@ -257,3 +268,382 @@ class HWCapability:
             'linalg' or 'triton_gpu' based on anchor_ir_track.
         """
         return self.anchor_ir_track.value
+
+    def diagnose(self) -> str:
+        """Return a human-readable configuration check report.
+
+        The report uses the same checks as ``validate()``, but keeps successful
+        checks so backend authors can see the full configuration surface that
+        was inspected.
+        """
+        diagnostics = self._collect_diagnostics(include_successes=True)
+        errors = [item for item in diagnostics if item.status == "error"]
+        warnings = [item for item in diagnostics if item.status == "warning"]
+
+        from .anchor_ir import AnchorIRTrack
+
+        compute_paradigm = self._display_enum(self.compute_paradigm)
+        anchor_ir_track = self._display_enum(self.anchor_ir_track)
+        lowering_path = (
+            self.anchor_ir_track.value
+            if isinstance(self.anchor_ir_track, AnchorIRTrack)
+            else "<invalid>"
+        )
+
+        lines = [
+            f"HWCapability diagnose: {self.name}",
+            f"status: {'FAIL' if errors else 'PASS'}",
+            f"errors: {len(errors)}",
+            f"warnings: {len(warnings)}",
+            "",
+            "configuration:",
+            f"  arch_family: {self.arch_family}",
+            f"  compute_paradigm: {compute_paradigm}",
+            f"  anchor_ir_track: {anchor_ir_track}",
+            f"  ptr_model: {self.ptr_model}",
+            f"  preferred_adapter: {self.preferred_adapter or '<auto>'}",
+            f"  arch_id: {self.arch_id or '<auto>'}",
+            f"  force_vector_interleave: {self.force_vector_interleave}",
+            f"  num_threads: {self.num_threads if self.num_threads is not None else '<auto>'}",
+            f"  lowering_path: {lowering_path}",
+            f"  num_cores: {self.num_cores}",
+            "",
+            "checks:",
+        ]
+
+        for diagnostic in diagnostics:
+            prefix = {
+                "ok": "OK",
+                "warning": "WARN",
+                "error": "ERROR",
+            }[diagnostic.status]
+            lines.append(f"  - {prefix} {diagnostic.check}: {diagnostic.message}")
+
+        return "\n".join(lines)
+
+    @classmethod
+    def diagnose_config(cls, **config: Any) -> str:
+        """Diagnose a complete configuration without raising ``ValueError``.
+
+        Normal ``HWCapability(...)`` construction remains strict so invalid
+        settings cannot enter a backend pipeline.  This entry point skips only
+        the constructor-time exception, then runs the same checks as
+        :meth:`validate` and returns every error in one report.
+        """
+        if "_validate_on_init" in config:
+            raise TypeError("_validate_on_init is reserved for internal use")
+        diagnostic_config = {
+            "name": None,
+            "arch_family": None,
+            "compute_paradigm": None,
+            "anchor_ir_track": None,
+            "ptr_model": None,
+        }
+        diagnostic_config.update(config)
+        capability = cls(_validate_on_init=False, **diagnostic_config)
+        return capability.diagnose()
+
+    def _collect_diagnostics(self, include_successes: bool) -> List[_Diagnostic]:
+        diagnostics: List[_Diagnostic] = []
+
+        def add(status: Literal["ok", "warning", "error"], check: str, message: str) -> None:
+            if status != "ok" or include_successes:
+                diagnostics.append(_Diagnostic(status, check, message))
+
+        self._check_identity_and_strategy(add)
+        self._check_required_capability(add)
+        self._check_capability_values(add)
+        self._check_preferred_adapter(add)
+        return diagnostics
+
+    def _check_identity_and_strategy(self, add) -> None:
+        from .anchor_ir import AnchorIRTrack
+
+        self._check_non_empty_string(add, "name", self.name)
+        self._check_non_empty_string(add, "arch_family", self.arch_family)
+
+        if not isinstance(self.compute_paradigm, ComputeParadigm):
+            add(
+                "error",
+                "compute_paradigm",
+                f"expected ComputeParadigm, got {self.compute_paradigm!r}",
+            )
+        else:
+            add("ok", "compute_paradigm", self.compute_paradigm.value)
+
+        if not isinstance(self.anchor_ir_track, AnchorIRTrack):
+            add(
+                "error",
+                "anchor_ir_track",
+                f"expected AnchorIRTrack, got {self.anchor_ir_track!r}",
+            )
+        else:
+            add("ok", "anchor_ir_track", self.anchor_ir_track.value)
+
+        valid_ptr_models = {"structured", "axis_info", "hybrid", "gpu"}
+        if not isinstance(self.ptr_model, str) or self.ptr_model not in valid_ptr_models:
+            add(
+                "error",
+                "ptr_model",
+                f"expected one of {sorted(valid_ptr_models)}, got {self.ptr_model!r}",
+            )
+        else:
+            add("ok", "ptr_model", self.ptr_model)
+
+    def _check_required_capability(self, add) -> None:
+        required_caps = {
+            ComputeParadigm.AME_MATRIX: ("matrix_cap", self.matrix_cap),
+            ComputeParadigm.TENSOR_PROCESSOR: ("tensor_cap", self.tensor_cap),
+            ComputeParadigm.GPGPU: ("gpgpu_cap", self.gpgpu_cap),
+        }
+
+        if not isinstance(self.compute_paradigm, ComputeParadigm):
+            return
+
+        cap_name, cap_value = required_caps[self.compute_paradigm]
+        if cap_value is None:
+            add("error", "paradigm_capability", f"{self.compute_paradigm.name} requires {cap_name}")
+            return
+
+        add("ok", "paradigm_capability", f"{self.compute_paradigm.name} uses {cap_name}")
+
+        configured_caps = [
+            name
+            for name, value in (
+                ("matrix_cap", self.matrix_cap),
+                ("tensor_cap", self.tensor_cap),
+                ("gpgpu_cap", self.gpgpu_cap),
+            )
+            if value is not None
+        ]
+        if len(configured_caps) > 1:
+            add(
+                "error",
+                "paradigm_capability_exclusivity",
+                f"expected exactly one paradigm-specific capability, got {configured_caps}",
+            )
+        else:
+            add("ok", "paradigm_capability_exclusivity", configured_caps[0])
+
+    def _check_capability_values(self, add) -> None:
+        self._check_positive_int(add, "num_cores", self.num_cores)
+        self._check_optional_non_empty_string(add, "arch_id", self.arch_id)
+        self._check_positive_int(add, "force_vector_interleave", self.force_vector_interleave)
+        self._check_optional_positive_int(add, "num_threads", self.num_threads)
+        self._check_bool(add, "enable_loop_unroll", self.enable_loop_unroll)
+
+        if self.matrix_cap is not None:
+            cap = self.matrix_cap
+            if not isinstance(cap, MatrixCapability):
+                add("error", "matrix_cap", f"expected MatrixCapability, got {cap!r}")
+            else:
+                self._check_positive_int(add, "matrix_cap.num_matrix_registers", cap.num_matrix_registers)
+                self._check_positive_tuple(add, "matrix_cap.tile_shape", cap.tile_shape)
+                self._check_positive_int(add, "matrix_cap.vector_length", cap.vector_length)
+                self._check_supported_dtypes(add, "matrix_cap.supported_dtypes", cap.supported_dtypes)
+                self._check_bool(add, "matrix_cap.has_accumulator_tiles", cap.has_accumulator_tiles)
+                self._check_bool(add, "matrix_cap.supports_pointwise", cap.supports_pointwise)
+
+        if self.tensor_cap is not None:
+            cap = self.tensor_cap
+            if not isinstance(cap, TensorCapability):
+                add("error", "tensor_cap", f"expected TensorCapability, got {cap!r}")
+            else:
+                self._check_positive_int(add, "tensor_cap.num_cores", cap.num_cores)
+                self._check_non_negative_int(add, "tensor_cap.local_mem_size", cap.local_mem_size)
+                self._check_non_negative_int(add, "tensor_cap.global_mem_size", cap.global_mem_size)
+                self._check_positive_int(add, "tensor_cap.dma_channels", cap.dma_channels)
+                self._check_supported_dtypes(add, "tensor_cap.supported_dtypes", cap.supported_dtypes)
+                self._check_positive_int(add, "tensor_cap.max_tensor_dims", cap.max_tensor_dims)
+
+        if self.gpgpu_cap is not None:
+            cap = self.gpgpu_cap
+            if not isinstance(cap, GPGPUCapability):
+                add("error", "gpgpu_cap", f"expected GPGPUCapability, got {cap!r}")
+            else:
+                self._check_positive_int(add, "gpgpu_cap.num_warps", cap.num_warps)
+                self._check_positive_int(add, "gpgpu_cap.warp_size", cap.warp_size)
+                self._check_non_negative_int(add, "gpgpu_cap.shared_mem_size", cap.shared_mem_size)
+                self._check_positive_int(add, "gpgpu_cap.num_stages", cap.num_stages)
+                self._check_positive_int(add, "gpgpu_cap.num_ctas", cap.num_ctas)
+                self._check_positive_tuple(add, "gpgpu_cap.cluster_dims", cap.cluster_dims, expected_len=3)
+                self._check_supported_dtypes(add, "gpgpu_cap.supported_dtypes", cap.supported_dtypes)
+
+    def _check_preferred_adapter(self, add) -> None:
+        if self.preferred_adapter is None:
+            add("ok", "preferred_adapter", "not set; adapter will be selected from ptr_model")
+            return
+
+        if not isinstance(self.preferred_adapter, str) or not self.preferred_adapter:
+            add(
+                "error",
+                "preferred_adapter",
+                f"expected a non-empty string or None, got {self.preferred_adapter!r}",
+            )
+            return
+
+        try:
+            from .adapters import AdapterRegistry
+        except Exception as exc:
+            add("error", "preferred_adapter", f"cannot import AdapterRegistry: {exc}")
+            return
+
+        try:
+            adapter = AdapterRegistry.get(self.preferred_adapter)
+            available = sorted(AdapterRegistry.list_adapters())
+        except Exception as exc:
+            add("error", "preferred_adapter", f"adapter discovery failed: {exc}")
+            return
+        if adapter is None:
+            add(
+                "error",
+                "preferred_adapter",
+                f"'{self.preferred_adapter}' is not registered; available adapters: {available}",
+            )
+            return
+
+        add("ok", "preferred_adapter", f"'{self.preferred_adapter}' is registered")
+
+        try:
+            output_track = self._infer_adapter_output_track(adapter)
+        except Exception as exc:
+            add(
+                "error",
+                "adapter_output_track",
+                f"failed to inspect adapter '{self.preferred_adapter}': {exc}",
+            )
+            return
+        if output_track is None:
+            add(
+                "warning",
+                "adapter_output_track",
+                f"cannot infer output track for adapter '{self.preferred_adapter}'",
+            )
+            return
+
+        if output_track != self.anchor_ir_track:
+            add(
+                "error",
+                "adapter_output_track",
+                f"adapter '{self.preferred_adapter}' outputs {output_track.value}, "
+                f"but anchor_ir_track is {self._display_enum(self.anchor_ir_track)}",
+            )
+            return
+
+        add(
+            "ok",
+            "adapter_output_track",
+            f"adapter '{self.preferred_adapter}' output track matches "
+            f"{self._display_enum(self.anchor_ir_track)}",
+        )
+
+    def _infer_adapter_output_track(self, adapter: Any):
+        from .anchor_ir import AnchorIRTrack
+
+        output_track = getattr(adapter, "get_output_track", None)
+        if callable(output_track):
+            track = output_track()
+            if isinstance(track, AnchorIRTrack):
+                return track
+            if isinstance(track, str):
+                return AnchorIRTrack(track)
+
+        get_output_dialects = getattr(adapter, "get_output_dialects", None)
+        if not callable(get_output_dialects):
+            return None
+
+        dialects = set(get_output_dialects() or [])
+        linalg_dialects = {"linalg", "linalg_ext", "tensor", "memref"}
+        gpu_dialects = {"triton_gpu", "ttg", "gpu", "nvgpu"}
+        has_linalg = bool(dialects & linalg_dialects)
+        has_gpu = bool(dialects & gpu_dialects)
+
+        if has_linalg and not has_gpu:
+            return AnchorIRTrack.LINALG
+        if has_gpu and not has_linalg:
+            return AnchorIRTrack.TRITON_GPU
+        return None
+
+    @staticmethod
+    def _check_non_empty_string(add, name: str, value: str) -> None:
+        if not isinstance(value, str) or not value:
+            add("error", name, f"expected a non-empty string, got {value!r}")
+            return
+        add("ok", name, value)
+
+    @staticmethod
+    def _check_bool(add, name: str, value: bool) -> None:
+        if type(value) is not bool:
+            add("error", name, f"expected a boolean, got {value!r}")
+            return
+        add("ok", name, str(value))
+
+    @staticmethod
+    def _check_positive_int(add, name: str, value: int) -> None:
+        if type(value) is not int or value <= 0:
+            add("error", name, f"expected a positive integer, got {value!r}")
+            return
+        add("ok", name, f"{value}")
+
+    @staticmethod
+    def _check_optional_positive_int(add, name: str, value: Optional[int]) -> None:
+        if value is None:
+            add("ok", name, "<auto>")
+            return
+        HWCapability._check_positive_int(add, name, value)
+
+    @staticmethod
+    def _check_non_negative_int(add, name: str, value: int) -> None:
+        if type(value) is not int or value < 0:
+            add("error", name, f"expected a non-negative integer, got {value!r}")
+            return
+        add("ok", name, f"{value}")
+
+    @staticmethod
+    def _check_optional_non_empty_string(add, name: str, value: Optional[str]) -> None:
+        if value is None:
+            add("ok", name, "<auto>")
+            return
+        if not isinstance(value, str) or not value:
+            add("error", name, f"expected a non-empty string or None, got {value!r}")
+            return
+        add("ok", name, value)
+
+    @staticmethod
+    def _check_positive_tuple(add, name: str, value: Tuple[int, ...], expected_len: Optional[int] = None) -> None:
+        if not isinstance(value, tuple):
+            add("error", name, f"expected a tuple of positive integers, got {value!r}")
+            return
+        if expected_len is not None and len(value) != expected_len:
+            add("error", name, f"expected {expected_len} elements, got {value!r}")
+            return
+        if not value:
+            add("error", name, "expected at least one element")
+            return
+        bad_values = [dim for dim in value if type(dim) is not int or dim <= 0]
+        if bad_values:
+            add("error", name, f"all elements must be positive integers, got {value!r}")
+            return
+        add("ok", name, f"{value}")
+
+    @staticmethod
+    def _check_supported_dtypes(add, name: str, value: Set[str]) -> None:
+        if not isinstance(value, set) or not value:
+            add("error", name, f"expected a non-empty set of dtype names, got {value!r}")
+            return
+        bad_values = [dtype for dtype in value if not isinstance(dtype, str) or not dtype]
+        if bad_values:
+            add("error", name, f"dtype names must be non-empty strings, got {value!r}")
+            return
+        add("ok", name, f"{sorted(value)}")
+
+    @staticmethod
+    def _format_diagnostics(diagnostics: List[_Diagnostic]) -> str:
+        lines = ["HWCapability validation failed:"]
+        for diagnostic in diagnostics:
+            lines.append(f"  - {diagnostic.check}: {diagnostic.message}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _display_enum(value: Any) -> str:
+        return value.value if isinstance(value, Enum) else repr(value)

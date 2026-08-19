@@ -85,3 +85,104 @@ class TestHWCapability:
                 ptr_model="structured",
                 # Missing matrix_cap!
             )
+
+    def test_preferred_adapter_must_be_registered(self):
+        with pytest.raises(ValueError, match="not registered"):
+            HWCapability(
+                name="bad-adapter",
+                arch_family="riscv",
+                compute_paradigm=ComputeParadigm.AME_MATRIX,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="structured",
+                preferred_adapter="missing-adapter",
+                matrix_cap=MatrixCapability(),
+            )
+
+    def test_preferred_adapter_output_track_must_match(self):
+        with pytest.raises(ValueError, match="outputs linalg"):
+            HWCapability(
+                name="bad-track",
+                arch_family="gpu",
+                compute_paradigm=ComputeParadigm.GPGPU,
+                anchor_ir_track=AnchorIRTrack.TRITON_GPU,
+                ptr_model="gpu",
+                preferred_adapter="triton-linalg",
+                gpgpu_cap=GPGPUCapability(),
+            )
+
+    def test_matrix_capability_values_are_validated(self):
+        with pytest.raises(ValueError, match="tile_shape"):
+            HWCapability(
+                name="bad-matrix",
+                arch_family="riscv",
+                compute_paradigm=ComputeParadigm.AME_MATRIX,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="structured",
+                matrix_cap=MatrixCapability(tile_shape=(8, 0)),
+            )
+
+    def test_tensor_capability_values_are_validated(self):
+        with pytest.raises(ValueError, match="tensor_cap.num_cores"):
+            HWCapability(
+                name="bad-tensor",
+                arch_family="tpu",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="axis_info",
+                tensor_cap=TensorCapability(num_cores=0),
+            )
+
+    def test_diagnose_reports_configuration_and_checks(self):
+        hw = HWCapability(
+            name="diag",
+            arch_family="riscv",
+            compute_paradigm=ComputeParadigm.AME_MATRIX,
+            anchor_ir_track=AnchorIRTrack.LINALG,
+            ptr_model="structured",
+            preferred_adapter="triton-linalg",
+            matrix_cap=MatrixCapability(),
+        )
+
+        report = hw.diagnose()
+        assert "status: PASS" in report
+        assert "preferred_adapter: triton-linalg" in report
+        assert "adapter_output_track" in report
+
+    def test_diagnose_config_collects_all_errors_without_raising(self):
+        report = HWCapability.diagnose_config(
+            name="",
+            arch_family="tpu",
+            compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+            anchor_ir_track="invalid-track",
+            ptr_model="invalid-pointer-model",
+            preferred_adapter="missing-adapter",
+            force_vector_interleave=0,
+            tensor_cap=TensorCapability(
+                num_cores=0,
+                dma_channels=0,
+                supported_dtypes=set(),
+                max_tensor_dims=0,
+            ),
+            num_cores=0,
+        )
+
+        assert "status: FAIL" in report
+        assert "name: expected a non-empty string" in report
+        assert "anchor_ir_track: expected AnchorIRTrack" in report
+        assert "ptr_model: expected one of" in report
+        assert "preferred_adapter: 'missing-adapter' is not registered" in report
+        assert "force_vector_interleave: expected a positive integer" in report
+        assert "tensor_cap.num_cores: expected a positive integer" in report
+        assert "tensor_cap.dma_channels: expected a positive integer" in report
+        assert "tensor_cap.supported_dtypes: expected a non-empty set" in report
+        assert "tensor_cap.max_tensor_dims: expected a positive integer" in report
+
+    def test_diagnose_config_accepts_partial_configuration(self):
+        report = HWCapability.diagnose_config()
+
+        assert "status: FAIL" in report
+        assert "name: expected a non-empty string" in report
+        assert "arch_family: expected a non-empty string" in report
+        assert "compute_paradigm: expected ComputeParadigm" in report
+        assert "anchor_ir_track: expected AnchorIRTrack" in report
+        assert "ptr_model: expected one of" in report

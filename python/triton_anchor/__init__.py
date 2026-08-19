@@ -11,14 +11,21 @@ Architecture:
   Layer 2.5 — AnchorIR Spec      (core invariant: dual-track dialect whitelist)
 """
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
-from .hw_capability import (
-    HWCapability as HWCapability,
-    ComputeParadigm as ComputeParadigm,
-)
-from .anchor_ir import (
-    AnchorIRTrack as AnchorIRTrack,
-    AnchorIRValidator as AnchorIRValidator,
-)
-from .pipeline import build_ttir_pipeline as build_ttir_pipeline
+from .hw_capability import HWCapability, ComputeParadigm
+from .anchor_ir import AnchorIRTrack, AnchorIRValidator
+from .pipeline import build_ttir_pipeline
+
+
+def __getattr__(name):
+    # Keep HWCapability/AnchorIR usable in pure-Python environments where the
+    # compiled Triton extension is intentionally absent.
+    if name in {"AnchorBackendBase", "AnchorCompilationContext"}:
+        from .backend import AnchorBackendBase, AnchorCompilationContext
+
+        return {
+            "AnchorBackendBase": AnchorBackendBase,
+            "AnchorCompilationContext": AnchorCompilationContext,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -128,7 +128,7 @@ class CMakeBuild(build_ext):
         if platform.system() != "Windows":
             cmake_args += ["-DCMAKE_BUILD_TYPE=" + cfg]
             max_jobs = os.getenv("MAX_JOBS", str(2 * os.cpu_count()))
-            build_args += ['-j' + max_jobs]
+            build_args += ['-j' + str(8)]
 
         env = os.environ.copy()
         subprocess.check_call(
