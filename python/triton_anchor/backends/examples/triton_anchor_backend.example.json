@@ -9,7 +9,7 @@
       "backend_protocol": ">=1.0,<2.0",
       "requires_core": ">=0.2,<0.3",
       "requires_triton": {
-        "version": ">=3.0,<3.1"
+        "version": ">=3.3,<3.4"
       },
       "targets": ["mock"],
       "capabilities": ["anchor_ir.linalg"],
