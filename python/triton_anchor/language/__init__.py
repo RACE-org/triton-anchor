@@ -12,37 +12,25 @@ Currently contains only stubs.  Actual extensions are loaded
 dynamically from ``entry_points("triton.dsl_extensions")``.
 """
 
-# Lazy-loading proxy for DSL extensions
-# When a user does `from triton_anchor.language.ext import smt`,
-# we look up the registered extension and return its builtins.
-
-import sys
+# Lazy attribute loading for DSL extensions.  Keep this module's native package
+# identity so Python can still import the physical ``language.ext`` package.
 from types import ModuleType
 
 
-class _ExtensionProxy(ModuleType):
-    """Lazy-loading module proxy for DSL extensions.
+def __getattr__(name: str) -> ModuleType:
+    """Look up a registered DSL extension without replacing this package."""
+    from ..extensions.registry import DSLExtensionRegistry
 
-    Intercepts attribute access to look up registered extensions.
-    """
-
-    def __getattr__(self, name):
-        from ..extensions.registry import DSLExtensionRegistry
-
-        ext = DSLExtensionRegistry.get_extension(name)
-        if ext is not None:
-            # Create a proxy module for this extension's builtins
-            proxy = ModuleType(f"triton_anchor.language.ext.{name}")
-            proxy.__doc__ = f"DSL extension: {ext.name} (namespace: {ext.namespace})"
-            for builtin_name, spec in ext.get_builtins().items():
-                setattr(proxy, builtin_name, spec)
-            return proxy
-
-        raise AttributeError(
-            f"DSL extension '{name}' not found. "
-            f"Install it: pip install triton-ext-{name}"
+    extension = DSLExtensionRegistry.get_extension(name)
+    if extension is not None:
+        proxy = ModuleType(f"triton_anchor.language.ext.{name}")
+        proxy.__doc__ = (
+            f"DSL extension: {extension.name} (namespace: {extension.namespace})"
         )
+        for builtin_name, specification in extension.get_builtins().items():
+            setattr(proxy, builtin_name, specification)
+        return proxy
 
-
-# Replace this module with the proxy
-sys.modules[__name__] = _ExtensionProxy(__name__)
+    raise AttributeError(
+        f"DSL extension '{name}' not found. Install it: pip install triton-ext-{name}"
+    )
