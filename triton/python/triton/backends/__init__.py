@@ -1,4 +1,5 @@
 import os
+import threading
 from dataclasses import dataclass, replace
 from typing import Dict, Optional, Tuple, Type
 
@@ -20,6 +21,13 @@ class Backend:
 # only after selection.
 backends: Dict[str, Backend] = {}
 
+_RUNTIME_INTERFACE_CONTRACT_ID = "triton.backends.abstract-runtime-pair"
+# Preserve the process-owned validator across importlib.reload().  A Registry
+# deliberately treats a different object under the same name as a conflicting
+# late contract rather than silently replacing its trust boundary.
+_runtime_interface_lock = globals().get("_runtime_interface_lock", threading.Lock())
+_runtime_pair_validator = globals().get("_runtime_pair_validator")
+
 
 def _registry_api():
     # Lazy import avoids making the Triton package depend on plugin loading at
@@ -31,6 +39,36 @@ def _registry_api():
 
 def _registry():
     return _registry_api().get_backend_plugin_registry()
+
+
+def _get_runtime_pair_validator():
+    global _runtime_pair_validator
+    with _runtime_interface_lock:
+        if _runtime_pair_validator is None:
+            api = _registry_api()
+            _runtime_pair_validator = api.AbstractRuntimePairValidator(
+                contract_id=_RUNTIME_INTERFACE_CONTRACT_ID,
+                surfaces=(
+                    api.RuntimeInterfaceSurface(
+                        field="compiler_cls",
+                        abstract_base=BaseBackend,
+                    ),
+                    api.RuntimeInterfaceSurface(
+                        field="driver_cls",
+                        abstract_base=DriverBase,
+                    ),
+                ),
+            )
+        return _runtime_pair_validator
+
+
+def register_runtime_interface_contract(registry=None) -> None:
+    """Register this checkout's dynamically derived Triton runtime surface."""
+    target_registry = _registry() if registry is None else registry
+    target_registry.register_runtime_pair_validator(
+        _RUNTIME_INTERFACE_CONTRACT_ID,
+        _get_runtime_pair_validator(),
+    )
 
 
 def _enum_value(value):
@@ -614,6 +652,8 @@ def activate_backend(backend: Backend, *, target=None):
     return registry.activate(record_id)
 
 
+if __name__ == "triton.backends":
+    register_runtime_interface_contract()
 _registry().register_reset_hook(_reset_backend_cache)
 _discover_backends()
 
@@ -628,4 +668,5 @@ __all__ = [
     "get_driver_backends",
     "make_backend",
     "register_backend_reset_hook",
+    "register_runtime_interface_contract",
 ]
