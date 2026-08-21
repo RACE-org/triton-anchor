@@ -481,6 +481,7 @@ def get_packages():
         "triton_anchor.backends",
         "triton_anchor.extensions",
         "triton_anchor.language",
+        "triton_anchor.language.ext",
         "triton_anchor.tests",
     ]
     return packages
