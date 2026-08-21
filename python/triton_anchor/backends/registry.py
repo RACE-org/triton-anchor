@@ -42,6 +42,7 @@ from .errors import (
     BackendPluginDiscoveryError,
     BackendPluginError,
     BackendPluginInterfaceError,
+    BackendPluginInterfaceIssue,
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
@@ -128,6 +129,82 @@ def _error_identity(error: BackendPluginError) -> Tuple[Any, ...]:
         getattr(error, "claim", None),
         tuple(getattr(error, "related_plugin_ids", ())),
         tuple(getattr(error, "related_record_ids", ())),
+        tuple(
+            (
+                issue.field,
+                issue.owner,
+                issue.member,
+                issue.problem,
+                issue.expected_kind,
+                issue.actual_kind,
+                issue.expected_signature,
+                issue.actual_signature,
+                issue.remediation,
+            )
+            for issue in getattr(error, "interface_issues", ())
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class RuntimePairValidationContext:
+    """Immutable class pair presented to a named interface validator."""
+
+    record_id: str
+    plugin_id: Optional[str]
+    entry_point: str
+    compiler_cls: type
+    driver_cls: type
+
+
+RuntimePairValidator = Callable[
+    [RuntimePairValidationContext],
+    Optional[Iterable[BackendPluginInterfaceIssue]],
+]
+
+
+def _runtime_pair_validator_failure(
+    contract_id: str,
+    actual_kind: str,
+    problem: str,
+) -> BackendPluginInterfaceIssue:
+    """Create a stable fail-closed finding without exception text or repr."""
+    return BackendPluginInterfaceIssue(
+        field="compiler_cls",
+        owner="RuntimePairValidator",
+        member=contract_id,
+        expected_kind="interface_issues",
+        actual_kind=actual_kind,
+        problem=problem,
+        remediation=(
+            "Fix the named runtime-pair validator so it returns only "
+            "BackendPluginInterfaceIssue values or None."
+        ),
+    )
+
+
+def _is_well_formed_interface_issue(
+    issue: BackendPluginInterfaceIssue,
+) -> bool:
+    required = (
+        issue.field,
+        issue.owner,
+        issue.member,
+        issue.expected_kind,
+        issue.actual_kind,
+        issue.problem,
+        issue.remediation,
+    )
+    return (
+        all(isinstance(value, str) for value in required)
+        and (
+            issue.expected_signature is None
+            or isinstance(issue.expected_signature, str)
+        )
+        and (
+            issue.actual_signature is None
+            or isinstance(issue.actual_signature, str)
+        )
     )
 
 
@@ -388,6 +465,7 @@ class BackendPluginRegistry:
         self._reset_operation_errors: list[BackendPluginError] = []
         self._selections: Dict[str, SelectionDecision] = {}
         self._reset_hooks: list = []
+        self._runtime_pair_validators: Dict[str, RuntimePairValidator] = {}
         self._resetting = False
         self._lifecycle_epoch = 0
         self._generation = 0
@@ -415,6 +493,83 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("register_reset_hook")
             if callback not in self._reset_hooks:
                 self._reset_hooks.append(callback)
+
+    def register_runtime_pair_validator(
+        self,
+        contract_id: str,
+        callback: RuntimePairValidator,
+    ) -> None:
+        """Attach one named pre-initialize runtime-pair validator.
+
+        Registering the identical callback again is idempotent. Replacing a
+        name, or attaching a new name, is only safe before any pair validation
+        is in flight and before a record has been published. Validators are
+        process contracts and intentionally survive :meth:`reset`.
+        """
+        if not isinstance(contract_id, str) or not contract_id.strip():
+            raise ValueError("runtime-pair validator contract_id must be non-empty")
+        if not callable(callback):
+            raise TypeError("runtime-pair validator must be callable")
+
+        with self._condition:
+            self._ensure_not_resetting("register_runtime_pair_validator")
+            current = self._runtime_pair_validators.get(contract_id, _MISSING)
+            if current is callback:
+                return
+
+            if self._registering:
+                record_id = sorted(self._registering)[0]
+                record = self._records.get(record_id)
+                raise BackendPluginLifecycleError(
+                    "Runtime-pair validator registration raced interface "
+                    "validation",
+                    plugin_id=record.plugin_id if record is not None else None,
+                    entry_point=(
+                        record.entry_point_name if record is not None else None
+                    ),
+                    field="runtime_pair_validator",
+                    expected=(
+                        "validator registration before runtime-pair validation"
+                    ),
+                    actual="registration in progress",
+                    remediation=(
+                        "Reset the Registry, then register the validator before "
+                        "loading or selecting plugins."
+                    ),
+                )
+
+            published_states = {
+                PluginLifecycleState.REGISTERED,
+                PluginLifecycleState.SELECTED,
+                PluginLifecycleState.ACTIVE,
+            }
+            published = tuple(
+                sorted(
+                    (
+                        record
+                        for record in self._records.values()
+                        if record.initialized or record.state in published_states
+                    ),
+                    key=lambda record: record.record_id,
+                )
+            )
+            if published:
+                record = published[0]
+                raise BackendPluginLifecycleError(
+                    "Runtime-pair validator cannot be attached after plugin "
+                    "publication",
+                    plugin_id=record.plugin_id,
+                    entry_point=record.entry_point_name,
+                    field="runtime_pair_validator",
+                    expected="validator registration before plugin publication",
+                    actual=record.state.value,
+                    remediation=(
+                        "Reset the Registry, then register the validator before "
+                        "loading or selecting plugins."
+                    ),
+                )
+
+            self._runtime_pair_validators[contract_id] = callback
 
     @property
     def generation(self) -> int:
@@ -1590,6 +1745,94 @@ class BackendPluginRegistry:
                             token,
                         )
 
+    @staticmethod
+    def _run_runtime_pair_validators(
+        context: RuntimePairValidationContext,
+        validators: Tuple[Tuple[str, RuntimePairValidator], ...],
+    ) -> Optional[BackendPluginInterfaceError]:
+        """Run a lock-free validator snapshot and aggregate its findings."""
+        issues: list[BackendPluginInterfaceIssue] = []
+        for contract_id, callback in validators:
+            try:
+                result = callback(context)
+            except BackendPluginInterfaceError as exc:
+                # Raising a structured error is the validator contract's
+                # terminal form; preserve its identity for diagnostics.
+                return exc
+            except Exception as exc:
+                issues.append(
+                    _runtime_pair_validator_failure(
+                        contract_id,
+                        _stable_type_name(exc),
+                        "validator_failure",
+                    )
+                )
+                continue
+
+            if result is None:
+                continue
+            _close_unawaited(result)
+            try:
+                iterator = iter(result)
+            except BackendPluginInterfaceError as exc:
+                # Preserve an explicitly raised structured error even when a
+                # lazy result raises while producing its iterator.
+                return exc
+            except Exception:
+                issues.append(
+                    _runtime_pair_validator_failure(
+                        contract_id,
+                        _stable_type_name(result),
+                        "invalid_result",
+                    )
+                )
+                continue
+
+            while True:
+                try:
+                    issue = next(iterator)
+                except StopIteration:
+                    break
+                except BackendPluginInterfaceError as exc:
+                    # A generator may choose the same terminal contract form.
+                    return exc
+                except Exception as exc:
+                    issues.append(
+                        _runtime_pair_validator_failure(
+                            contract_id,
+                            _stable_type_name(exc),
+                            "validator_failure",
+                        )
+                    )
+                    break
+                if not isinstance(issue, BackendPluginInterfaceIssue):
+                    issues.append(
+                        _runtime_pair_validator_failure(
+                            contract_id,
+                            _stable_type_name(issue),
+                            "invalid_result",
+                        )
+                    )
+                    break
+                if not _is_well_formed_interface_issue(issue):
+                    issues.append(
+                        _runtime_pair_validator_failure(
+                            contract_id,
+                            _stable_type_name(issue),
+                            "invalid_result",
+                        )
+                    )
+                    break
+                issues.append(issue)
+
+        if not issues:
+            return None
+        return BackendPluginInterfaceError(
+            interface_issues=issues,
+            plugin_id=context.plugin_id,
+            entry_point=context.entry_point,
+        )
+
     def register(
         self,
         identifier: str,
@@ -1726,6 +1969,9 @@ class BackendPluginRegistry:
                         thread_id,
                         token,
                     )
+                    runtime_pair_validators = tuple(
+                        sorted(self._runtime_pair_validators.items())
+                    )
 
                 # Runtime attributes, signature introspection, and hooks are
                 # plugin-controlled and therefore run outside the Registry lock.
@@ -1766,7 +2012,23 @@ class BackendPluginRegistry:
                         plugin_id=record.plugin_id,
                         entry_point=record.entry_point_name,
                     )
-                elif record.source is PluginSource.MANIFEST:
+                else:
+                    validation_context = RuntimePairValidationContext(
+                        record_id=record.record_id,
+                        plugin_id=record.plugin_id,
+                        entry_point=record.entry_point_name,
+                        compiler_cls=values["compiler_cls"],
+                        driver_cls=values["driver_cls"],
+                    )
+                    primary_error = self._run_runtime_pair_validators(
+                        validation_context,
+                        runtime_pair_validators,
+                    )
+
+                if (
+                    primary_error is None
+                    and record.source is PluginSource.MANIFEST
+                ):
                     initializer, primary_error = self._read_hook(
                         record,
                         "initialize",

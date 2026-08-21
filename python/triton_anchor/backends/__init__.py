@@ -12,6 +12,7 @@ from .errors import (
     BackendPluginDiscoveryError,
     BackendPluginError,
     BackendPluginInterfaceError,
+    BackendPluginInterfaceIssue,
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
@@ -92,6 +93,8 @@ from .selection import (
 from .registry import (
     BackendPluginRecord,
     BackendPluginRegistry,
+    RuntimePairValidationContext,
+    RuntimePairValidator,
     backend_plugin_registry,
     get_backend_plugin_registry,
 )
@@ -110,6 +113,7 @@ __all__ = [
     "BackendPluginDiscoveryError",
     "BackendPluginError",
     "BackendPluginInterfaceError",
+    "BackendPluginInterfaceIssue",
     "BackendPluginLifecycleError",
     "BackendPluginLoadError",
     "BackendPluginManifestError",
@@ -138,6 +142,8 @@ __all__ = [
     "ProtocolFieldPolicy",
     "ProtocolFieldResult",
     "ProtocolFieldStatus",
+    "RuntimePairValidationContext",
+    "RuntimePairValidator",
     "SelectionDecision",
     "SelectionMethod",
     "TritonRequirement",

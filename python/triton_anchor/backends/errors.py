@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 
@@ -51,6 +52,53 @@ class BackendPluginError(RuntimeError):
         }
 
 
+@dataclass(frozen=True)
+class BackendPluginInterfaceIssue:
+    """One deterministic finding from a runtime-pair interface validator."""
+
+    field: str
+    owner: str
+    member: str
+    expected_kind: str
+    actual_kind: str
+    problem: str
+    remediation: str
+    expected_signature: Optional[str] = None
+    actual_signature: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Optional[str]]:
+        """Return the stable public representation used by diagnostics."""
+        return {
+            "field": self.field,
+            "owner": self.owner,
+            "member": self.member,
+            "expected_kind": self.expected_kind,
+            "actual_kind": self.actual_kind,
+            "problem": self.problem,
+            "expected_signature": self.expected_signature,
+            "actual_signature": self.actual_signature,
+            "remediation": self.remediation,
+        }
+
+
+def _interface_issue_sort_key(
+    issue: BackendPluginInterfaceIssue,
+) -> Tuple[Any, ...]:
+    field_order = {"compiler_cls": 0, "driver_cls": 1}
+    return (
+        field_order.get(issue.field, 2),
+        issue.field,
+        issue.owner,
+        issue.member,
+        issue.problem,
+        issue.expected_kind,
+        issue.actual_kind,
+        issue.expected_signature or "",
+        issue.actual_signature or "",
+        issue.remediation,
+    )
+
+
 class BackendPluginInterfaceError(BackendPluginError):
     """The loaded Python object does not satisfy the runtime interface."""
 
@@ -62,6 +110,7 @@ class BackendPluginInterfaceError(BackendPluginError):
         *,
         invalid_fields: Iterable[str] = (),
         field_errors: Optional[Mapping[str, str]] = None,
+        interface_issues: Iterable[BackendPluginInterfaceIssue] = (),
         plugin_id: Optional[str] = None,
         entry_point: Optional[str] = None,
     ) -> None:
@@ -93,6 +142,9 @@ class BackendPluginInterfaceError(BackendPluginError):
                 if name not in runtime_field_order
             }
         )
+        self.interface_issues: Tuple[BackendPluginInterfaceIssue, ...] = tuple(
+            sorted(interface_issues, key=_interface_issue_sort_key)
+        )
         details = []
         if self.missing_fields:
             details.append("missing=" + ", ".join(self.missing_fields))
@@ -106,10 +158,19 @@ class BackendPluginInterfaceError(BackendPluginError):
                     for name, message in sorted(self.field_errors.items())
                 )
             )
+        if self.interface_issues:
+            details.append(
+                "interface="
+                + ", ".join(
+                    f"{issue.field}.{issue.member}: {issue.problem}"
+                    for issue in self.interface_issues
+                )
+            )
         detail = "; ".join(details)
         affected_fields = set(self.missing_fields)
         affected_fields.update(self.invalid_fields)
         affected_fields.update(self.field_errors)
+        affected_fields.update(issue.field for issue in self.interface_issues)
         ordered_affected_fields = tuple(
             name for name in runtime_field_order if name in affected_fields
         ) + tuple(
@@ -127,11 +188,21 @@ class BackendPluginInterfaceError(BackendPluginError):
             entry_point=entry_point,
             detail=detail,
             field=field,
-            expected="class objects",
+            expected=(
+                "class objects satisfying the registered runtime interface "
+                "surface"
+                if self.interface_issues
+                else "class objects"
+            ),
             actual=detail,
             remediation=(
-                "Expose compiler_cls and driver_cls as class objects from the "
-                "backend entry point."
+                "Implement every required compiler/driver member with the "
+                "expected static descriptor kind and compatible signature."
+                if self.interface_issues
+                else (
+                    "Expose compiler_cls and driver_cls as class objects from "
+                    "the backend entry point."
+                )
             ),
         )
 
@@ -140,6 +211,9 @@ class BackendPluginInterfaceError(BackendPluginError):
         result["missing_fields"] = list(self.missing_fields)
         result["invalid_fields"] = list(self.invalid_fields)
         result["field_errors"] = dict(self.field_errors)
+        result["interface_issues"] = [
+            issue.to_dict() for issue in self.interface_issues
+        ]
         return result
 
 
