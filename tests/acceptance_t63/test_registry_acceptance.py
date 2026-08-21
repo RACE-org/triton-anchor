@@ -15,7 +15,7 @@ import json
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping, Optional
@@ -307,6 +307,129 @@ def wait_for_generation_change(
         if time.monotonic() >= deadline:
             pytest.fail("Registry generation did not change before timeout")
         time.sleep(0.001)
+
+
+def submit_daemon_future(callback: Any) -> Future[Any]:
+    """Run a callback without making a deadlock hang the pytest process."""
+    future: Future[Any] = Future()
+
+    def invoke() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            result = callback()
+        except BaseException as exc:  # noqa: BLE001 - preserve test timeout
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
+
+    threading.Thread(target=invoke, daemon=True).start()
+    return future
+
+
+def bounded_future_result(future: Future[Any], *, timeout: float = 10) -> Any:
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        pytest.fail("daemon lifecycle future did not terminate before timeout")
+
+
+def wait_for_lifecycle_wait_count(
+    registry: BackendPluginRegistry,
+    count: int,
+    *,
+    timeout: float = 10,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        with registry._condition:
+            if len(registry._waiting_on) == count:
+                return
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"Registry did not expose {count} lifecycle wait edge(s)"
+            )
+        time.sleep(0.001)
+
+
+def two_plugin_registry(
+    directory: Path,
+    entry_points: Iterable[FakeEntryPoint],
+) -> tuple[BackendPluginRegistry, dict[str, str]]:
+    plugins = [
+        good_plugin(
+            plugin_id=f"vendor.{name}",
+            entry_point=name,
+            targets=[name],
+        )
+        for name in ("alpha", "beta")
+    ]
+    distribution = make_distribution(
+        directory,
+        name="fixture-cycle",
+        plugins=plugins,
+        entry_points=entry_points,
+    )
+    registry = registry_for([distribution])
+    record_ids = {
+        record.entry_point_name: record.record_id for record in registry.list()
+    }
+    assert set(record_ids) == {"alpha", "beta"}
+    return registry, record_ids
+
+
+def assert_wait_cycle_results(
+    futures: Mapping[str, Future[Any]],
+    record_ids: Mapping[str, str],
+    operations: Mapping[str, str],
+    *,
+    timeout: float = 10,
+) -> None:
+    expected_actual = ", ".join(
+        f"{operation}({record_id})"
+        for record_id, operation in sorted(
+            (record_ids[name], operations[name]) for name in futures
+        )
+    )
+    deadline = time.monotonic() + timeout
+    diagnostics = []
+    for name, future in futures.items():
+        try:
+            error = future.exception(
+                timeout=max(0.001, deadline - time.monotonic())
+            )
+        except TimeoutError:
+            pytest.fail("daemon lifecycle future did not terminate before timeout")
+        assert isinstance(error, BackendPluginLifecycleError)
+        diagnostic = error.to_dict()
+        diagnostics.append(diagnostic)
+        assert diagnostic["code"] == "backend_plugin_lifecycle_error"
+        assert diagnostic["message"] == (
+            "Backend plugin lifecycle wait cycle detected"
+        )
+        assert diagnostic["plugin_id"] == f"vendor.{name}"
+        assert diagnostic["entry_point"] == name
+        assert diagnostic["field"] == "lifecycle.wait_cycle"
+        assert diagnostic["expected"] == (
+            "an acyclic load/register wait graph"
+        )
+        assert diagnostic["actual"] == expected_actual
+        assert "0x" not in diagnostic["actual"]
+    assert {diagnostic["actual"] for diagnostic in diagnostics} == {
+        expected_actual
+    }
+
+
+def assert_lifecycle_ledgers_empty(registry: BackendPluginRegistry) -> None:
+    with registry._condition:
+        assert registry._loading == {}
+        assert registry._registering == {}
+        assert registry._diagnosing == {}
+        assert registry._waiting_on == {}
+
+
+def bounded_registry_reset(registry: BackendPluginRegistry) -> None:
+    assert bounded_future_result(submit_daemon_future(registry.reset)) == ()
 
 
 def assert_structured_error(
@@ -2105,6 +2228,297 @@ def test_registry_concurrent_register_loads_and_initializes_exactly_once(
     assert entry_point.load_calls == 1
     assert plugin.initialize_calls == 1
     assert len(plugin.contexts) == 1
+
+
+def test_registry_rejects_cross_plugin_register_wait_cycle(
+    tmp_path: Path,
+) -> None:
+    barrier = threading.Barrier(2)
+    registry: BackendPluginRegistry
+    record_ids: dict[str, str]
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self, name: str, other: str) -> None:
+            self.name = name
+            self.other = other
+            self.initialize_calls = 0
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            self.initialize_calls += 1
+            barrier.wait(timeout=5)
+            registry.register(record_ids[self.other])
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    plugins = {
+        "alpha": Plugin("alpha", "beta"),
+        "beta": Plugin("beta", "alpha"),
+    }
+    entry_points = {
+        name: FakeEntryPoint(name, plugin) for name, plugin in plugins.items()
+    }
+    registry, record_ids = two_plugin_registry(
+        tmp_path,
+        entry_points.values(),
+    )
+
+    futures = {
+        name: submit_daemon_future(
+            lambda name=name: registry.register(record_ids[name])
+        )
+        for name in ("alpha", "beta")
+    }
+    assert_wait_cycle_results(
+        futures,
+        record_ids,
+        {"alpha": "register", "beta": "register"},
+    )
+
+    assert {
+        record.entry_point_name: record.state for record in registry.list()
+    } == {
+        "alpha": PluginLifecycleState.REJECTED,
+        "beta": PluginLifecycleState.REJECTED,
+    }
+    assert {
+        name: (
+            plugin.initialize_calls,
+            plugin.shutdown_calls,
+            entry_points[name].load_calls,
+        )
+        for name, plugin in plugins.items()
+    } == {"alpha": (1, 1, 1), "beta": (1, 1, 1)}
+    assert_lifecycle_ledgers_empty(registry)
+    bounded_registry_reset(registry)
+    assert {name: plugin.shutdown_calls for name, plugin in plugins.items()} == {
+        "alpha": 1,
+        "beta": 1,
+    }
+
+
+def test_registry_rejects_cross_plugin_load_wait_cycle(tmp_path: Path) -> None:
+    barrier = threading.Barrier(2)
+    registry: BackendPluginRegistry
+    record_ids: dict[str, str]
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.initialize_calls = 0
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            self.initialize_calls += 1
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    class CrossLoadingEntryPoint(FakeEntryPoint):
+        def __init__(self, name: str, other: str, plugin: Plugin) -> None:
+            super().__init__(name, plugin)
+            self.other = other
+
+        def load(self) -> Any:
+            self.load_calls += 1
+            barrier.wait(timeout=5)
+            registry.load(record_ids[self.other])
+            return self.loaded_value
+
+    plugins = {"alpha": Plugin(), "beta": Plugin()}
+    entry_points = {
+        "alpha": CrossLoadingEntryPoint("alpha", "beta", plugins["alpha"]),
+        "beta": CrossLoadingEntryPoint("beta", "alpha", plugins["beta"]),
+    }
+    registry, record_ids = two_plugin_registry(
+        tmp_path,
+        entry_points.values(),
+    )
+
+    futures = {
+        name: submit_daemon_future(
+            lambda name=name: registry.load(record_ids[name])
+        )
+        for name in ("alpha", "beta")
+    }
+    assert_wait_cycle_results(
+        futures,
+        record_ids,
+        {"alpha": "load", "beta": "load"},
+    )
+
+    assert {
+        record.entry_point_name: record.state for record in registry.list()
+    } == {
+        "alpha": PluginLifecycleState.REJECTED,
+        "beta": PluginLifecycleState.REJECTED,
+    }
+    assert {name: entry.load_calls for name, entry in entry_points.items()} == {
+        "alpha": 1,
+        "beta": 1,
+    }
+    assert {
+        name: (plugin.initialize_calls, plugin.shutdown_calls)
+        for name, plugin in plugins.items()
+    } == {"alpha": (0, 0), "beta": (0, 0)}
+    assert_lifecycle_ledgers_empty(registry)
+    bounded_registry_reset(registry)
+
+
+def test_registry_rejects_mixed_cross_plugin_wait_cycle(tmp_path: Path) -> None:
+    barrier = threading.Barrier(2)
+    registry: BackendPluginRegistry
+    record_ids: dict[str, str]
+
+    class AlphaPlugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.initialize_calls = 0
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            self.initialize_calls += 1
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    class BetaPlugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.initialize_calls = 0
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            self.initialize_calls += 1
+            barrier.wait(timeout=5)
+            registry.register(record_ids["alpha"])
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    class AlphaEntryPoint(FakeEntryPoint):
+        def load(self) -> Any:
+            self.load_calls += 1
+            barrier.wait(timeout=5)
+            registry.register(record_ids["beta"])
+            return self.loaded_value
+
+    alpha_plugin = AlphaPlugin()
+    beta_plugin = BetaPlugin()
+    alpha_entry_point = AlphaEntryPoint("alpha", alpha_plugin)
+    beta_entry_point = FakeEntryPoint("beta", beta_plugin)
+    registry, record_ids = two_plugin_registry(
+        tmp_path,
+        (alpha_entry_point, beta_entry_point),
+    )
+
+    futures = {
+        "alpha": submit_daemon_future(
+            lambda: registry.load(record_ids["alpha"])
+        ),
+        "beta": submit_daemon_future(
+            lambda: registry.register(record_ids["beta"])
+        ),
+    }
+    assert_wait_cycle_results(
+        futures,
+        record_ids,
+        {"alpha": "load", "beta": "register"},
+    )
+
+    assert {
+        record.entry_point_name: record.state for record in registry.list()
+    } == {
+        "alpha": PluginLifecycleState.REJECTED,
+        "beta": PluginLifecycleState.REJECTED,
+    }
+    assert (alpha_entry_point.load_calls, beta_entry_point.load_calls) == (1, 1)
+    assert (alpha_plugin.initialize_calls, alpha_plugin.shutdown_calls) == (0, 0)
+    assert (beta_plugin.initialize_calls, beta_plugin.shutdown_calls) == (1, 1)
+    assert_lifecycle_ledgers_empty(registry)
+    bounded_registry_reset(registry)
+    assert beta_plugin.shutdown_calls == 1
+
+
+def test_registry_allows_acyclic_cross_plugin_lifecycle_wait(
+    tmp_path: Path,
+) -> None:
+    beta_started = threading.Event()
+    release_beta = threading.Event()
+    alpha_nested = threading.Event()
+    registry: BackendPluginRegistry
+    record_ids: dict[str, str]
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.initialize_calls = 0
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            self.initialize_calls += 1
+            if self.name == "beta":
+                beta_started.set()
+                if not release_beta.wait(timeout=5):
+                    raise RuntimeError("test did not release beta initialize")
+            else:
+                alpha_nested.set()
+                registry.register(record_ids["beta"])
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    plugins = {name: Plugin(name) for name in ("alpha", "beta")}
+    entry_points = {
+        name: FakeEntryPoint(name, plugin) for name, plugin in plugins.items()
+    }
+    registry, record_ids = two_plugin_registry(
+        tmp_path,
+        entry_points.values(),
+    )
+
+    beta_future = submit_daemon_future(
+        lambda: registry.register(record_ids["beta"])
+    )
+    assert beta_started.wait(timeout=5)
+    alpha_future = submit_daemon_future(
+        lambda: registry.register(record_ids["alpha"])
+    )
+    assert alpha_nested.wait(timeout=5)
+    wait_for_lifecycle_wait_count(registry, 1)
+    assert not alpha_future.done()
+    assert not beta_future.done()
+
+    release_beta.set()
+    assert bounded_future_result(beta_future).state is PluginLifecycleState.REGISTERED
+    assert bounded_future_result(alpha_future).state is PluginLifecycleState.REGISTERED
+    assert {
+        name: (
+            plugin.initialize_calls,
+            plugin.shutdown_calls,
+            entry_points[name].load_calls,
+        )
+        for name, plugin in plugins.items()
+    } == {"alpha": (1, 0, 1), "beta": (1, 0, 1)}
+    assert_lifecycle_ledgers_empty(registry)
+    bounded_registry_reset(registry)
+    assert {name: plugin.shutdown_calls for name, plugin in plugins.items()} == {
+        "alpha": 1,
+        "beta": 1,
+    }
 
 
 def test_registry_reset_racing_initialize_cannot_publish_stale_instance(

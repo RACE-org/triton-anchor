@@ -153,6 +153,17 @@ def _error_identity(error: BackendPluginError) -> Tuple[Any, ...]:
 
 
 @dataclass(frozen=True)
+class _LifecycleWait:
+    """One live thread-to-thread lifecycle dependency."""
+
+    owner_thread: int
+    operation: str
+    record_id: str
+    operation_token: object = field(repr=False, compare=False)
+    wait_token: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
 class BackendPluginRecord:
     """One entry point and all state that must stay paired with it."""
 
@@ -272,6 +283,35 @@ class BackendPluginRecord:
             "shutdown_called": self.shutdown_called,
             "selected_targets": list(self.selected_targets),
         }
+
+
+class _BackendPluginWaitCycleError(BackendPluginLifecycleError):
+    """Private marker preserving a wait-cycle diagnostic through hooks."""
+
+    def __init__(
+        self,
+        record: BackendPluginRecord,
+        cycle_actual: str,
+    ) -> None:
+        self.cycle_actual = cycle_actual
+        super().__init__(
+            "Backend plugin lifecycle wait cycle detected",
+            plugin_id=record.plugin_id,
+            entry_point=record.entry_point_name,
+            field="lifecycle.wait_cycle",
+            expected="an acyclic load/register wait graph",
+            actual=cycle_actual,
+            remediation=(
+                "Remove synchronous circular load/register dependencies from "
+                "entry-point loaders, constructors, and initialize hooks."
+            ),
+        )
+
+    def for_record(
+        self,
+        record: BackendPluginRecord,
+    ) -> _BackendPluginWaitCycleError:
+        return type(self)(record, self.cycle_actual)
 
 
 def _manifest_diagnostic_scalar(value: Any) -> Any:
@@ -453,6 +493,7 @@ class BackendPluginRegistry:
         self._loading: Dict[str, Tuple[int, int, object]] = {}
         self._registering: Dict[str, Tuple[int, int, object]] = {}
         self._diagnosing: Dict[str, Tuple[int, int, object]] = {}
+        self._waiting_on: Dict[int, _LifecycleWait] = {}
         self._cleanup_stack: list[BackendPluginRecord] = []
         self._reset_operation_errors: list[BackendPluginError] = []
         self._selections: Dict[str, SelectionDecision] = {}
@@ -1295,6 +1336,86 @@ class BackendPluginRegistry:
             for _epoch, owner, _token in operations.values()
         )
 
+    def _active_wait_edge(
+        self,
+        waiter_thread: int,
+    ) -> Optional[_LifecycleWait]:
+        """Return one wait edge only while its target token is still live."""
+        edge = self._waiting_on.get(waiter_thread)
+        if edge is None:
+            return None
+        operations = (
+            self._loading
+            if edge.operation == "load"
+            else self._registering
+        )
+        target = operations.get(edge.record_id)
+        if (
+            target is not None
+            and target[1] == edge.owner_thread
+            and target[2] is edge.operation_token
+        ):
+            return edge
+        if self._waiting_on.get(waiter_thread) is edge:
+            del self._waiting_on[waiter_thread]
+        return None
+
+    @staticmethod
+    def _wait_cycle_actual(edges: Iterable[_LifecycleWait]) -> str:
+        items = sorted(
+            {(edge.record_id, edge.operation) for edge in edges}
+        )
+        return ", ".join(
+            f"{operation}({record_id})" for record_id, operation in items
+        )
+
+    def _wait_for_lifecycle_operation(
+        self,
+        *,
+        record: BackendPluginRecord,
+        operation: str,
+        operation_token: object,
+        owner_thread: int,
+        waiter_thread: int,
+    ) -> None:
+        """Wait once, rejecting only a real load/register wait cycle.
+
+        The Registry Condition must be held by the caller. The edge's
+        ``finally`` is deliberately BaseException-safe so reset and operation
+        owners cannot be stranded by an interrupted waiter.
+        """
+        wait_token = object()
+        edge = _LifecycleWait(
+            owner_thread=owner_thread,
+            operation=operation,
+            record_id=record.record_id,
+            operation_token=operation_token,
+            wait_token=wait_token,
+        )
+        cycle_edges = [edge]
+        cursor = owner_thread
+        seen = set()
+        while True:
+            if cursor == waiter_thread or cursor in seen:
+                raise _BackendPluginWaitCycleError(
+                    record,
+                    self._wait_cycle_actual(cycle_edges),
+                )
+            seen.add(cursor)
+            owner_edge = self._active_wait_edge(cursor)
+            if owner_edge is None:
+                break
+            cycle_edges.append(owner_edge)
+            cursor = owner_edge.owner_thread
+
+        self._waiting_on[waiter_thread] = edge
+        try:
+            self._condition.wait()
+        finally:
+            current = self._waiting_on.get(waiter_thread)
+            if current is not None and current.wait_token is wait_token:
+                del self._waiting_on[waiter_thread]
+
     def _finish_operation(
         self,
         operations: Dict[str, Tuple[int, int, object]],
@@ -1304,6 +1425,9 @@ class BackendPluginRegistry:
         operation = operations.get(record_id)
         if operation is not None and operation[2] is token:
             del operations[record_id]
+        for waiter_thread, edge in tuple(self._waiting_on.items()):
+            if edge.operation_token is token:
+                del self._waiting_on[waiter_thread]
         self._condition.notify_all()
 
     @staticmethod
@@ -1523,7 +1647,7 @@ class BackendPluginRegistry:
 
                 operation = self._loading.get(record.record_id)
                 if operation is not None:
-                    wait_epoch, owner, _existing_token = operation
+                    wait_epoch, owner, existing_token = operation
                     if owner == thread_id:
                         raise BackendPluginLifecycleError(
                             "Recursive backend plugin load is not allowed",
@@ -1537,7 +1661,13 @@ class BackendPluginRegistry:
                                 "plugin from its entry-point loader or constructor."
                             ),
                         )
-                    self._condition.wait()
+                    self._wait_for_lifecycle_operation(
+                        record=record,
+                        operation="load",
+                        operation_token=existing_token,
+                        owner_thread=owner,
+                        waiter_thread=thread_id,
+                    )
                     if self._lifecycle_epoch != wait_epoch:
                         raise self._stale_operation_error(
                             record, "load", wait_epoch, self._lifecycle_epoch
@@ -1561,6 +1691,9 @@ class BackendPluginRegistry:
                 try:
                     loaded = record.entry_point.load()
                     plugin = loaded() if isinstance(loaded, type) else loaded
+                except _BackendPluginWaitCycleError as exc:
+                    load_exception = exc.for_record(record)
+                    plugin = None
                 except Exception as exc:
                     load_exception = exc
                     plugin = None
@@ -1580,17 +1713,27 @@ class BackendPluginRegistry:
                             )
                         )
                     elif load_exception is not None:
-                        error = BackendPluginLoadError(
-                            f"Failed to load backend plugin '{record.registry_key}'",
-                            plugin_id=record.plugin_id,
-                            entry_point=record.entry_point_name,
-                            field="entry_point.load",
-                            expected="a loadable backend plugin object",
-                            actual=_stable_exception_actual(load_exception),
-                            remediation=(
-                                "Fix the backend Python package or native "
-                                "dependencies and reinstall it."
-                            ),
+                        error = (
+                            load_exception
+                            if isinstance(
+                                load_exception,
+                                _BackendPluginWaitCycleError,
+                            )
+                            else BackendPluginLoadError(
+                                f"Failed to load backend plugin "
+                                f"'{record.registry_key}'",
+                                plugin_id=record.plugin_id,
+                                entry_point=record.entry_point_name,
+                                field="entry_point.load",
+                                expected="a loadable backend plugin object",
+                                actual=_stable_exception_actual(
+                                    load_exception
+                                ),
+                                remediation=(
+                                    "Fix the backend Python package or native "
+                                    "dependencies and reinstall it."
+                                ),
+                            )
                         )
                         current = self._records[record.record_id]
                         self._reject(
@@ -1627,7 +1770,10 @@ class BackendPluginRegistry:
                     operation_finished = True
 
                 if error is not None:
-                    if load_exception is not None:
+                    if (
+                        load_exception is not None
+                        and error is not load_exception
+                    ):
                         raise error from load_exception
                     raise error
                 return result
@@ -1686,7 +1832,7 @@ class BackendPluginRegistry:
 
                 operation = self._registering.get(record_id)
                 if operation is not None:
-                    wait_epoch, owner, _existing_token = operation
+                    wait_epoch, owner, existing_token = operation
                     if owner == thread_id:
                         raise BackendPluginLifecycleError(
                             "Recursive backend plugin registration is not allowed",
@@ -1700,7 +1846,13 @@ class BackendPluginRegistry:
                                 "from runtime attributes or initialize()."
                             ),
                         )
-                    self._condition.wait()
+                    self._wait_for_lifecycle_operation(
+                        record=record,
+                        operation="register",
+                        operation_token=existing_token,
+                        owner_thread=owner,
+                        waiter_thread=thread_id,
+                    )
                     if self._lifecycle_epoch != wait_epoch:
                         raise self._stale_operation_error(
                             record,
@@ -1801,6 +1953,8 @@ class BackendPluginRegistry:
                             initialize_result = initializer(
                                 initialization_context
                             )
+                        except _BackendPluginWaitCycleError as exc:
+                            primary_error = exc.for_record(record)
                         except Exception as exc:
                             primary_error = self._hook_error(
                                 record,
@@ -2436,6 +2590,9 @@ class BackendPluginRegistry:
 
                 while self._loading or self._registering or self._diagnosing:
                     self._condition.wait()
+                # Every live wait edge targets one of the now-empty owner
+                # ledgers. Clear any stale edge before reset becomes visible.
+                self._waiting_on.clear()
 
                 shutdown_records = tuple(
                     record
