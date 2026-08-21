@@ -23,18 +23,19 @@ from packaging.utils import canonicalize_name
 
 from .capabilities import (
     CapabilityReport,
+    _capability_error,
     evaluate_capabilities,
-    validate_plugin_capabilities,
+    evaluate_plugin_capabilities,
 )
 from .compatibility import (
     CompatibilityReport,
-    validate_backend_plugin,
+    _evaluate_backend_plugin_compatibility,
+    _sort_backend_plugin_errors,
     validate_triton_version_requirement,
 )
 from .conflicts import ConflictReport, detect_conflicts
 from .environment import CoreEnvironment, collect_core_environment
 from .errors import (
-    BackendPluginCapabilityError,
     BackendPluginCompatibilityError,
     BackendPluginConflictError,
     BackendPluginDiscoveryError,
@@ -43,7 +44,6 @@ from .errors import (
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
-    BackendPluginProtocolError,
     BackendPluginSelectionError,
 )
 from .manifest import (
@@ -63,6 +63,25 @@ from .selection import SelectionDecision, select_backend
 
 _BACKEND_ENTRY_POINT_GROUP = "triton.backends"
 _PREFLIGHT_PROFILES = {"triton_version", "full"}
+_UNSET = object()
+
+
+def _error_identity(error: BackendPluginError) -> Tuple[Any, ...]:
+    """Return a deterministic identity used to suppress repeated findings."""
+    return (
+        error.code,
+        error.plugin_id,
+        error.entry_point,
+        error.field,
+        getattr(error, "dimension", None),
+        error.expected,
+        error.actual,
+        error.detail,
+        getattr(error, "conflict_kind", None),
+        getattr(error, "claim", None),
+        tuple(getattr(error, "related_plugin_ids", ())),
+        tuple(getattr(error, "related_record_ids", ())),
+    )
 
 
 @dataclass(frozen=True)
@@ -673,7 +692,12 @@ class BackendPluginRegistry:
     def list_plugins(self) -> Tuple[BackendPluginRecord, ...]:
         return self.list()
 
-    def _resolve(self, identifier: str) -> BackendPluginRecord:
+    def _resolve(
+        self,
+        identifier: str,
+        *,
+        reject_conflicts: bool = False,
+    ) -> BackendPluginRecord:
         if identifier in self._records:
             return self._records[identifier]
         matches = tuple(
@@ -693,6 +717,16 @@ class BackendPluginRegistry:
                 ),
             )
         if len(matches) > 1:
+            if reject_conflicts:
+                for conflict in detect_conflicts(
+                    self._records.values()
+                ).fatal_conflicts:
+                    if (
+                        conflict.kind.value == "duplicate_plugin_id"
+                        and conflict.claim == identifier
+                    ):
+                        self._reject_conflicted(conflict)
+                        raise conflict.to_error()
             raise BackendPluginConflictError(
                 f"Backend plugin key '{identifier}' is ambiguous across records: "
                 + ", ".join(record.record_id for record in matches),
@@ -735,37 +769,75 @@ class BackendPluginRegistry:
         error: BackendPluginError,
         compatibility_status: PluginCompatibilityStatus,
     ) -> BackendPluginRecord:
-        return self._replace(
-            replace(
-                record,
-                state=PluginLifecycleState.REJECTED,
-                compatibility_status=compatibility_status,
-                errors=record.errors + (error,),
-            )
-        )
+        return self._reject_many(record, (error,), compatibility_status)
+
+    def _reject_many(
+        self,
+        record: BackendPluginRecord,
+        errors: Iterable[BackendPluginError],
+        compatibility_status: PluginCompatibilityStatus,
+        *,
+        compatibility_report: Any = _UNSET,
+        capability_report: Any = _UNSET,
+    ) -> BackendPluginRecord:
+        """Atomically reject a record with all new deterministic failures."""
+        combined = list(record.errors)
+        identities = {_error_identity(error) for error in combined}
+        for error in errors:
+            identity = _error_identity(error)
+            if identity not in identities:
+                combined.append(error)
+                identities.add(identity)
+        replacements = {
+            "state": PluginLifecycleState.REJECTED,
+            "compatibility_status": compatibility_status,
+            "errors": tuple(combined),
+        }
+        if compatibility_report is not _UNSET:
+            replacements["compatibility_report"] = compatibility_report
+        if capability_report is not _UNSET:
+            replacements["capability_report"] = capability_report
+        return self._replace(replace(record, **replacements))
 
     def _reject_conflicted(
         self,
         conflict,
-        error: BackendPluginError,
     ) -> None:
         """Mark every record involved in one fatal conflict REJECTED."""
         for conflicted_id in conflict.record_ids:
             conflicted = self._records.get(conflicted_id)
-            if (
-                conflicted is not None
-                and conflicted.state is not PluginLifecycleState.REJECTED
-            ):
-                self._reject(
-                    conflicted,
-                    error,
-                    conflicted.compatibility_status,
+            if conflicted is None:
+                continue
+            related_record_ids = tuple(
+                record_id
+                for record_id in conflict.record_ids
+                if record_id != conflicted.record_id
+            )
+            related_plugin_ids = tuple(
+                plugin_id
+                for plugin_id in (
+                    self._records[record_id].plugin_id
+                    for record_id in related_record_ids
+                    if record_id in self._records
                 )
+                if plugin_id is not None
+            )
+            error = conflict.to_error(
+                plugin_id=conflicted.plugin_id,
+                entry_point=conflicted.entry_point_name,
+                related_plugin_ids=related_plugin_ids,
+                related_record_ids=related_record_ids,
+            )
+            self._reject_many(
+                conflicted,
+                (error,),
+                conflicted.compatibility_status,
+            )
 
     def _reject_all_fatal_conflicts(self, records) -> None:
         """Mark every record in any fatal static conflict REJECTED."""
         for conflict in detect_conflicts(records).fatal_conflicts:
-            self._reject_conflicted(conflict, conflict.to_error())
+            self._reject_conflicted(conflict)
 
     def _reject_manifest_scope(
         self,
@@ -838,13 +910,15 @@ class BackendPluginRegistry:
             )
             return self._records[record.record_id]
 
-        try:
-            if self._preflight_profile == "triton_version":
-                if (
-                    record.manifest.isolation_mode
-                    is not PluginIsolationMode.PYTHON_ONLY
-                ):
-                    raise BackendPluginCompatibilityError(
+        errors = []
+        report = None
+        if self._preflight_profile == "triton_version":
+            if (
+                record.manifest.isolation_mode
+                is not PluginIsolationMode.PYTHON_ONLY
+            ):
+                errors.append(
+                    BackendPluginCompatibilityError(
                         "isolation mode for triton_version profile",
                         PluginIsolationMode.PYTHON_ONLY.value,
                         record.manifest.isolation_mode.value,
@@ -857,63 +931,49 @@ class BackendPluginRegistry:
                             "validation is enabled."
                         ),
                     )
+                )
+            try:
                 report = validate_triton_version_requirement(
                     record.manifest,
                     environment,
                 )
-            else:
-                report = validate_backend_plugin(
-                    record.manifest,
-                    environment,
-                    distribution=record.distribution,
-                    core_abi_fingerprint=(
-                        self._core_abi_fingerprint
-                        if self._core_abi_fingerprint is not None
-                        else environment.core_abi_fingerprint
-                    ),
-                    supported_tags=self._supported_tags,
-                )
-            capability_report = validate_plugin_capabilities(
+            except BackendPluginError as error:
+                errors.append(error)
+        else:
+            evaluation = _evaluate_backend_plugin_compatibility(
                 record.manifest,
-                core_provided=self._core_capabilities,
-            )
-        except BackendPluginCapabilityError as exc:
-            return self._reject(
-                record, exc, PluginCompatibilityStatus.INCOMPATIBLE
-            )
-        except (BackendPluginCompatibilityError, BackendPluginProtocolError) as exc:
-            if (
-                isinstance(exc, BackendPluginCompatibilityError)
-                and exc.dimension.startswith("wheel platform")
-            ):
-                self._reject_manifest_scope(
-                    exc,
-                    PluginCompatibilityStatus.INCOMPATIBLE,
-                    distribution=record.distribution,
-                    specialize_error=True,
-                )
-                return self._records[record.record_id]
-            return self._reject(
-                record, exc, PluginCompatibilityStatus.INCOMPATIBLE
-            )
-        except BackendPluginError as exc:
-            return self._reject(
-                record, exc, PluginCompatibilityStatus.NOT_CHECKED
-            )
-        except Exception as exc:
-            error = BackendPluginCompatibilityError(
-                "pre-load validation",
-                "all compatibility checks complete without an internal error",
-                f"<error: {exc}>",
-                plugin_id=record.plugin_id,
-                entry_point=record.entry_point_name,
-                remediation=(
-                    "Repair the backend distribution metadata or report this "
-                    "validator failure; the plugin was not imported."
+                environment,
+                distribution=record.distribution,
+                core_abi_fingerprint=(
+                    self._core_abi_fingerprint
+                    if self._core_abi_fingerprint is not None
+                    else environment.core_abi_fingerprint
                 ),
+                supported_tags=self._supported_tags,
             )
-            return self._reject(
-                record, error, PluginCompatibilityStatus.INCOMPATIBLE
+            report = evaluation.report
+            errors.extend(evaluation.errors)
+
+        capability_report = evaluate_plugin_capabilities(
+            record.manifest,
+            core_provided=self._core_capabilities,
+        )
+        if not capability_report.compatible:
+            errors.append(_capability_error(capability_report))
+
+        ordered_errors = _sort_backend_plugin_errors(errors)
+        if ordered_errors:
+            compatibility_status = (
+                PluginCompatibilityStatus.NOT_CHECKED
+                if isinstance(ordered_errors[0], BackendPluginManifestError)
+                else PluginCompatibilityStatus.INCOMPATIBLE
+            )
+            return self._reject_many(
+                record,
+                ordered_errors,
+                compatibility_status,
+                compatibility_report=report,
+                capability_report=capability_report,
             )
 
         if not can_transition(
@@ -945,7 +1005,9 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("validate")
             self.discover()
             if identifier is not None:
-                record = self._validate_record(self._resolve(identifier))
+                record = self._validate_record(
+                    self._resolve(identifier, reject_conflicts=True)
+                )
                 if record.state is PluginLifecycleState.REJECTED and record.error:
                     raise record.error
                 return record
@@ -967,25 +1029,20 @@ class BackendPluginRegistry:
         record: BackendPluginRecord,
     ) -> BackendPluginRecord:
         """Reject fatal static conflicts involving one record before import."""
-        if (
-            record.source is not PluginSource.MANIFEST
-            or record.state
-            in {
-                PluginLifecycleState.REJECTED,
-                PluginLifecycleState.LOADED,
-                PluginLifecycleState.REGISTERED,
-                PluginLifecycleState.SELECTED,
-                PluginLifecycleState.ACTIVE,
-            }
-        ):
+        if record.source is not PluginSource.MANIFEST or record.state in {
+            PluginLifecycleState.LOADED,
+            PluginLifecycleState.REGISTERED,
+            PluginLifecycleState.SELECTED,
+            PluginLifecycleState.ACTIVE,
+        }:
             return record
 
-        record = self._validate_record(record)
-        if record.state is PluginLifecycleState.REJECTED:
-            return record
+        if record.state is not PluginLifecycleState.REJECTED:
+            record = self._validate_record(record)
 
         if (
-            record.manifest is not None
+            record.state is not PluginLifecycleState.REJECTED
+            and record.manifest is not None
             and record.manifest.isolation_mode
             is PluginIsolationMode.NATIVE_IN_PROCESS
         ):
@@ -1001,15 +1058,10 @@ class BackendPluginRegistry:
                     continue
                 self._validate_record(candidate)
 
-        record = self._records[record.record_id]
-        for conflict in detect_conflicts(
-            self._records.values()
-        ).fatal_conflicts:
+        for conflict in detect_conflicts(self._records.values()).fatal_conflicts:
             if record.record_id in conflict.record_ids:
-                error = conflict.to_error()
-                self._reject_conflicted(conflict, error)
-                raise error
-        return record
+                self._reject_conflicted(conflict)
+        return self._records[record.record_id]
 
     def _transition(
         self,
@@ -1037,7 +1089,7 @@ class BackendPluginRegistry:
         with self._lock:
             self._ensure_not_resetting("load")
             self.discover()
-            record = self._resolve(identifier)
+            record = self._resolve(identifier, reject_conflicts=True)
             record = self._pre_import_fatal_conflict_gate(record)
 
             if record.state is PluginLifecycleState.REJECTED:
@@ -1464,7 +1516,7 @@ class BackendPluginRegistry:
         with self._lock:
             self._ensure_not_resetting("activate")
             self.discover()
-            record = self._resolve(identifier)
+            record = self._resolve(identifier, reject_conflicts=True)
             other_active = tuple(
                 candidate
                 for candidate in self._records.values()

@@ -1252,28 +1252,103 @@ def test_registry_reports_every_simultaneous_compatibility_failure(
 ) -> None:
     """The acceptance requirement demands complete multi-constraint reasons."""
 
-    registry, entry_point = _validation_fixture(
-        tmp_path,
-        plugin_overrides={
-            "backend_protocol": ">=2.0,<3.0",
-            "requires_core": ">=0.3,<0.4",
-            "requires_triton": {"version": ">=3.7,<3.8"},
-            "requires_llvm_commit": OTHER_COMMIT,
-        },
-    )
-    record = registry.validate()[0]
-    diagnostics = [error.to_dict() for error in record.errors]
-    dimensions = {
-        item.get("dimension", item.get("field")) for item in diagnostics
-    }
-    assert {
+    def validate_once(path: Path) -> tuple[Any, Any, list[dict[str, Any]]]:
+        registry, entry_point = _validation_fixture(
+            path,
+            plugin_overrides={
+                "backend_protocol": ">=2.0,<3.0",
+                "requires_core": ">=0.3,<0.4",
+                "requires_triton": {"version": ">=3.7,<3.8"},
+                "requires_llvm_commit": OTHER_COMMIT,
+            },
+        )
+        record = registry.validate()[0]
+        return registry, entry_point, [
+            error.to_dict() for error in record.errors
+        ]
+
+    registry, entry_point, diagnostics = validate_once(tmp_path / "first")
+    _, second_entry_point, second_diagnostics = validate_once(tmp_path / "second")
+    assert diagnostics == second_diagnostics
+    assert len(diagnostics) == 4
+    assert [item["dimension"] or item["field"] for item in diagnostics] == [
         "backend_protocol",
         "triton-anchor Core version",
         "Triton version",
         "LLVM commit",
-    } <= dimensions
+    ]
+    stable_keys = {
+        "code",
+        "message",
+        "plugin_id",
+        "entry_point",
+        "field",
+        "dimension",
+        "expected",
+        "actual",
+        "remediation",
+        "detail",
+    }
+    assert all(stable_keys <= set(item) for item in diagnostics)
     assert all(item["plugin_id"] == "vendor.alpha" for item in diagnostics)
-    assert all(item.get("expected") and item.get("actual") for item in diagnostics)
+    assert all(item["entry_point"] == "alpha" for item in diagnostics)
+    assert all(
+        item["expected"] and item["actual"] and item["remediation"]
+        for item in diagnostics
+    )
+
+    record = one_record(registry)
+    assert record.state is PluginLifecycleState.REJECTED
+    assert record.compatibility_status is PluginCompatibilityStatus.INCOMPATIBLE
+    assert record.compatibility_report is not None
+    assert not record.compatibility_report.compatible
+    assert record.plugin_object is None
+    assert not record.to_dict()["registered"]
+    with pytest.raises(BackendPluginProtocolError):
+        registry.validate(record.record_id)
+    with pytest.raises(BackendPluginProtocolError):
+        registry.validate(strict=True)
+    with pytest.raises(BackendPluginProtocolError):
+        registry.load(record.record_id)
+    assert entry_point.load_calls == second_entry_point.load_calls == 0
+
+
+def test_registry_aggregates_capability_after_version_failures(
+    tmp_path: Path,
+) -> None:
+    registry, entry_point = _validation_fixture(
+        tmp_path,
+        plugin_overrides={
+            "backend_protocol": ">=2.0,<3.0",
+            "requires_capabilities": ["core.missing"],
+        },
+    )
+    record = registry.validate()[0]
+    assert [
+        error.to_dict()["dimension"] or error.field for error in record.errors
+    ] == ["backend_protocol", "requires_capabilities"]
+    assert isinstance(record.errors[0], BackendPluginProtocolError)
+    assert isinstance(record.errors[1], BackendPluginCapabilityError)
+    assert record.capability_report is not None
+    assert not record.capability_report.compatible
+    assert entry_point.load_calls == 0
+
+
+def test_registry_does_not_mask_validator_programming_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, entry_point = _validation_fixture(tmp_path)
+    record_id = one_record(registry).record_id
+
+    def broken_inspector(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("validator bug sentinel")
+
+    monkeypatch.setattr(
+        "triton_anchor.backends.compatibility.inspect_native_artifacts",
+        broken_inspector,
+    )
+    with pytest.raises(AssertionError, match="validator bug sentinel"):
+        registry.validate(record_id)
     assert entry_point.load_calls == 0
 
 
@@ -1817,8 +1892,28 @@ def test_registry_duplicate_plugin_id_is_fatal_before_either_import(
     report = registry.conflicts()
     duplicate = [item for item in report.fatal_conflicts if item.kind.value == "duplicate_plugin_id"]
     assert len(duplicate) == 1
+    assert duplicate[0].to_error().to_dict()["plugin_id"] is None
+    with pytest.raises(BackendPluginConflictError) as caught:
+        registry.load("vendor.alpha")
+    assert caught.value.to_dict()["conflict_kind"] == "duplicate_plugin_id"
+
+    rejected = {record.record_id: record for record in registry.list()}
+    assert set(rejected) == set(duplicate[0].record_ids)
+    for record in rejected.values():
+        assert record.state is PluginLifecycleState.REJECTED
+        assert len(record.errors) == 1
+        diagnostic = record.errors[0].to_dict()
+        assert diagnostic["plugin_id"] == record.plugin_id == "vendor.alpha"
+        assert diagnostic["entry_point"] == record.entry_point_name
+        assert diagnostic["conflict_kind"] == "duplicate_plugin_id"
+        assert diagnostic["related_record_ids"] == sorted(
+            set(rejected) - {record.record_id}
+        )
+        assert diagnostic["related_plugin_ids"] == ["vendor.alpha"]
+
     with pytest.raises(BackendPluginConflictError):
-        registry.load(records[0].record_id)
+        registry.load("vendor.alpha")
+    assert all(len(record.errors) == 1 for record in registry.list())
     assert first_ep.load_calls == second_ep.load_calls == 0
 
 
@@ -1843,6 +1938,117 @@ def test_registry_duplicate_entry_point_name_is_fatal_before_import(
     )
     with pytest.raises(BackendPluginConflictError):
         registry.load(records[0].record_id)
+
+    rejected = {record.record_id: record for record in registry.list()}
+    for record in rejected.values():
+        assert record.state is PluginLifecycleState.REJECTED
+        assert len(record.errors) == 1
+        diagnostic = record.errors[0].to_dict()
+        assert diagnostic["plugin_id"] == record.plugin_id
+        assert diagnostic["entry_point"] == "alpha"
+        assert diagnostic["conflict_kind"] == "duplicate_entry_point"
+        assert diagnostic["related_record_ids"] == sorted(
+            set(rejected) - {record.record_id}
+        )
+        assert diagnostic["related_plugin_ids"] == sorted(
+            other.plugin_id
+            for other in rejected.values()
+            if other.record_id != record.record_id
+        )
+
+    with pytest.raises(BackendPluginConflictError):
+        registry.load(records[0].record_id)
+    assert all(len(record.errors) == 1 for record in registry.list())
+    assert first_ep.load_calls == second_ep.load_calls == 0
+
+
+def test_registry_records_every_fatal_conflict_for_each_participant(
+    tmp_path: Path,
+) -> None:
+    plugins = [good_plugin(), good_plugin()]
+    entry_points = [
+        FakeEntryPoint(
+            "alpha", structural_plugin("first"), value="fixture_first:plugin"
+        ),
+        FakeEntryPoint(
+            "alpha", structural_plugin("second"), value="fixture_second:plugin"
+        ),
+    ]
+    distributions = [
+        make_distribution(
+            tmp_path / str(index),
+            name=f"fixture-{index}",
+            plugins=[plugin],
+            entry_points=[entry_point],
+        )
+        for index, (plugin, entry_point) in enumerate(
+            zip(plugins, entry_points)
+        )
+    ]
+    registry = registry_for(reversed(distributions))
+    records = registry.validate()
+    with pytest.raises(BackendPluginConflictError):
+        registry.load(records[0].record_id)
+
+    for record in registry.list():
+        diagnostics = [error.to_dict() for error in record.errors]
+        assert [item["conflict_kind"] for item in diagnostics] == [
+            "duplicate_plugin_id",
+            "duplicate_entry_point",
+        ]
+        assert all(item["plugin_id"] == record.plugin_id for item in diagnostics)
+        assert all(
+            item["entry_point"] == record.entry_point_name
+            for item in diagnostics
+        )
+    with pytest.raises(BackendPluginConflictError):
+        registry.load(records[0].record_id)
+    assert all(len(record.errors) == 2 for record in registry.list())
+    assert all(entry_point.load_calls == 0 for entry_point in entry_points)
+
+
+def test_registry_appends_conflict_to_previously_incompatible_record(
+    tmp_path: Path,
+) -> None:
+    first = good_plugin(requires_triton={"version": ">=3.7,<3.8"})
+    second = good_plugin(entry_point="beta", targets=["beta"])
+    first_ep = FakeEntryPoint("alpha", structural_plugin("first"))
+    second_ep = FakeEntryPoint("beta", structural_plugin("second"))
+    distributions = [
+        make_distribution(
+            tmp_path / "first",
+            name="first",
+            plugins=[first],
+            entry_points=[first_ep],
+        ),
+        make_distribution(
+            tmp_path / "second",
+            name="second",
+            plugins=[second],
+            entry_points=[second_ep],
+        ),
+    ]
+    registry = registry_for(distributions)
+    records = registry.validate()
+    compatible = next(
+        record for record in records if record.entry_point_name == "beta"
+    )
+    with pytest.raises(BackendPluginConflictError):
+        registry.load(compatible.record_id)
+
+    refreshed = {
+        record.entry_point_name: record for record in registry.list()
+    }
+    assert [error.code for error in refreshed["alpha"].errors] == [
+        "backend_plugin_compatibility_error",
+        "backend_plugin_conflict_error",
+    ]
+    assert [error.code for error in refreshed["beta"].errors] == [
+        "backend_plugin_conflict_error"
+    ]
+    assert isinstance(
+        refreshed["alpha"].error, BackendPluginCompatibilityError
+    )
     assert first_ep.load_calls == second_ep.load_calls == 0
 
 
