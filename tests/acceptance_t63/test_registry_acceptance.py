@@ -43,6 +43,7 @@ from triton_anchor.backends import (
     ProtocolFieldStatus,
     SelectionMethod,
     consume_protocol_field,
+    evaluate_manifest_semantics,
     evaluate_protocol_field_removal,
     load_manifest,
     parse_manifest,
@@ -583,20 +584,90 @@ def test_registry_rejects_manifest_entry_point_absent_from_distribution(
     assert not marker.exists()
 
 
-def test_registry_rejects_duplicate_plugin_ids_inside_one_manifest() -> None:
+def test_registry_rejects_duplicate_plugin_ids_inside_one_manifest(
+    tmp_path: Path,
+) -> None:
     first = good_plugin()
     second = good_plugin(entry_point="beta", targets=["beta"])
-    with pytest.raises(BackendPluginManifestError) as caught:
-        parse_manifest(good_manifest([first, second]))
-    assert caught.value.field == "plugins[].plugin_id"
+    document = parse_manifest(good_manifest([first, second]))
+    errors = evaluate_manifest_semantics(document)
+    assert len(errors) == 2
+    assert {error.field for error in errors} == {"plugins[].plugin_id"}
+
+    entry_points = [
+        FakeEntryPoint("alpha", structural_plugin("alpha")),
+        FakeEntryPoint("beta", structural_plugin("beta")),
+    ]
+    distribution = make_distribution(
+        tmp_path / "duplicate-plugin-id",
+        plugins=[first, second],
+        entry_points=entry_points,
+    )
+    records = registry_for([distribution]).list()
+    assert len(records) == 2
+    assert all(record.state is PluginLifecycleState.REJECTED for record in records)
+    assert all(record.error.field == "plugins[].plugin_id" for record in records)
+    assert all(entry_point.load_calls == 0 for entry_point in entry_points)
 
 
-def test_registry_rejects_duplicate_entry_points_inside_one_manifest() -> None:
+def test_registry_rejects_duplicate_entry_points_inside_one_manifest(
+    tmp_path: Path,
+) -> None:
     first = good_plugin()
     second = good_plugin(plugin_id="vendor.beta", targets=["beta"])
-    with pytest.raises(BackendPluginManifestError) as caught:
-        parse_manifest(good_manifest([first, second]))
-    assert caught.value.field == "plugins[].entry_point"
+    document = parse_manifest(good_manifest([first, second]))
+    errors = evaluate_manifest_semantics(document)
+    assert len(errors) == 2
+    assert {error.field for error in errors} == {"plugins[].entry_point"}
+
+    entry_points = [
+        FakeEntryPoint(
+            "alpha", structural_plugin("alpha-a"), value="fixture_a:plugin"
+        ),
+        FakeEntryPoint(
+            "alpha", structural_plugin("alpha-b"), value="fixture_b:plugin"
+        ),
+    ]
+    distribution = make_distribution(
+        tmp_path / "duplicate-entry-point",
+        plugins=[first, second],
+        entry_points=entry_points,
+    )
+    records = registry_for([distribution]).list()
+    assert len(records) == 2
+    assert all(record.state is PluginLifecycleState.REJECTED for record in records)
+    assert all(record.error.field == "plugins[].entry_point" for record in records)
+    assert all(entry_point.load_calls == 0 for entry_point in entry_points)
+
+
+def test_registry_rejects_duplicate_installed_entry_point_names_before_import(
+    tmp_path: Path,
+) -> None:
+    document = parse_manifest(good_manifest())
+    errors = evaluate_manifest_semantics(
+        document, installed_entry_points=("alpha", "alpha")
+    )
+    assert len(errors) == 1
+    assert errors[0].field == "plugins[].entry_point"
+    assert "missing records for alpha" in str(errors[0])
+
+    entry_points = [
+        FakeEntryPoint(
+            "alpha", structural_plugin("alpha-a"), value="fixture_a:plugin"
+        ),
+        FakeEntryPoint(
+            "alpha", structural_plugin("alpha-b"), value="fixture_b:plugin"
+        ),
+    ]
+    distribution = make_distribution(
+        tmp_path / "duplicate-installed-entry-point",
+        entry_points=entry_points,
+    )
+    records = registry_for([distribution]).list()
+    assert len(records) == 2
+    assert all(record.state is PluginLifecycleState.REJECTED for record in records)
+    assert all(record.error.field == "plugins[].entry_point" for record in records)
+    assert all(entry_point.load_calls == 0 for entry_point in entry_points)
 
 
 @pytest.mark.parametrize(
@@ -927,10 +998,102 @@ def test_registry_rejects_protocol_too_old_or_too_new_before_import(
 
 
 @pytest.mark.parametrize("protocol", ["not-a-specifier", ">=>1", "", 1])
-def test_registry_rejects_malformed_protocol_constraint(protocol: Any) -> None:
-    with pytest.raises(BackendPluginManifestError) as caught:
-        parse_manifest(good_manifest([good_plugin(backend_protocol=protocol)]))
-    assert caught.value.field == "backend_protocol"
+def test_registry_rejects_malformed_protocol_constraint(
+    tmp_path: Path, protocol: Any
+) -> None:
+    manifest = good_manifest([good_plugin(backend_protocol=protocol)])
+    if isinstance(protocol, str) and protocol:
+        document = parse_manifest(manifest)
+        errors = evaluate_manifest_semantics(document)
+        assert len(errors) == 1
+        assert errors[0].field == "backend_protocol"
+    else:
+        with pytest.raises(BackendPluginManifestError) as caught:
+            parse_manifest(manifest)
+        assert caught.value.field == "backend_protocol"
+
+    entry_point = FakeEntryPoint("alpha", structural_plugin("alpha"))
+    distribution = make_distribution(
+        tmp_path / "malformed-protocol",
+        entry_points=[entry_point],
+        manifest_data=manifest,
+    )
+    record = one_record(registry_for([distribution]))
+    assert record.state is PluginLifecycleState.REJECTED
+    assert isinstance(record.error, BackendPluginManifestError)
+    assert record.error.field == "backend_protocol"
+    assert entry_point.load_calls == 0
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "backend_protocol",
+        "requires_core",
+        "requires_triton.version",
+        "requires_llvm_version",
+        "requires_mlir_version",
+    ],
+)
+def test_registry_rejects_each_invalid_pep440_requirement_before_import(
+    tmp_path: Path, field: str
+) -> None:
+    plugin = good_plugin()
+    if field == "requires_triton.version":
+        plugin["requires_triton"]["version"] = "banana"
+    else:
+        plugin[field] = "banana"
+    manifest = good_manifest([plugin])
+    document = parse_manifest(manifest)
+    errors = evaluate_manifest_semantics(document)
+    assert [error.field for error in errors] == [field]
+
+    entry_point = FakeEntryPoint("alpha", structural_plugin("alpha"))
+    distribution = make_distribution(
+        tmp_path / "invalid-version",
+        entry_points=[entry_point],
+        manifest_data=manifest,
+    )
+    record = one_record(registry_for([distribution]))
+    assert record.state is PluginLifecycleState.REJECTED
+    assert record.error.field == field
+    assert entry_point.load_calls == 0
+
+
+def test_manifest_semantic_errors_are_complete_and_deterministic() -> None:
+    first = good_plugin(
+        backend_protocol="bad protocol",
+        requires_core="bad core",
+        requires_triton={"version": "bad triton"},
+        requires_llvm_version="bad llvm",
+        requires_mlir_version="bad mlir",
+    )
+    second = good_plugin(
+        entry_point="beta",
+        targets=["beta"],
+        backend_protocol="also bad",
+    )
+    document = parse_manifest(good_manifest([first, second]))
+
+    first_run = tuple(
+        (error.field, error.plugin_id, error.entry_point)
+        for error in evaluate_manifest_semantics(document)
+    )
+    second_run = tuple(
+        (error.field, error.plugin_id, error.entry_point)
+        for error in evaluate_manifest_semantics(document)
+    )
+    assert first_run == second_run
+    assert [item[0] for item in first_run] == [
+        "backend_protocol",
+        "backend_protocol",
+        "requires_core",
+        "requires_triton.version",
+        "requires_llvm_version",
+        "requires_mlir_version",
+        "plugins[].plugin_id",
+        "plugins[].plugin_id",
+    ]
 
 
 @pytest.mark.parametrize(
