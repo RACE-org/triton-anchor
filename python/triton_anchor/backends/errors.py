@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
+from .interfaces import (
+    BackendPluginInterfaceIssue,
+    RuntimeInterfaceMember,
+)
+
 
 class BackendPluginError(RuntimeError):
     """Base class for backend plugin failures.
@@ -62,6 +67,9 @@ class BackendPluginInterfaceError(BackendPluginError):
         *,
         invalid_fields: Iterable[str] = (),
         field_errors: Optional[Mapping[str, str]] = None,
+        contract_ids: Iterable[str] = (),
+        required_surface: Iterable[RuntimeInterfaceMember] = (),
+        interface_issues: Iterable[BackendPluginInterfaceIssue] = (),
         plugin_id: Optional[str] = None,
         entry_point: Optional[str] = None,
     ) -> None:
@@ -93,6 +101,34 @@ class BackendPluginInterfaceError(BackendPluginError):
                 if name not in runtime_field_order
             }
         )
+        self.contract_ids = tuple(dict.fromkeys(contract_ids))
+        self.required_surface = tuple(required_surface)
+        self.interface_issues = tuple(interface_issues)
+        self.missing_abstract_members = {
+            field_name: tuple(
+                sorted(
+                    {
+                        issue.member
+                        for issue in self.interface_issues
+                        if issue.field == field_name
+                        and issue.problem
+                        in {"missing", "abstract", "class_abstract"}
+                    }
+                )
+            )
+            for field_name in runtime_field_order
+            if any(
+                issue.field == field_name
+                and issue.problem
+                in {"missing", "abstract", "class_abstract"}
+                for issue in self.interface_issues
+            )
+        }
+        self.invalid_descriptor_kinds = tuple(
+            issue
+            for issue in self.interface_issues
+            if issue.problem == "descriptor_kind"
+        )
         details = []
         if self.missing_fields:
             details.append("missing=" + ", ".join(self.missing_fields))
@@ -106,10 +142,22 @@ class BackendPluginInterfaceError(BackendPluginError):
                     for name, message in sorted(self.field_errors.items())
                 )
             )
+        if self.interface_issues:
+            details.append(
+                "interface="
+                + ", ".join(
+                    f"{issue.field}.{issue.member}:{issue.problem}"
+                    f"(expected={issue.expected},actual={issue.actual})"
+                    for issue in self.interface_issues
+                )
+            )
         detail = "; ".join(details)
         affected_fields = set(self.missing_fields)
         affected_fields.update(self.invalid_fields)
         affected_fields.update(self.field_errors)
+        affected_fields.update(
+            issue.field for issue in self.interface_issues
+        )
         ordered_affected_fields = tuple(
             name for name in runtime_field_order if name in affected_fields
         ) + tuple(
@@ -127,11 +175,22 @@ class BackendPluginInterfaceError(BackendPluginError):
             entry_point=entry_point,
             detail=detail,
             field=field,
-            expected="class objects",
+            expected=(
+                "runtime classes satisfying registered abstract interface "
+                "contracts"
+                if self.interface_issues
+                else "class objects"
+            ),
             actual=detail,
             remediation=(
-                "Expose compiler_cls and driver_cls as class objects from the "
-                "backend entry point."
+                "Implement every current compiler_cls/driver_cls abstract "
+                "surface member with compatible static descriptors and "
+                "signatures before reinstalling the backend."
+                if self.interface_issues
+                else (
+                    "Expose compiler_cls and driver_cls as class objects from "
+                    "the backend entry point."
+                )
             ),
         )
 
@@ -140,6 +199,20 @@ class BackendPluginInterfaceError(BackendPluginError):
         result["missing_fields"] = list(self.missing_fields)
         result["invalid_fields"] = list(self.invalid_fields)
         result["field_errors"] = dict(self.field_errors)
+        result["contract_ids"] = list(self.contract_ids)
+        result["required_surface"] = [
+            member.to_dict() for member in self.required_surface
+        ]
+        result["interface_issues"] = [
+            issue.to_dict() for issue in self.interface_issues
+        ]
+        result["missing_abstract_members"] = {
+            name: list(members)
+            for name, members in self.missing_abstract_members.items()
+        }
+        result["invalid_descriptor_kinds"] = [
+            issue.to_dict() for issue in self.invalid_descriptor_kinds
+        ]
         return result
 
 

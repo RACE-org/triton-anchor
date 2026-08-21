@@ -52,6 +52,14 @@ from .native import (
     NativeInspectionReport,
     inspect_native_artifacts,
 )
+from .interfaces import (
+    AbstractRuntimePairValidator,
+    BackendPluginInterfaceIssue,
+    RuntimeInterfaceMember,
+    RuntimeInterfaceSurface,
+    RuntimePairValidationContext,
+    RuntimePairValidationResult,
+)
 from .manifest import (
     MANIFEST_FILENAME,
     BackendManifestDocument,
@@ -104,6 +112,7 @@ __all__ = [
     "BACKEND_SELECTOR_ENV",
     "DIAGNOSTICS_FIELD_POLICY",
     "MANIFEST_FILENAME",
+    "AbstractRuntimePairValidator",
     "BackendManifestDocument",
     "BackendPlugin",
     "BackendPluginBase",
@@ -113,6 +122,7 @@ __all__ = [
     "BackendPluginDiscoveryError",
     "BackendPluginError",
     "BackendPluginInterfaceError",
+    "BackendPluginInterfaceIssue",
     "BackendPluginLifecycleError",
     "BackendPluginLoadError",
     "BackendPluginManifestError",
@@ -141,6 +151,10 @@ __all__ = [
     "ProtocolFieldPolicy",
     "ProtocolFieldResult",
     "ProtocolFieldStatus",
+    "RuntimeInterfaceMember",
+    "RuntimeInterfaceSurface",
+    "RuntimePairValidationContext",
+    "RuntimePairValidationResult",
     "SelectionDecision",
     "SelectionMethod",
     "TritonRequirement",

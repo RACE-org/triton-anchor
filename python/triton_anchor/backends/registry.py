@@ -8,7 +8,7 @@ import os
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
-from types import MappingProxyType
+from types import CoroutineType, MappingProxyType
 from typing import (
     Any,
     Callable,
@@ -53,6 +53,12 @@ from .manifest import (
     load_distribution_manifest,
     operational_record_manifest_error,
     stable_manifest_actual,
+)
+from .interfaces import (
+    BackendPluginInterfaceIssue,
+    RuntimeInterfaceMember,
+    RuntimePairValidationContext,
+    RuntimePairValidationResult,
 )
 from .native import NativeInspectionReport, inspect_native_artifacts
 from .protocol import (
@@ -104,6 +110,48 @@ def _close_unawaited(value: Any) -> None:
             # The synchronous contract error remains primary. A plugin-owned
             # coroutine must not strand a Registry attempt or stop reset.
             pass
+
+
+def _run_runtime_pair_validators(
+    validators: Tuple[Tuple[str, Callable[[Any], Any]], ...],
+    context: RuntimePairValidationContext,
+) -> Tuple[
+    Tuple[str, ...],
+    Tuple[RuntimeInterfaceMember, ...],
+    Tuple[BackendPluginInterfaceIssue, ...],
+]:
+    """Invoke trusted integration validators without masking programming bugs."""
+    contract_ids = []
+    required_surface = []
+    issues = []
+    for name, validator in validators:
+        result = validator(context)
+        if type(result) is CoroutineType:
+            _close_unawaited(result)
+        if type(result) is not RuntimePairValidationResult:
+            raise TypeError(
+                "runtime pair validator must return an exact "
+                "RuntimePairValidationResult"
+            )
+        if result.contract_id != name:
+            raise TypeError(
+                "runtime pair validator result contract_id must match its "
+                "registration name"
+            )
+        if type(result.required_surface) is not tuple or any(
+            type(member) is not RuntimeInterfaceMember
+            for member in result.required_surface
+        ):
+            raise TypeError("runtime pair validator returned an invalid surface")
+        if type(result.issues) is not tuple or any(
+            type(issue) is not BackendPluginInterfaceIssue
+            for issue in result.issues
+        ):
+            raise TypeError("runtime pair validator returned invalid issues")
+        contract_ids.append(name)
+        required_surface.extend(result.required_surface)
+        issues.extend(result.issues)
+    return tuple(contract_ids), tuple(required_surface), tuple(issues)
 
 
 def _freeze_json_value(value: Any) -> Any:
@@ -498,6 +546,7 @@ class BackendPluginRegistry:
         self._reset_operation_errors: list[BackendPluginError] = []
         self._selections: Dict[str, SelectionDecision] = {}
         self._reset_hooks: list = []
+        self._runtime_pair_validators: Dict[str, Callable[[Any], Any]] = {}
         self._resetting = False
         self._lifecycle_epoch = 0
         self._generation = 0
@@ -525,6 +574,70 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("register_reset_hook")
             if callback not in self._reset_hooks:
                 self._reset_hooks.append(callback)
+
+    def register_runtime_pair_validator(
+        self,
+        name: str,
+        validator: Callable[[RuntimePairValidationContext], Any],
+    ) -> None:
+        """Register one trusted, version-neutral pre-initialize validator.
+
+        Registration is identity-idempotent and reset-stable.  A new contract
+        cannot be added after a runtime pair has entered registration or been
+        published, because doing so would leave an already-visible plugin
+        outside the new trust boundary.
+        """
+        if type(name) is not str or not name.strip():
+            raise TypeError("runtime pair validator name must be non-empty")
+        if not callable(validator):
+            raise TypeError("runtime pair validator must be callable")
+        with self._condition:
+            existing = self._runtime_pair_validators.get(name)
+            if existing is validator:
+                return
+            if existing is not None:
+                raise BackendPluginLifecycleError(
+                    "Runtime pair validator name is already registered",
+                    field="runtime_pair_validator",
+                    expected="the original validator object for this name",
+                    actual="a different validator object",
+                    remediation=(
+                        "Reuse the process-owned validator instance; never "
+                        "replace a live runtime interface contract."
+                    ),
+                )
+            self._ensure_not_resetting("register_runtime_pair_validator")
+            published = tuple(
+                sorted(
+                    record.record_id
+                    for record in self._records.values()
+                    if record.state
+                    in {
+                        PluginLifecycleState.REGISTERED,
+                        PluginLifecycleState.SELECTED,
+                        PluginLifecycleState.ACTIVE,
+                    }
+                )
+            )
+            if self._registering or published:
+                raise BackendPluginLifecycleError(
+                    "Runtime pair validator registration is too late",
+                    field="runtime_pair_validator",
+                    expected=(
+                        "contract registration before runtime pair validation "
+                        "or publication"
+                    ),
+                    actual=(
+                        "registration in progress"
+                        if self._registering
+                        else "runtime pair already published"
+                    ),
+                    remediation=(
+                        "Register the Triton runtime interface contract during "
+                        "adapter initialization, before selecting plugins."
+                    ),
+                )
+            self._runtime_pair_validators[name] = validator
 
     @property
     def generation(self) -> int:
@@ -1895,6 +2008,9 @@ class BackendPluginRegistry:
                     thread_id,
                     token,
                 )
+                runtime_pair_validators = tuple(
+                    sorted(self._runtime_pair_validators.items())
+                )
 
             operation_finished = False
             try:
@@ -1936,7 +2052,60 @@ class BackendPluginRegistry:
                         plugin_id=record.plugin_id,
                         entry_point=record.entry_point_name,
                     )
-                elif record.source is PluginSource.MANIFEST:
+                elif runtime_pair_validators:
+                    validation_context = RuntimePairValidationContext(
+                        compiler_cls=values["compiler_cls"],
+                        driver_cls=values["driver_cls"],
+                    )
+                    (
+                        contract_ids,
+                        required_surface,
+                        interface_issues,
+                    ) = _run_runtime_pair_validators(
+                        runtime_pair_validators,
+                        validation_context,
+                    )
+                    if interface_issues:
+                        primary_error = BackendPluginInterfaceError(
+                            contract_ids=contract_ids,
+                            required_surface=required_surface,
+                            interface_issues=interface_issues,
+                            plugin_id=record.plugin_id,
+                            entry_point=record.entry_point_name,
+                        )
+
+                # A reset that wins during static validation must prevent the
+                # old attempt from entering initialize().  Check the operation
+                # token and epoch at the new trust boundary, then release a
+                # stale attempt before any plugin lifecycle hook is read.
+                validation_stale = False
+                if primary_error is None:
+                    with self._condition:
+                        current_operation = self._registering.get(record_id)
+                        validation_stale = (
+                            epoch != self._lifecycle_epoch
+                            or record_id not in self._records
+                            or current_operation is None
+                            or current_operation[2] is not token
+                        )
+                        if validation_stale:
+                            stale_error = self._stale_operation_error(
+                                record,
+                                "register",
+                                epoch,
+                                self._lifecycle_epoch,
+                            )
+                            self._finish_operation(
+                                self._registering, record_id, token
+                            )
+                            operation_finished = True
+                    if validation_stale:
+                        raise stale_error
+
+                if (
+                    primary_error is None
+                    and record.source is PluginSource.MANIFEST
+                ):
                     initializer, primary_error = self._read_hook(
                         record, "initialize"
                     )
