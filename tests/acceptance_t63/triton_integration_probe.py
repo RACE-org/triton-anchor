@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.metadata
+import inspect
 import json
 import os
 import subprocess
@@ -423,14 +424,50 @@ def _v30_probe(repository: Path, site: Path, marker: Path) -> dict[str, Any]:
     selection = _attempt(lambda: registry.select(target).to_dict())
     selected_record = registry.get_selection(target.backend)
     abstract_methods = None
+    record = None
     if selected_record is not None:
         record = registry.inspect(selected_record.record_id)
+    else:
+        # A conforming F6 gate rejects before writing a selection.  Retain the
+        # independent pinned-surface oracle by reading the rejected record (if
+        # it keeps the pair) or its structured interface issues.  Do not make
+        # the oracle depend on publication of an invalid class.
+        record = next(
+            (
+                candidate
+                for candidate in registry.list()
+                if candidate.entry_point_name == "v30_fixture"
+            ),
+            None,
+        )
+    if record is not None and (
+        record.compiler_cls is not None and record.driver_cls is not None
+    ):
         abstract_methods = {
             "compiler": sorted(
                 getattr(record.compiler_cls, "__abstractmethods__", ())
             ),
             "driver": sorted(
                 getattr(record.driver_cls, "__abstractmethods__", ())
+            ),
+        }
+    elif record is not None and record.plugin_object is not None:
+        # Keep this pinned-surface oracle independent of the error produced by
+        # the gate under test.  The rejected record may retain the already
+        # loaded plugin object, but it must not publish these classes through
+        # record.compiler_cls/driver_cls or a selection.
+        compiler_cls = inspect.getattr_static(
+            record.plugin_object, "compiler_cls", None
+        )
+        driver_cls = inspect.getattr_static(
+            record.plugin_object, "driver_cls", None
+        )
+        abstract_methods = {
+            "compiler": sorted(
+                getattr(compiler_cls, "__abstractmethods__", ())
+            ),
+            "driver": sorted(
+                getattr(driver_cls, "__abstractmethods__", ())
             ),
         }
 
