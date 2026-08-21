@@ -57,10 +57,12 @@ from .manifest import (
     BackendManifestDocument,
     BackendPluginManifest,
     TritonRequirement,
+    evaluate_manifest_semantics,
     load_distribution_manifest,
     load_manifest,
     load_manifest_for_entry_point,
     parse_manifest,
+    validate_manifest_semantics,
 )
 from .protocol import (
     BACKEND_PLUGIN_PROTOCOL_VERSION,
@@ -147,6 +149,7 @@ __all__ = [
     "evaluate_capabilities",
     "evaluate_plugin_capabilities",
     "evaluate_protocol_field_removal",
+    "evaluate_manifest_semantics",
     "load_build_info",
     "load_distribution_manifest",
     "load_manifest",
@@ -158,6 +161,7 @@ __all__ = [
     "select_backend",
     "select_backend_plugin",
     "validate_backend_plugin",
+    "validate_manifest_semantics",
     "validate_capabilities",
     "validate_plugin_capabilities",
     "validate_triton_requirement",
