@@ -7,52 +7,74 @@ from triton_anchor.backends import BackendPluginSelectionError
 
 from ..backends import activate_backend
 from ..backends import DriverBase
+from ..backends import _authorize_legacy_driver_fallback
+from ..backends import _commit_manifest_driver
+from ..backends import _get_driver_backend_resolution
+from ..backends import _LEGACY_RUNTIME_FALLBACK_AUTHORITY
+from ..backends import _release_speculative_driver_selections
+from ..backends import _resolve_active_legacy_driver
 from ..backends import get_backend
-from ..backends import get_driver_backends
 from ..backends import register_backend_reset_hook
 
 
 def _create_driver():
-    candidates = get_driver_backends()
+    resolution = _get_driver_backend_resolution()
+    candidates = resolution.manifest_candidates
     actives = []
-    for backend in candidates:
-        driver_cls = backend.driver
-        try:
+    try:
+        for backend in candidates:
+            driver_cls = backend.driver
             is_active = getattr(driver_cls, "is_active", None)
             if not callable(is_active):
                 raise TypeError("is_active is not callable")
             if is_active():
                 actives.append(backend)
-        except BackendPluginError:
-            raise
-        except Exception as exc:
-            raise BackendPluginLifecycleError(
-                f"Backend driver active probe failed: {exc}",
-                plugin_id=backend.plugin_id,
-                entry_point=backend.entry_point_name,
-                field="driver_cls.is_active",
-                expected="a successful boolean active probe",
-                actual=f"<error: {exc}>",
-                remediation=(
-                    "Fix driver_cls.is_active() so runtime selection can "
-                    "probe the Registry winner without side effects."
-                ),
-            ) from exc
+    except BackendPluginError:
+        _release_speculative_driver_selections(resolution)
+        raise
+    except Exception as exc:
+        error = BackendPluginLifecycleError(
+            f"Backend driver active probe failed: {exc}",
+            plugin_id=backend.plugin_id,
+            entry_point=backend.entry_point_name,
+            field="driver_cls.is_active",
+            expected="a successful boolean active probe",
+            actual=f"<error: {exc}>",
+            remediation=(
+                "Fix driver_cls.is_active() so runtime selection can "
+                "probe the Registry winner without side effects."
+            ),
+        )
+        _release_speculative_driver_selections(resolution)
+        raise error from exc
+    except BaseException:
+        _release_speculative_driver_selections(resolution)
+        raise
 
     if not actives:
-        raise BackendPluginSelectionError(
-            "No Registry-selected backend driver is active",
-            field="driver_cls.is_active",
-            expected="one active backend driver",
-            actual="0",
-            remediation=(
-                "Install or select a backend whose driver reports active, "
-                "or set TRITON_ANCHOR_BACKEND explicitly."
-            ),
+        _authorize_legacy_driver_fallback(resolution)
+        selected_ids = tuple(
+            sorted(
+                set(resolution.requested_legacy_record_ids).union({
+                    decision.record_id
+                    for decision in resolution.selected_legacy_decisions
+                    if getattr(
+                        getattr(decision, "method", None),
+                        "value",
+                        None,
+                    )
+                    in {"python_explicit", "environment"}
+                })
+            )
+        )
+        return _resolve_active_legacy_driver(
+            authority=_LEGACY_RUNTIME_FALLBACK_AUTHORITY,
+            manual_candidates=resolution.manual_candidates,
+            selected_record_ids=selected_ids,
         )
     if len(actives) > 1:
         driver_classes = [backend.driver for backend in actives]
-        raise BackendPluginConflictError(
+        error = BackendPluginConflictError(
             f"{len(actives)} Registry-selected backend drivers are active",
             field="driver_cls.is_active",
             expected="one active backend driver",
@@ -65,14 +87,17 @@ def _create_driver():
                 "one selected driver reports active."
             ),
         )
+        _release_speculative_driver_selections(resolution)
+        raise error
 
     backend = actives[0]
     try:
         active_driver = backend.driver()
     except BackendPluginError:
+        _release_speculative_driver_selections(resolution)
         raise
     except Exception as exc:
-        raise BackendPluginLifecycleError(
+        error = BackendPluginLifecycleError(
             f"Backend driver construction failed: {exc}",
             plugin_id=backend.plugin_id,
             entry_point=backend.entry_point_name,
@@ -83,13 +108,19 @@ def _create_driver():
                 "Fix the selected driver constructor and release partial "
                 "runtime resources before retrying."
             ),
-        ) from exc
+        )
+        _release_speculative_driver_selections(resolution)
+        raise error from exc
+    except BaseException:
+        _release_speculative_driver_selections(resolution)
+        raise
     try:
         target = active_driver.get_current_target()
     except BackendPluginError:
+        _release_speculative_driver_selections(resolution)
         raise
     except Exception as exc:
-        raise BackendPluginLifecycleError(
+        error = BackendPluginLifecycleError(
             f"Backend driver target lookup failed: {exc}",
             plugin_id=backend.plugin_id,
             entry_point=backend.entry_point_name,
@@ -100,8 +131,17 @@ def _create_driver():
                 "Fix get_current_target() so compiler and runtime can verify "
                 "the same Registry record."
             ),
-        ) from exc
-    activate_backend(backend, target=target)
+        )
+        _release_speculative_driver_selections(resolution)
+        raise error from exc
+    except BaseException:
+        _release_speculative_driver_selections(resolution)
+        raise
+    try:
+        _commit_manifest_driver(resolution, backend, target)
+    except BaseException:
+        _release_speculative_driver_selections(resolution)
+        raise
     return active_driver
 
 
@@ -113,6 +153,7 @@ class LazyProxy:
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._initializing = False
+        self._initializing_owner = None
         self._generation = 0
 
     def _initialize_obj(self):
@@ -121,10 +162,22 @@ class LazyProxy:
                 if self._obj is not None:
                     return self._obj
                 if self._initializing:
+                    if self._initializing_owner == threading.get_ident():
+                        raise BackendPluginLifecycleError(
+                            "Runtime driver initialization re-entered itself",
+                            field="driver initialization",
+                            expected="non-reentrant driver callbacks",
+                            actual="current thread already owns initialization",
+                            remediation=(
+                                "Do not access driver.active from is_active(), "
+                                "the driver constructor, or get_current_target()."
+                            ),
+                        )
                     self._condition.wait()
                     continue
                 generation = self._generation
                 self._initializing = True
+                self._initializing_owner = threading.get_ident()
 
             # Backend construction invokes plugin code.  Run it without the
             # proxy lock so Registry.reset() can invalidate this attempt
@@ -134,11 +187,13 @@ class LazyProxy:
             except BaseException:
                 with self._condition:
                     self._initializing = False
+                    self._initializing_owner = None
                     self._condition.notify_all()
                 raise
 
             with self._condition:
                 self._initializing = False
+                self._initializing_owner = None
                 if (
                     self._generation == generation
                     and self._obj is None
@@ -164,6 +219,7 @@ class LazyProxy:
             "_lock",
             "_condition",
             "_initializing",
+            "_initializing_owner",
             "_generation",
         ]:
             super().__setattr__(name, value)
