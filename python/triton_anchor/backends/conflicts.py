@@ -65,11 +65,32 @@ class Conflict:
             "message": self.message,
         }
 
-    def to_error(self) -> BackendPluginConflictError:
-        """Convert this finding to the registry's structured error type."""
+    def to_error(
+        self,
+        *,
+        plugin_id: Optional[str] = None,
+        entry_point: Optional[str] = None,
+        related_plugin_ids: Optional[Iterable[str]] = None,
+        related_record_ids: Optional[Iterable[str]] = None,
+    ) -> BackendPluginConflictError:
+        """Convert this finding to a root or record-specialized error."""
         field, expected, remediation = _diagnostic_contract(self)
         return BackendPluginConflictError(
             self.message,
+            plugin_id=plugin_id,
+            entry_point=entry_point,
+            conflict_kind=self.kind.value,
+            claim=self.claim,
+            related_plugin_ids=(
+                self.plugin_ids
+                if related_plugin_ids is None
+                else related_plugin_ids
+            ),
+            related_record_ids=(
+                self.record_ids
+                if related_record_ids is None
+                else related_record_ids
+            ),
             detail=(
                 f"kind={self.kind.value}; severity={self.severity.value}; "
                 f"claim={self.claim}; records={','.join(self.record_ids)}"

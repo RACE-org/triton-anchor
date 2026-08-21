@@ -352,6 +352,10 @@ class ConflictRecord:
     manifest: Any
     compatibility_report: CompatibilityReport
     state: PluginLifecycleState = PluginLifecycleState.VALIDATED
+    compatibility_status: PluginCompatibilityStatus = (
+        PluginCompatibilityStatus.COMPATIBLE
+    )
+    errors: tuple[Any, ...] = ()
 
 
 def _native_conflict_record(
@@ -412,8 +416,45 @@ def test_two_native_plugins_duplicate_soname_and_symbol_are_fatal() -> None:
     for conflict in report.fatal_conflicts:
         assert conflict.record_ids == ("dist-a:a", "dist-b:b")
         diagnostic = conflict.to_error().to_dict()
+        assert diagnostic["plugin_id"] is None
         assert diagnostic["expected"]
         assert diagnostic["actual"]
+
+    registry = BackendPluginRegistry(distribution_provider=lambda: ())
+    registry._records = {
+        record.record_id: record for record in (second, first)
+    }
+    registry._discovered = True
+    registry._reject_all_fatal_conflicts((second, first))
+    rejected = {record.record_id: record for record in registry.list()}
+    for record in rejected.values():
+        diagnostics = [error.to_dict() for error in record.errors]
+        assert [item["conflict_kind"] for item in diagnostics] == [
+            "duplicate_native_identity",
+            "duplicate_exported_symbol",
+        ]
+        assert all(item["plugin_id"] == record.plugin_id for item in diagnostics)
+        assert all(
+            item["entry_point"] == record.entry_point_name
+            for item in diagnostics
+        )
+        assert all(
+            item["related_record_ids"]
+            == sorted(set(rejected) - {record.record_id})
+            for item in diagnostics
+        )
+        assert all(
+            item["related_plugin_ids"]
+            == sorted(
+                other.plugin_id
+                for other in rejected.values()
+                if other.record_id != record.record_id
+            )
+            for item in diagnostics
+        )
+
+    registry._reject_all_fatal_conflicts(registry.list())
+    assert all(len(record.errors) == 2 for record in registry.list())
 
 
 def test_vendor_qualified_unique_native_symbols_do_not_conflict() -> None:

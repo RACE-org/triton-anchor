@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.parser import Parser
-from typing import Any, Dict, Iterable, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.tags import Tag, parse_tag, sys_tags
@@ -13,11 +13,16 @@ from packaging.version import InvalidVersion, Version
 from .environment import CoreEnvironment
 from .errors import (
     BackendPluginCompatibilityError,
+    BackendPluginError,
     BackendPluginManifestError,
     BackendPluginProtocolError,
 )
 from .manifest import BackendPluginManifest
-from .native import NativeArtifact, inspect_native_artifacts
+from .native import (
+    NativeArtifact,
+    NativeInspectionReport,
+    inspect_native_artifacts,
+)
 from .protocol import PluginIsolationMode
 
 
@@ -59,6 +64,52 @@ class CompatibilityReport:
         }
 
 
+@dataclass(frozen=True)
+class _CompatibilityEvaluation:
+    """Complete pre-load facts and deterministically ordered failures."""
+
+    report: CompatibilityReport
+    errors: Tuple[BackendPluginError, ...]
+
+
+_ERROR_FIELD_RANK = {
+    "distribution metadata": 10,
+    "distribution.files": 10,
+    "wheel platform metadata": 10,
+    "wheel platform tag": 10,
+    "Core build provenance": 10,
+    "python_only wheel contents": 20,
+    "native_libraries": 20,
+    "RECORD": 20,
+    "native wheel layout": 20,
+    "native library artifacts": 20,
+    "native binary inspection": 30,
+    "native binary inspection tools": 30,
+    "native ELF metadata": 30,
+    "native binary type": 30,
+    "native architecture": 30,
+    "native SONAME": 30,
+    "native toolchain dependencies": 30,
+    "native binary format support": 30,
+    "native binary format": 30,
+    "subprocess IR contract": 30,
+    "backend_protocol": 40,
+    "requires_core": 50,
+    "requires_triton.version": 60,
+    "requires_triton.commit": 61,
+    "requires_llvm_version": 70,
+    "requires_llvm_commit": 71,
+    "requires_mlir_version": 80,
+    "requires_mlir_commit": 81,
+    "core Python SOABI": 90,
+    "core build platform": 91,
+    "abi_fingerprint": 100,
+    "requires_capabilities": 110,
+    "kernel_required_capabilities": 111,
+    "requires_capabilities,kernel_required_capabilities": 110,
+}
+
+
 def _actual_or_unknown(value: Optional[str]) -> str:
     return value if value is not None else "<unknown>"
 
@@ -75,6 +126,27 @@ def _manifest_field_for_dimension(dimension: str) -> str:
         "MLIR commit": "requires_mlir_commit",
         "Core ABI fingerprint": "abi_fingerprint",
     }.get(dimension, dimension)
+
+
+def _canonical_error_field(error: BackendPluginError) -> str:
+    dimension = getattr(error, "dimension", None)
+    if isinstance(dimension, str):
+        return _manifest_field_for_dimension(dimension)
+    return error.field or ""
+
+
+def _backend_plugin_error_sort_key(
+    error: BackendPluginError,
+) -> Tuple[int, str, str]:
+    field = _canonical_error_field(error)
+    return (_ERROR_FIELD_RANK.get(field, 999), field, error.code)
+
+
+def _sort_backend_plugin_errors(
+    errors: Iterable[BackendPluginError],
+) -> Tuple[BackendPluginError, ...]:
+    """Apply the Protocol 1.0 total order to one plugin's failures."""
+    return tuple(sorted(errors, key=_backend_plugin_error_sort_key))
 
 
 def _version_check(
@@ -324,60 +396,83 @@ def _validate_distribution_platform(
     )
 
 
-def validate_backend_plugin(
+def _evaluate_backend_plugin_compatibility(
     plugin: BackendPluginManifest,
     environment: CoreEnvironment,
     *,
     distribution: Any,
     core_abi_fingerprint: Optional[str] = None,
     supported_tags: Optional[Iterable[Tag]] = None,
-) -> CompatibilityReport:
-    """Run every W5 check that is applicable before ``entry_point.load()``."""
+) -> _CompatibilityEvaluation:
+    """Evaluate all independent W5 dimensions without importing the plugin."""
     checks = []
+    errors = []
+    native_report = NativeInspectionReport()
+
+    def check(callback: Callable[[], CompatibilityCheck]) -> None:
+        try:
+            result = callback()
+        except BackendPluginError as error:
+            errors.append(error)
+        else:
+            checks.append(result)
 
     if distribution is None:
-        raise BackendPluginCompatibilityError(
-            "distribution metadata",
-            "the authoritative owning distribution",
-            "<unavailable>",
-            plugin_id=plugin.plugin_id,
-            entry_point=plugin.entry_point,
-            remediation=(
-                "Pass the distribution discovered through "
-                "importlib.metadata.distributions(); complete pre-load "
-                "validation cannot skip wheel and artifact checks."
-            ),
+        errors.append(
+            BackendPluginCompatibilityError(
+                "distribution metadata",
+                "the authoritative owning distribution",
+                "<unavailable>",
+                plugin_id=plugin.plugin_id,
+                entry_point=plugin.entry_point,
+                remediation=(
+                    "Pass the distribution discovered through "
+                    "importlib.metadata.distributions(); complete pre-load "
+                    "validation cannot skip wheel and artifact checks."
+                ),
+            )
         )
-
-    checks.append(
-        _validate_distribution_platform(plugin, distribution, supported_tags)
-    )
-    if not environment.build_info_generated:
-        raise BackendPluginCompatibilityError(
-            "Core build provenance",
-            "generated wheel build metadata",
-            "source/editable metadata",
-            plugin_id=plugin.plugin_id,
-            entry_point=plugin.entry_point,
-            remediation=(
-                "Validate production Manifest plugins against a freshly built "
-                "triton-anchor wheel. Use the explicit triton_version profile "
-                "only for the frozen migration test, not as a production "
-                "security downgrade."
-            ),
-        )
-    native_report = inspect_native_artifacts(plugin, distribution)
-    if native_report.artifacts:
-        checks.append(
-            CompatibilityCheck(
-                "native library artifacts",
-                ",".join(plugin.native_libraries),
-                ",".join(native_report.paths),
+    else:
+        check(
+            lambda: _validate_distribution_platform(
+                plugin, distribution, supported_tags
             )
         )
 
-    checks.append(
-        _version_check(
+    if not environment.build_info_generated:
+        errors.append(
+            BackendPluginCompatibilityError(
+                "Core build provenance",
+                "generated wheel build metadata",
+                "source/editable metadata",
+                plugin_id=plugin.plugin_id,
+                entry_point=plugin.entry_point,
+                remediation=(
+                    "Validate production Manifest plugins against a freshly built "
+                    "triton-anchor wheel. Use the explicit triton_version profile "
+                    "only for the frozen migration test, not as a production "
+                    "security downgrade."
+                ),
+            )
+        )
+
+    if distribution is not None:
+        try:
+            native_report = inspect_native_artifacts(plugin, distribution)
+        except BackendPluginError as error:
+            errors.append(error)
+        else:
+            if native_report.artifacts:
+                checks.append(
+                    CompatibilityCheck(
+                        "native library artifacts",
+                        ",".join(plugin.native_libraries),
+                        ",".join(native_report.paths),
+                    )
+                )
+
+    check(
+        lambda: _version_check(
             plugin,
             "Backend Plugin Protocol",
             plugin.backend_protocol,
@@ -387,74 +482,77 @@ def validate_backend_plugin(
     )
 
     if plugin.requires_core is not None:
-        checks.append(
-            _version_check(
+        check(
+            lambda: _version_check(
                 plugin,
                 "triton-anchor Core version",
-                plugin.requires_core,
+                plugin.requires_core or "",
                 environment.core_version,
             )
         )
-    checks.append(
-        _version_check(
+
+    check(
+        lambda: _version_check(
             plugin,
             "Triton version",
             plugin.requires_triton.version,
             environment.triton_version,
         )
     )
+
     if plugin.requires_triton.commit is not None:
-        checks.append(
-            _exact_check(
+        check(
+            lambda: _exact_check(
                 plugin,
                 "vendored Triton commit",
-                plugin.requires_triton.commit,
+                plugin.requires_triton.commit or "",
                 environment.vendored_triton_commit,
                 case_sensitive=False,
             )
         )
+
     if plugin.requires_llvm_version is not None:
-        checks.append(
-            _version_check(
+        check(
+            lambda: _version_check(
                 plugin,
                 "LLVM version",
-                plugin.requires_llvm_version,
+                plugin.requires_llvm_version or "",
                 environment.actual_llvm_version,
             )
         )
     if plugin.requires_llvm_commit is not None:
-        checks.append(
-            _exact_check(
+        check(
+            lambda: _exact_check(
                 plugin,
                 "LLVM commit",
-                plugin.requires_llvm_commit,
+                plugin.requires_llvm_commit or "",
                 environment.actual_llvm_commit,
                 case_sensitive=False,
             )
         )
     if plugin.requires_mlir_version is not None:
-        checks.append(
-            _version_check(
+        check(
+            lambda: _version_check(
                 plugin,
                 "MLIR version",
-                plugin.requires_mlir_version,
+                plugin.requires_mlir_version or "",
                 environment.actual_mlir_version,
             )
         )
     if plugin.requires_mlir_commit is not None:
-        checks.append(
-            _exact_check(
+        check(
+            lambda: _exact_check(
                 plugin,
                 "MLIR commit",
-                plugin.requires_mlir_commit,
+                plugin.requires_mlir_commit or "",
                 environment.actual_mlir_commit,
                 case_sensitive=False,
             )
         )
 
     if environment.build_info_generated:
-        checks.append(
-            _exact_check(
+        check(
+            lambda: _exact_check(
                 plugin,
                 "core Python SOABI",
                 _actual_or_unknown(environment.built_python_soabi),
@@ -465,8 +563,8 @@ def validate_backend_plugin(
                 ),
             )
         )
-        checks.append(
-            _exact_check(
+        check(
+            lambda: _exact_check(
                 plugin,
                 "core build platform",
                 _actual_or_unknown(environment.built_platform),
@@ -478,8 +576,8 @@ def validate_backend_plugin(
         )
 
     if plugin.isolation_mode is PluginIsolationMode.NATIVE_IN_PROCESS:
-        checks.append(
-            _exact_check(
+        check(
+            lambda: _exact_check(
                 plugin,
                 "Core ABI fingerprint",
                 plugin.abi_fingerprint or "<missing>",
@@ -492,22 +590,48 @@ def validate_backend_plugin(
             )
         )
     elif plugin.isolation_mode is PluginIsolationMode.SUBPROCESS:
-        raise BackendPluginCompatibilityError(
-            "subprocess IR contract",
-            "a declared and supported input/output IR contract",
-            "<unavailable in Manifest 1.0>",
-            plugin_id=plugin.plugin_id,
-            entry_point=plugin.entry_point,
-            remediation=(
-                "Use python_only for the current protocol, or wait for the "
-                "versioned subprocess IR contract introduced with capability "
-                "negotiation. Do not treat an unchecked subprocess as compatible."
-            ),
+        errors.append(
+            BackendPluginCompatibilityError(
+                "subprocess IR contract",
+                "a declared and supported input/output IR contract",
+                "<unavailable in Manifest 1.0>",
+                plugin_id=plugin.plugin_id,
+                entry_point=plugin.entry_point,
+                remediation=(
+                    "Use python_only for the current protocol, or wait for the "
+                    "versioned subprocess IR contract introduced with capability "
+                    "negotiation. Do not treat an unchecked subprocess as compatible."
+                ),
+            )
         )
 
-    return CompatibilityReport(
+    ordered_errors = _sort_backend_plugin_errors(errors)
+    report = CompatibilityReport(
         plugin_id=plugin.plugin_id,
         entry_point=plugin.entry_point,
         checks=tuple(checks),
         native_artifacts=native_report.artifacts,
+        compatible=not ordered_errors,
     )
+    return _CompatibilityEvaluation(report=report, errors=ordered_errors)
+
+
+def validate_backend_plugin(
+    plugin: BackendPluginManifest,
+    environment: CoreEnvironment,
+    *,
+    distribution: Any,
+    core_abi_fingerprint: Optional[str] = None,
+    supported_tags: Optional[Iterable[Tag]] = None,
+) -> CompatibilityReport:
+    """Return a complete report or raise the first deterministic W5 error."""
+    evaluation = _evaluate_backend_plugin_compatibility(
+        plugin,
+        environment,
+        distribution=distribution,
+        core_abi_fingerprint=core_abi_fingerprint,
+        supported_tags=supported_tags,
+    )
+    if evaluation.errors:
+        raise evaluation.errors[0]
+    return evaluation.report

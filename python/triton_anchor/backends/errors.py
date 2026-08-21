@@ -37,23 +37,18 @@ class BackendPluginError(RuntimeError):
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a stable diagnostic representation."""
-        result = {
+        return {
             "code": self.code,
             "message": str(self),
             "plugin_id": self.plugin_id,
             "entry_point": self.entry_point,
-            "detail": self.detail,
-        }
-        optional = {
             "field": self.field,
+            "dimension": getattr(self, "dimension", None),
             "expected": self.expected,
             "actual": self.actual,
             "remediation": self.remediation,
+            "detail": self.detail,
         }
-        result.update(
-            {key: value for key, value in optional.items() if value is not None}
-        )
-        return result
 
 
 class BackendPluginInterfaceError(BackendPluginError):
@@ -325,6 +320,34 @@ class BackendPluginConflictError(BackendPluginError):
     """Two or more plugins make conflicting identity or target claims."""
 
     code = "backend_plugin_conflict_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        conflict_kind: Optional[str] = None,
+        claim: Optional[str] = None,
+        related_plugin_ids: Iterable[str] = (),
+        related_record_ids: Iterable[str] = (),
+        **kwargs: Any,
+    ) -> None:
+        self.conflict_kind = conflict_kind
+        self.claim = claim
+        self.related_plugin_ids = tuple(sorted(set(related_plugin_ids)))
+        self.related_record_ids = tuple(sorted(set(related_record_ids)))
+        super().__init__(message, **kwargs)
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = super().to_dict()
+        result.update(
+            {
+                "conflict_kind": self.conflict_kind,
+                "claim": self.claim,
+                "related_plugin_ids": list(self.related_plugin_ids),
+                "related_record_ids": list(self.related_record_ids),
+            }
+        )
+        return result
 
 
 class BackendPluginLoadError(BackendPluginError):
