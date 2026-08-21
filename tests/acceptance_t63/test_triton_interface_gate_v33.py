@@ -356,6 +356,18 @@ def f6_runtime(tmp_path_factory: pytest.TempPathFactory):
         sys.modules.update(previous_triton_modules)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_f6_runtime_records(f6_runtime: RuntimeHarness):
+    """Keep plugin records isolated while intentionally retaining validators."""
+    assert f6_runtime.registry.reset() == ()
+    f6_runtime.distributions.clear()
+    try:
+        yield
+    finally:
+        assert f6_runtime.registry.reset() == ()
+        f6_runtime.distributions.clear()
+
+
 def _interface_issues(error: BackendPluginInterfaceError) -> list[dict[str, Any]]:
     payload = error.to_dict()
     issues = payload.get("interface_issues")
@@ -503,13 +515,9 @@ def test_each_current_v33_abc_abstract_member_is_required(
     field: str,
     member: str,
 ) -> None:
-    assert member in getattr(f6_runtime, field.replace("_cls", "_contract")).__abstractmethods__
+    contract = getattr(f6_runtime, field.replace("_cls", "_contract"))
+    assert member in contract.__abstractmethods__
     compiler_cls, driver_cls, calls = f6_runtime.complete_pair(label="omission")
-    contract = (
-        f6_runtime.compiler_contract
-        if field == "compiler_cls"
-        else f6_runtime.driver_contract
-    )
     incomplete = _runtime_class(
         contract,
         field,
@@ -712,6 +720,146 @@ def test_class_with_an_extra_abstract_member_is_rejected(
     )
 
 
+def test_cleared_abstract_set_cannot_hide_inherited_abstract_descriptor(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    missing = sorted(f6_runtime.compiler_contract.__abstractmethods__)[0]
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "ClearedAbstractSetCompiler",
+        calls=calls,
+        omitted=(missing,),
+    )
+    compiler_cls.__abstractmethods__ = frozenset()
+    assert not inspect.isabstract(compiler_cls)
+    driver_cls = _runtime_class(
+        f6_runtime.driver_contract,
+        "driver_cls",
+        "ClearedAbstractSetDriver",
+        calls=calls,
+    )
+    fixture = f6_runtime.fixture(
+        label="cleared_abstract_set",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == missing
+        and issue["problem"] == "still_abstract"
+        for issue in issues
+    )
+    assert calls["initialize"] == 0
+
+
+def test_abstract_marker_lookup_does_not_execute_hostile_key_equality(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    member = next(
+        member
+        for member in sorted(
+            f6_runtime.compiler_contract.__abstractmethods__
+        )
+        if _descriptor_kind(f6_runtime.compiler_contract, member) == "method"
+    )
+
+    class CollisionKey:
+        def __hash__(self) -> int:
+            return hash("__isabstractmethod__")
+
+        def __eq__(self, _other: Any) -> bool:
+            calls["abstract_marker_key_equality"] += 1
+            raise AssertionError("validator compared an untrusted dict key")
+
+    def implementation(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    implementation.__dict__[CollisionKey()] = object()
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="abstract_marker_collision"
+    )
+    calls.update(pair_calls)
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "AbstractMarkerCollisionTrap",
+        calls=calls,
+        structural=True,
+        overrides={member: implementation},
+    )
+    fixture = f6_runtime.fixture(
+        label="abstract_marker_collision",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    decision = f6_runtime.registry.select(fixture.target)
+    assert decision.record.state is PluginLifecycleState.SELECTED
+    assert calls["abstract_marker_key_equality"] == 0
+    assert calls["initialize"] == 1
+
+
+def test_non_exact_function_namespace_fails_closed_as_abstract(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    member = next(
+        member
+        for member in sorted(
+            f6_runtime.compiler_contract.__abstractmethods__
+        )
+        if _descriptor_kind(f6_runtime.compiler_contract, member) == "method"
+    )
+
+    class FunctionNamespace(dict):
+        pass
+
+    def implementation(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    implementation.__dict__ = FunctionNamespace(
+        {"__isabstractmethod__": True}
+    )
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="function_namespace_subclass"
+    )
+    calls.update(pair_calls)
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "FunctionNamespaceSubclassTrap",
+        calls=calls,
+        structural=True,
+        overrides={member: implementation},
+    )
+    fixture = f6_runtime.fixture(
+        label="function_namespace_subclass",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == member
+        and issue["problem"] == "still_abstract"
+        for issue in issues
+    )
+
+
 def test_structural_method_implemented_as_property_is_rejected(
     f6_runtime: RuntimeHarness,
 ) -> None:
@@ -801,9 +949,10 @@ def test_structural_classmethod_implemented_as_method_is_rejected(
 def test_named_validator_can_report_a_synthetic_property_kind_mismatch(
     f6_runtime: RuntimeHarness,
 ) -> None:
-    """Exercise the real dynamic surface path though v3.3 has no property."""
+    """Simulate a future live-ABC import without naming a concrete member."""
     member = "acceptance_synthetic_property"
     contract = f6_runtime.driver_contract
+    interface_module = importlib.import_module("triton.backends.interface")
 
     @property
     @abc.abstractmethod
@@ -811,9 +960,13 @@ def test_named_validator_can_report_a_synthetic_property_kind_mismatch(
         return None
 
     original_abstract = contract.__abstractmethods__
+    original_surface = interface_module._DRIVER_SURFACE
     assert member not in original_abstract
     setattr(contract, member, required_property)
     contract.__abstractmethods__ = frozenset((*original_abstract, member))
+    interface_module._DRIVER_SURFACE = interface_module._interface_surface(
+        contract
+    )
     try:
         compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
             structural=True, label="synthetic_property"
@@ -838,6 +991,7 @@ def test_named_validator_can_report_a_synthetic_property_kind_mismatch(
             for issue in issues
         )
     finally:
+        interface_module._DRIVER_SURFACE = original_surface
         contract.__abstractmethods__ = original_abstract
         delattr(contract, member)
 
@@ -904,6 +1058,248 @@ def test_safely_detectable_incompatible_signature_is_rejected(
     )
 
 
+def test_safely_detectable_classmethod_signature_is_rejected(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "classmethod"
+        and tuple(
+            inspect.signature(
+                object.__getattribute__(
+                    inspect.getattr_static(contract, member), "__func__"
+                )
+            ).parameters
+        )[0]
+        in {"self", "cls"}
+    )
+
+    @classmethod
+    def incompatible(_cls: type, new_required_argument: Any) -> bool:
+        return bool(new_required_argument)
+
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="classmethod_signature"
+    )
+    candidate = _runtime_class(
+        contract,
+        field,
+        "IncompatibleClassmethodSignature",
+        calls=calls,
+        structural=True,
+        overrides={member: incompatible},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="classmethod_signature",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert any(
+        issue["field"] == field
+        and issue["member"] == member
+        and issue["problem"] == "signature_mismatch"
+        for issue in issues
+    ), json.dumps(issues, sort_keys=True)
+
+
+def test_every_classmethod_requires_a_bindable_receiver(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "classmethod"
+        and tuple(
+            inspect.signature(
+                object.__getattribute__(
+                    inspect.getattr_static(contract, member), "__func__"
+                )
+            ).parameters
+        )[0]
+        not in {"self", "cls"}
+    )
+
+    @classmethod
+    def missing_receiver() -> bool:
+        return True
+
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="missing_classmethod_receiver"
+    )
+    candidate = _runtime_class(
+        contract,
+        field,
+        "MissingClassmethodReceiver",
+        calls=calls,
+        structural=True,
+        overrides={member: missing_receiver},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="missing_classmethod_receiver",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert any(
+        issue["field"] == field
+        and issue["member"] == member
+        and issue["problem"] == "signature_mismatch"
+        for issue in issues
+    )
+
+
+def test_function_owned_signature_metadata_cannot_hide_incompatibility(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "method"
+    )
+    expected_descriptor = inspect.getattr_static(contract, member)
+    expected_signature = inspect.signature(expected_descriptor)
+
+    class SignatureTrap(inspect.Signature):
+        @property
+        def parameters(self) -> Mapping[str, inspect.Parameter]:
+            calls["signature_metadata"] += 1
+            return super().parameters
+
+    fake_signature = SignatureTrap(expected_signature.parameters.values())
+
+    def incompatible(_self: Any, *, new_required_argument: Any) -> None:
+        return None
+
+    incompatible.__signature__ = fake_signature
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="function_signature_metadata"
+    )
+    calls.update(pair_calls)
+    candidate = _runtime_class(
+        contract,
+        field,
+        "FunctionSignatureMetadataTrap",
+        calls=calls,
+        structural=True,
+        overrides={member: incompatible},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="function_signature_metadata",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["signature_metadata"] == 0
+    assert any(
+        issue["field"] == field
+        and issue["member"] == member
+        and issue["problem"] == "signature_mismatch"
+        for issue in issues
+    )
+
+
+def test_function_keyword_defaults_do_not_execute_hostile_key_equality(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "method"
+    )
+
+    class CollisionKey:
+        def __hash__(self) -> int:
+            return hash("new_required_argument")
+
+        def __eq__(self, _other: Any) -> bool:
+            calls["keyword_default_key_equality"] += 1
+            raise AssertionError("validator compared an untrusted dict key")
+
+    def incompatible(_self: Any, *, new_required_argument: Any) -> None:
+        return None
+
+    incompatible.__kwdefaults__ = {CollisionKey(): None}
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="keyword_default_collision"
+    )
+    calls.update(pair_calls)
+    candidate = _runtime_class(
+        contract,
+        field,
+        "KeywordDefaultCollisionTrap",
+        calls=calls,
+        structural=True,
+        overrides={member: incompatible},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="keyword_default_collision",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["keyword_default_key_equality"] == 0
+    assert any(
+        issue["field"] == field
+        and issue["member"] == member
+        and issue["problem"] == "signature_mismatch"
+        for issue in issues
+    )
+
+
 def test_static_validation_does_not_execute_custom_descriptors(
     f6_runtime: RuntimeHarness,
 ) -> None:
@@ -914,7 +1310,12 @@ def test_static_validation_does_not_execute_custom_descriptors(
         if _descriptor_kind(f6_runtime.compiler_contract, member) == "method"
     )
 
-    class TrapDescriptor:
+    class TrapDescriptorMeta(type):
+        def __getattribute__(cls, name: str) -> Any:
+            calls[("descriptor_metaclass_getattribute", name)] += 1
+            return type.__getattribute__(cls, name)
+
+    class TrapDescriptor(metaclass=TrapDescriptorMeta):
         def __get__(self, _instance: Any, _owner: Any) -> Any:
             calls["descriptor_get"] += 1
             raise AssertionError("interface validation executed a descriptor")
@@ -937,15 +1338,519 @@ def test_static_validation_does_not_execute_custom_descriptors(
         driver_cls=driver_cls,
         calls=calls,
     )
+    calls.clear()
     f6_runtime.install(fixture)
     issues = _interface_issues(
         _assert_rejected_without_publication(f6_runtime, fixture)
     )
     assert calls["descriptor_get"] == 0
+    assert not [
+        key
+        for key in calls
+        if isinstance(key, tuple)
+        and key[0] == "descriptor_metaclass_getattribute"
+    ]
     assert any(
         issue["field"] == "compiler_cls"
         and issue["member"] == member
         and issue["problem"] == "kind_mismatch"
+        for issue in issues
+    ), json.dumps(issues, sort_keys=True)
+
+
+def test_static_validation_does_not_execute_callable_signature_metadata(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "classmethod"
+    )
+
+    class SignatureTrap:
+        def __getattribute__(self, name: str) -> Any:
+            calls[("callable_getattribute", name)] += 1
+            return object.__getattribute__(self, name)
+
+        def __call__(self, *_args: Any, **_kwargs: Any) -> bool:
+            calls["callable_invoked"] += 1
+            return True
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="signature_metadata"
+    )
+    calls.update(pair_calls)
+    candidate = _runtime_class(
+        contract,
+        field,
+        "SignatureMetadataTrap",
+        calls=calls,
+        structural=True,
+        overrides={member: classmethod(SignatureTrap())},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="signature_metadata",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert not calls
+    assert any(
+        issue["field"] == field
+        and issue["member"] == member
+        and issue["problem"] == "signature_unavailable"
+        for issue in issues
+    )
+
+
+def test_static_validation_bypasses_classmethod_wrapper_attribute_hooks(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "classmethod"
+    )
+
+    class ClassmethodTrap(classmethod):
+        def __getattribute__(self, name: str) -> Any:
+            calls[("wrapper_getattribute", name)] += 1
+            return object.__getattribute__(self, name)
+
+        @property
+        def __func__(self) -> Any:
+            calls[("wrapper_property", "__func__")] += 1
+            raise AssertionError("validator resolved a wrapper property")
+
+    def compatible(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="classmethod_wrapper"
+    )
+    calls.update(pair_calls)
+    candidate = _runtime_class(
+        contract,
+        field,
+        "ClassmethodWrapperTrap",
+        calls=calls,
+        structural=True,
+        overrides={member: ClassmethodTrap(compatible)},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="classmethod_wrapper",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    selected = f6_runtime.registry.select(fixture.target)
+    assert selected.record.state is PluginLifecycleState.SELECTED
+    assert not [key for key in calls if isinstance(key, tuple)]
+    assert calls["initialize"] == 1
+
+
+def test_wrapper_runtime_get_override_is_rejected_without_execution(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "classmethod"
+    )
+
+    class RuntimeGetTrap(classmethod):
+        def __get__(self, _instance: Any, _owner: Any = None) -> Any:
+            calls["wrapper_get"] += 1
+            return 42
+
+    def compatible(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="wrapper_runtime_get"
+    )
+    calls.update(pair_calls)
+    candidate = _runtime_class(
+        contract,
+        field,
+        "RuntimeGetTrapPair",
+        calls=calls,
+        structural=True,
+        overrides={member: RuntimeGetTrap(compatible)},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="wrapper_runtime_get",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["wrapper_get"] == 0
+    assert any(
+        issue["field"] == field
+        and issue["member"] == member
+        and issue["actual_kind"] == "descriptor"
+        and issue["problem"] == "kind_mismatch"
+        for issue in issues
+    )
+
+
+def test_wrapper_class_dictionary_collision_fails_closed_without_equality(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+    field, contract, member = next(
+        (field, contract, member)
+        for field, contract in (
+            ("compiler_cls", f6_runtime.compiler_contract),
+            ("driver_cls", f6_runtime.driver_contract),
+        )
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "classmethod"
+    )
+
+    class CollisionString(str):
+        def __hash__(self) -> int:
+            return hash("__get__")
+
+        def __eq__(self, _other: Any) -> bool:
+            calls["wrapper_class_key_equality"] += 1
+            raise AssertionError("validator compared a hostile wrapper key")
+
+    WrapperTrap = type(
+        "WrapperClassDictionaryCollision",
+        (classmethod,),
+        {CollisionString("collision"): object()},
+    )
+
+    def compatible(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="wrapper_class_collision"
+    )
+    calls.update(pair_calls)
+    candidate = _runtime_class(
+        contract,
+        field,
+        "WrapperClassDictionaryCollisionPair",
+        calls=calls,
+        structural=True,
+        overrides={member: WrapperTrap(compatible)},
+    )
+    if field == "compiler_cls":
+        compiler_cls = candidate
+    else:
+        driver_cls = candidate
+    fixture = f6_runtime.fixture(
+        label="wrapper_class_collision",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["wrapper_class_key_equality"] == 0
+    assert any(
+        issue["field"] == field
+        and issue["member"] == member
+        and issue["actual_kind"] == "descriptor"
+        and issue["problem"] == "kind_mismatch"
+        for issue in issues
+    )
+
+
+def test_structural_custom_metaclass_is_rejected_without_execution(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class MetaclassTrap(type):
+        def __getattribute__(cls, name: str) -> Any:
+            calls[("metaclass_getattribute", name)] += 1
+            return type.__getattribute__(cls, name)
+
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "StructuralMetaclassTrapCompiler",
+        calls=calls,
+        structural=True,
+        metaclass=MetaclassTrap,
+    )
+    driver_cls = _runtime_class(
+        f6_runtime.driver_contract,
+        "driver_cls",
+        "StructuralMetaclassTrapDriver",
+        calls=calls,
+        structural=True,
+        metaclass=MetaclassTrap,
+    )
+    fixture = f6_runtime.fixture(
+        label="structural_metaclass",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert not [key for key in calls if isinstance(key, tuple)]
+    assert any(
+        issue["member"] == "<class>"
+        and issue["problem"] == "unsafe_metaclass"
+        for issue in issues
+    )
+    assert calls["initialize"] == 0
+
+
+def test_abc_subclass_with_unsafe_metaclass_is_rejected_without_execution(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class UnsafeABCMeta(type(f6_runtime.compiler_contract)):
+        def __getattribute__(cls, name: str) -> Any:
+            calls[("metaclass_getattribute", name)] += 1
+            return type.__getattribute__(cls, name)
+
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "UnsafeMetaclassCompiler",
+        calls=calls,
+        metaclass=UnsafeABCMeta,
+    )
+    driver_cls = _runtime_class(
+        f6_runtime.driver_contract,
+        "driver_cls",
+        "UnsafeMetaclassDriver",
+        calls=calls,
+        structural=True,
+    )
+    fixture = f6_runtime.fixture(
+        label="unsafe_abc_metaclass",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert not [key for key in calls if isinstance(key, tuple)]
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == "<class>"
+        and issue["problem"] == "unsafe_metaclass"
+        for issue in issues
+    )
+
+
+def test_abc_custom_metaclass_flags_descriptor_is_never_executed(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class FlagsTrap:
+        def __get__(self, _instance: Any, _owner: Any) -> int:
+            calls["flags_descriptor"] += 1
+            raise AssertionError("inspect.isabstract executed plugin code")
+
+    class CustomABCMeta(type(f6_runtime.compiler_contract)):
+        __flags__ = FlagsTrap()
+
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "FlagsDescriptorCompiler",
+        calls=calls,
+        metaclass=CustomABCMeta,
+    )
+    driver_cls = _runtime_class(
+        f6_runtime.driver_contract,
+        "driver_cls",
+        "FlagsDescriptorDriver",
+        calls=calls,
+        structural=True,
+    )
+    fixture = f6_runtime.fixture(
+        label="flags_descriptor",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["flags_descriptor"] == 0
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == "<class>"
+        and issue["problem"] == "unsafe_metaclass"
+        for issue in issues
+    )
+
+
+def test_invalid_abstract_metadata_is_rejected_without_string_coercion(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class AbstractNameTrap:
+        def __str__(self) -> str:
+            calls["abstract_name_str"] += 1
+            raise AssertionError("validator coerced untrusted abstract metadata")
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="abstract_metadata"
+    )
+    calls.update(pair_calls)
+    compiler_cls.__abstractmethods__ = frozenset({AbstractNameTrap()})
+    fixture = f6_runtime.fixture(
+        label="abstract_metadata",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["abstract_name_str"] == 0
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == "<class>"
+        and issue["problem"] == "unsafe_abstract_metadata"
+        for issue in issues
+    )
+
+
+def test_abstract_metadata_type_check_does_not_hash_plugin_class(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class HashTrapMeta(type):
+        def __hash__(cls) -> int:
+            calls["abstract_container_type_hash"] += 1
+            raise AssertionError("validator hashed a plugin-controlled class")
+
+    class AbstractMetadataTrap(metaclass=HashTrapMeta):
+        pass
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="abstract_container_hash"
+    )
+    calls.update(pair_calls)
+    compiler_cls.__abstractmethods__ = AbstractMetadataTrap()
+    fixture = f6_runtime.fixture(
+        label="abstract_container_hash",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["abstract_container_type_hash"] == 0
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["problem"] == "unsafe_abstract_metadata"
+        for issue in issues
+    )
+
+
+def test_class_dictionary_collision_is_rejected_without_key_equality(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class CollisionString(str):
+        def __hash__(self) -> int:
+            return hash("__abstractmethods__")
+
+        def __eq__(self, _other: Any) -> bool:
+            calls["class_dictionary_key_equality"] += 1
+            raise AssertionError("validator compared a hostile class key")
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="class_dictionary_collision"
+    )
+    calls.update(pair_calls)
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "ClassDictionaryCollisionTrap",
+        calls=calls,
+        structural=True,
+        overrides={CollisionString("collision"): object()},
+    )
+    fixture = f6_runtime.fixture(
+        label="class_dictionary_collision",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["class_dictionary_key_equality"] == 0
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == "<class>"
+        and issue["problem"] == "unsafe_class_metadata"
         for issue in issues
     )
 
@@ -969,6 +1874,35 @@ def test_non_type_runtime_fields_remain_rejected(
     f6_runtime.install(fixture)
     error = _assert_rejected_without_publication(f6_runtime, fixture)
     assert field in error.invalid_fields
+
+
+def test_runtime_type_check_does_not_execute_spoofed_class_metadata(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class TypeImpostor:
+        @property
+        def __class__(self) -> type:
+            calls["class_property"] += 1
+            return type
+
+    _compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="type_impostor"
+    )
+    calls.update(pair_calls)
+    fixture = f6_runtime.fixture(
+        label="type_impostor",
+        compiler_cls=TypeImpostor(),
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    error = _assert_rejected_without_publication(f6_runtime, fixture)
+    assert error.invalid_fields == ("compiler_cls",)
+    assert calls["class_property"] == 0
+    assert calls["initialize"] == 0
 
 
 def test_rejection_precedes_all_plugin_code_and_public_runtime_state(
@@ -1033,7 +1967,11 @@ def test_rejection_precedes_all_plugin_code_and_public_runtime_state(
     assert calls["shutdown"] == 0
     assert calls[("compiler_cls", "__init__")] == 0
     assert calls[("driver_cls", "__init__")] == 0
-    assert not [key for key in calls if isinstance(key, tuple) and key[0] == "metaclass_getattr"]
+    assert not [
+        key
+        for key in calls
+        if isinstance(key, tuple) and key[0] == "metaclass_getattr"
+    ]
     assert not [
         key
         for key, count in calls.items()
@@ -1245,6 +2183,320 @@ def test_validator_attached_after_load_still_runs_before_initialize(
     assert calls["initialize"] == 0
 
 
+def test_plugin_load_cannot_replace_the_triton_interface_validator(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    register = f6_runtime.registry.register_runtime_pair_validator
+    contract_id = (
+        f6_runtime.backends_module.TRITON_RUNTIME_INTERFACE_CONTRACT
+    )
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="load_replace"
+    )
+    missing = sorted(f6_runtime.compiler_contract.__abstractmethods__)[0]
+    compiler_cls = _runtime_class(
+        f6_runtime.compiler_contract,
+        "compiler_cls",
+        "LoadReplacementCompiler",
+        calls=calls,
+        structural=True,
+        omitted=(missing,),
+    )
+    fixture = f6_runtime.fixture(
+        label="load_replace",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    original_load = fixture.entry_point_object.load
+    replacement_errors: list[BackendPluginLifecycleError] = []
+
+    def load_with_replacement_attempt() -> Any:
+        try:
+            register(contract_id, lambda _context: ())
+        except BackendPluginLifecycleError as error:
+            replacement_errors.append(error)
+        return original_load()
+
+    fixture.entry_point_object.load = load_with_replacement_attempt
+    f6_runtime.install(fixture)
+    error = _assert_rejected_without_publication(f6_runtime, fixture)
+    issues = _interface_issues(error)
+    assert len(replacement_errors) == 1
+    assert replacement_errors[0].field == "runtime_pair_validator"
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == missing
+        for issue in issues
+    )
+    assert calls["initialize"] == 0
+
+
+def test_plugin_load_cannot_weaken_the_frozen_runtime_surface(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    contract = f6_runtime.compiler_contract
+    original_abstract = contract.__abstractmethods__
+    missing = sorted(original_abstract)[0]
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="surface_mutation"
+    )
+    compiler_cls = _runtime_class(
+        contract,
+        "compiler_cls",
+        "SurfaceMutationCompiler",
+        calls=calls,
+        structural=True,
+        omitted=(missing,),
+    )
+    fixture = f6_runtime.fixture(
+        label="surface_mutation",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    original_load = fixture.entry_point_object.load
+
+    def load_after_weakening_abc() -> Any:
+        contract.__abstractmethods__ = frozenset(
+            name for name in original_abstract if name != missing
+        )
+        return original_load()
+
+    fixture.entry_point_object.load = load_after_weakening_abc
+    f6_runtime.install(fixture)
+    try:
+        issues = _interface_issues(
+            _assert_rejected_without_publication(f6_runtime, fixture)
+        )
+    finally:
+        contract.__abstractmethods__ = original_abstract
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == missing
+        and issue["problem"] == "missing"
+        for issue in issues
+    )
+    assert calls["initialize"] == 0
+
+
+@pytest.mark.parametrize("mutation", ("marker", "replacement"))
+def test_plugin_load_cannot_weaken_frozen_abc_descriptor_facts(
+    f6_runtime: RuntimeHarness,
+    mutation: str,
+) -> None:
+    contract = f6_runtime.compiler_contract
+    missing = next(
+        member
+        for member in sorted(contract.__abstractmethods__)
+        if _descriptor_kind(contract, member) == "method"
+    )
+    original_descriptor = inspect.getattr_static(contract, missing)
+    original_marker = original_descriptor.__isabstractmethod__
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        label=f"descriptor_{mutation}"
+    )
+    compiler_cls = _runtime_class(
+        contract,
+        "compiler_cls",
+        f"DescriptorMutation{mutation.title()}Compiler",
+        calls=calls,
+        omitted=(missing,),
+    )
+    # Simulate malicious code clearing the derived flag after class creation.
+    compiler_cls.__abstractmethods__ = frozenset()
+    fixture = f6_runtime.fixture(
+        label=f"descriptor_{mutation}",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    original_load = fixture.entry_point_object.load
+
+    def concrete_replacement(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def load_after_descriptor_mutation() -> Any:
+        if mutation == "marker":
+            original_descriptor.__isabstractmethod__ = False
+        else:
+            setattr(contract, missing, concrete_replacement)
+        return original_load()
+
+    fixture.entry_point_object.load = load_after_descriptor_mutation
+    f6_runtime.install(fixture)
+    try:
+        issues = _interface_issues(
+            _assert_rejected_without_publication(f6_runtime, fixture)
+        )
+    finally:
+        setattr(contract, missing, original_descriptor)
+        original_descriptor.__isabstractmethod__ = original_marker
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == missing
+        and issue["problem"] == "still_abstract"
+        for issue in issues
+    )
+    assert calls["initialize"] == 0
+
+
+@pytest.mark.parametrize("poison", ("getattribute", "data_descriptor"))
+def test_plugin_load_cannot_poison_trusted_abc_metaclass_access(
+    f6_runtime: RuntimeHarness,
+    poison: str,
+) -> None:
+    calls: Counter[Any] = Counter()
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        label=f"abcmeta_{poison}"
+    )
+    calls.update(pair_calls)
+    fixture = f6_runtime.fixture(
+        label=f"abcmeta_{poison}",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    original_load = fixture.entry_point_object.load
+    metaclass = type(f6_runtime.compiler_contract)
+    poisoned_name = (
+        "__getattribute__"
+        if poison == "getattribute"
+        else "__abstractmethods__"
+    )
+    absent = object()
+    original_value = metaclass.__dict__.get(poisoned_name, absent)
+
+    def trap(cls: type, name: str) -> Any:
+        calls[("abcmeta_getattribute", name)] += 1
+        return type.__getattribute__(cls, name)
+
+    class DescriptorTrap:
+        def __get__(self, _instance: Any, _owner: Any) -> frozenset[str]:
+            calls["abcmeta_descriptor_get"] += 1
+            return frozenset()
+
+        def __set__(self, _instance: Any, _value: Any) -> None:
+            calls["abcmeta_descriptor_set"] += 1
+
+    def load_after_metaclass_poison() -> Any:
+        setattr(
+            metaclass,
+            poisoned_name,
+            trap if poison == "getattribute" else DescriptorTrap(),
+        )
+        return original_load()
+
+    fixture.entry_point_object.load = load_after_metaclass_poison
+    f6_runtime.install(fixture)
+    try:
+        issues = _interface_issues(
+            _assert_rejected_without_publication(f6_runtime, fixture)
+        )
+    finally:
+        if original_value is absent:
+            delattr(metaclass, poisoned_name)
+        else:
+            setattr(metaclass, poisoned_name, original_value)
+    assert not [
+        key
+        for key, count in calls.items()
+        if isinstance(key, tuple)
+        and key[0] == "abcmeta_getattribute"
+        and count
+    ]
+    assert calls["abcmeta_descriptor_get"] == 0
+    assert calls["abcmeta_descriptor_set"] == 0
+    assert any(
+        issue["member"] == "<class>"
+        and issue["problem"] == "unsafe_metaclass"
+        for issue in issues
+    )
+    assert calls["initialize"] == 0
+
+
+def test_plugin_load_cannot_replace_stdlib_inspection_primitives(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    contract = f6_runtime.compiler_contract
+    missing = sorted(contract.__abstractmethods__)[0]
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        label="inspect_poison"
+    )
+    compiler_cls = _runtime_class(
+        contract,
+        "compiler_cls",
+        "InspectPoisonCompiler",
+        calls=calls,
+        omitted=(missing,),
+    )
+    fixture = f6_runtime.fixture(
+        label="inspect_poison",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    original_load = fixture.entry_point_object.load
+    original_getattr_static_code = inspect.getattr_static.__code__
+    original_isabstract_code = inspect.isabstract.__code__
+
+    def poisoned_inspection(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("validator called a replaced inspect primitive")
+
+    def load_after_inspect_poison() -> Any:
+        inspect.getattr_static.__code__ = poisoned_inspection.__code__
+        inspect.isabstract.__code__ = poisoned_inspection.__code__
+        return original_load()
+
+    fixture.entry_point_object.load = load_after_inspect_poison
+    f6_runtime.install(fixture)
+    try:
+        issues = _interface_issues(
+            _assert_rejected_without_publication(f6_runtime, fixture)
+        )
+    finally:
+        inspect.getattr_static.__code__ = original_getattr_static_code
+        inspect.isabstract.__code__ = original_isabstract_code
+    assert any(
+        issue["field"] == "compiler_cls"
+        and issue["member"] == missing
+        and issue["problem"] == "still_abstract"
+        for issue in issues
+    )
+    assert calls["initialize"] == 0
+
+
+def test_triton_adapter_cannot_attach_after_valid_pair_publication(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="late_adapter_attach"
+    )
+    fixture = f6_runtime.fixture(
+        label="late_adapter_attach",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    f6_runtime.install(fixture)
+    f6_runtime.backends_module.get_backend(fixture.target)
+    selected = f6_runtime.registry.get_selection(fixture.target)
+    assert selected is not None
+    saved_validators = dict(f6_runtime.registry._runtime_pair_validators)
+    f6_runtime.registry._runtime_pair_validators.clear()
+    try:
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            f6_runtime.backends_module._registry()
+        assert caught.value.field == "runtime_pair_validator"
+        assert f6_runtime.registry.inspect(selected.record_id).state is (
+            PluginLifecycleState.SELECTED
+        )
+        assert fixture.entry_point in f6_runtime.backends_module.backends
+        assert calls["initialize"] == 1
+    finally:
+        f6_runtime.registry._runtime_pair_validators.update(saved_validators)
+
+
 def test_validator_registration_racing_runtime_pair_read_fails_closed(
     f6_runtime: RuntimeHarness,
 ) -> None:
@@ -1288,7 +2540,8 @@ def test_validator_registration_racing_runtime_pair_read_fails_closed(
             with pytest.raises(BackendPluginLifecycleError):
                 register("acceptance.inflight-attach", late_validator)
             release.set()
-            assert future.result(timeout=10).record.state is PluginLifecycleState.SELECTED
+            selected = future.result(timeout=10)
+            assert selected.record.state is PluginLifecycleState.SELECTED
     finally:
         release.set()
         del plugin_type.compiler_cls
@@ -1345,6 +2598,66 @@ def test_concurrent_selection_executes_each_interface_validator_once(
     with pytest.raises(FrozenInstanceError):
         context.plugin_id = "mutated"
     assert calls["initialize"] == 1
+
+
+def test_reset_during_interface_validation_does_not_repopulate_environment(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    registry = f6_runtime.registry
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="validator_reset"
+    )
+    fixture = f6_runtime.fixture(
+        label="validator_reset",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    f6_runtime.install(fixture)
+    original_provider = registry._environment_provider
+    environment_calls: Counter[str] = Counter()
+    validator_entered = threading.Event()
+    validator_release = threading.Event()
+
+    def environment_provider() -> Any:
+        environment_calls["count"] += 1
+        return original_provider()
+
+    def blocking_validator(context: Any) -> None:
+        if context.plugin_id == fixture.plugin_id:
+            validator_entered.set()
+            assert validator_release.wait(timeout=10)
+        return None
+
+    registry._environment_provider = environment_provider
+    registry._environment = None
+    registry._environment_error = None
+    registry.register_runtime_pair_validator(
+        "acceptance.validator-reset", blocking_validator
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            select_future = executor.submit(registry.select, fixture.target)
+            assert validator_entered.wait(timeout=10)
+            reset_future = executor.submit(registry.reset)
+            with registry._condition:
+                assert registry._condition.wait_for(
+                    lambda: registry._resetting, timeout=10
+                )
+            validator_release.set()
+            with pytest.raises(BackendPluginLifecycleError) as caught:
+                select_future.result(timeout=10)
+            assert caught.value.field == "generation"
+            assert reset_future.result(timeout=10) == ()
+    finally:
+        validator_release.set()
+        registry._environment_provider = original_provider
+        registry.reset()
+    assert environment_calls == {"count": 1}
+    assert registry._environment is None
+    with registry._condition:
+        assert registry._records == {}
+    assert calls["initialize"] == 0
 
 
 def test_concurrent_same_key_registration_never_stacks_the_validator(
@@ -1412,6 +2725,15 @@ def test_validator_may_raise_structured_interface_error_before_initialize(
         problem="missing",
         remediation="Implement the raised requirement.",
     )
+    returned_issue = issue_cls(
+        field="compiler_cls",
+        owner="ReturnedAlongsideRaisedContract",
+        member="returned_requirement",
+        expected_kind="method",
+        actual_kind="missing",
+        problem="missing",
+        remediation="Implement the returned requirement.",
+    )
     expected_error = BackendPluginInterfaceError(
         interface_issues=(issue,),
         plugin_id=fixture.plugin_id,
@@ -1423,11 +2745,22 @@ def test_validator_may_raise_structured_interface_error_before_initialize(
             raise expected_error
         return None
 
+    register(
+        "acceptance.raised-error-returned",
+        lambda context: (
+            (returned_issue,) if context.plugin_id == fixture.plugin_id else ()
+        ),
+    )
     register("acceptance.raised-error", reject)
     f6_runtime.install(fixture)
     error = _assert_rejected_without_publication(f6_runtime, fixture)
-    assert error is expected_error
-    assert _interface_issues(error) == [issue.to_dict()]
+    assert error is not expected_error
+    assert error.plugin_id == fixture.plugin_id
+    assert error.entry_point == fixture.entry_point
+    assert _interface_issues(error) == [
+        returned_issue.to_dict(),
+        issue.to_dict(),
+    ]
     assert calls["initialize"] == 0
 
 
@@ -1479,4 +2812,144 @@ def test_validator_returned_issues_are_aggregated_before_initialize(
     payload = _interface_issues(error)
     assert payload == [issues[1].to_dict(), issues[0].to_dict()]
     assert error.field == "compiler_cls,driver_cls"
+    assert calls["initialize"] == 0
+
+
+def test_malformed_returned_and_raised_issues_fail_closed(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    register = f6_runtime.registry.register_runtime_pair_validator
+    malformed = backend_api.BackendPluginInterfaceIssue(
+        field="",
+        owner="",
+        member="",
+        expected_kind="",
+        actual_kind="",
+        problem="",
+        remediation="",
+    )
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="malformed_issues"
+    )
+    fixture = f6_runtime.fixture(
+        label="malformed_issues",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+
+    def raise_malformed(context: Any) -> None:
+        if context.plugin_id == fixture.plugin_id:
+            raise BackendPluginInterfaceError(interface_issues=(malformed,))
+        return None
+
+    register(
+        "acceptance.invalid-returned-issue",
+        lambda context: (
+            (malformed,) if context.plugin_id == fixture.plugin_id else ()
+        ),
+    )
+    register("acceptance.invalid-raised-issue", raise_malformed)
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    invalid_results = [
+        issue for issue in issues if issue["problem"] == "invalid_result"
+    ]
+    assert len(invalid_results) == 2
+    assert {issue["member"] for issue in invalid_results} == {
+        "acceptance.invalid-raised-issue",
+        "acceptance.invalid-returned-issue",
+    }
+    assert all(issue["field"] == "compiler_cls" for issue in invalid_results)
+    assert calls["initialize"] == 0
+
+
+def test_malformed_issue_field_does_not_hash_plugin_string_subclass(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    calls: Counter[Any] = Counter()
+
+    class FieldTrap(str):
+        def __hash__(self) -> int:
+            calls["issue_field_hash"] += 1
+            raise AssertionError("validator hashed a plugin-controlled field")
+
+    compiler_cls, driver_cls, pair_calls = f6_runtime.complete_pair(
+        structural=True, label="issue_field_hash"
+    )
+    calls.update(pair_calls)
+    fixture = f6_runtime.fixture(
+        label="issue_field_hash",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+    malformed = backend_api.BackendPluginInterfaceIssue(
+        field=FieldTrap("compiler_cls"),
+        owner="FieldTrap",
+        member="member",
+        expected_kind="method",
+        actual_kind="missing",
+        problem="missing",
+        remediation="Use an exact field name.",
+    )
+    f6_runtime.registry.register_runtime_pair_validator(
+        "acceptance.issue-field-hash",
+        lambda context: (
+            (malformed,) if context.plugin_id == fixture.plugin_id else ()
+        ),
+    )
+    calls.clear()
+    f6_runtime.install(fixture)
+    issues = _interface_issues(
+        _assert_rejected_without_publication(f6_runtime, fixture)
+    )
+    assert calls["issue_field_hash"] == 0
+    assert any(
+        issue["member"] == "acceptance.issue-field-hash"
+        and issue["problem"] == "invalid_result"
+        for issue in issues
+    )
+
+
+def test_raised_interface_field_errors_are_aggregated_without_loss(
+    f6_runtime: RuntimeHarness,
+) -> None:
+    register = f6_runtime.registry.register_runtime_pair_validator
+    compiler_cls, driver_cls, calls = f6_runtime.complete_pair(
+        structural=True, label="raised_field_errors"
+    )
+    fixture = f6_runtime.fixture(
+        label="raised_field_errors",
+        compiler_cls=compiler_cls,
+        driver_cls=driver_cls,
+        calls=calls,
+    )
+
+    def reject_with(message: str) -> Callable[[Any], None]:
+        def reject(context: Any) -> None:
+            if context.plugin_id == fixture.plugin_id:
+                raise BackendPluginInterfaceError(
+                    field_errors={"compiler_cls": message}
+                )
+            return None
+
+        return reject
+
+    register("acceptance.field-error-a", reject_with("alpha diagnostic"))
+    register("acceptance.field-error-b", reject_with("beta diagnostic"))
+    f6_runtime.install(fixture)
+    with pytest.raises(BackendPluginInterfaceError) as caught:
+        f6_runtime.registry.select(fixture.target)
+    error = caught.value
+    assert error.field_errors == {
+        "compiler_cls": "alpha diagnostic | beta diagnostic"
+    }
+    assert error.plugin_id == fixture.plugin_id
+    assert error.entry_point == fixture.entry_point
+    record = f6_runtime.registry.list()[0]
+    assert record.state is PluginLifecycleState.REJECTED
+    assert not record.initialized
     assert calls["initialize"] == 0

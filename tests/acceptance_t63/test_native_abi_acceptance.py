@@ -905,9 +905,13 @@ def test_triton_cached_decision_revalidates_and_prunes_crafted_native(
     registry, record, entry_point, distribution = _crafted_native_registry(
         PluginLifecycleState.ACTIVE, mode
     )
-    triton_backends = _load_triton_backend_adapter(registry, monkeypatch)
     decision = registry.get_selection("native")
     assert decision is not None
+    triton_backends = _load_triton_backend_adapter(registry, monkeypatch)
+    # F6 attaches its pre-initialize contract while the adapter imports.  The
+    # existing operational isolation guard may therefore prune a forged native
+    # cache one boundary earlier than the public operation below.
+    assert registry.get_selection("native") is None
     stale = triton_backends.Backend(
         compiler=record.compiler_cls,
         driver=record.driver_cls,

@@ -4,6 +4,10 @@ from typing import Dict, Optional, Tuple
 
 from .driver import DriverBase
 from .compiler import BaseBackend
+from .interface import (
+    TRITON_RUNTIME_INTERFACE_CONTRACT,
+    validate_triton_runtime_pair,
+)
 
 
 @dataclass(frozen=True)
@@ -30,7 +34,30 @@ def _registry_api():
 
 
 def _registry():
-    return _registry_api().get_backend_plugin_registry()
+    api = _registry_api()
+    registry = api.get_backend_plugin_registry()
+    try:
+        registry.register_runtime_pair_validator(
+            TRITON_RUNTIME_INTERFACE_CONTRACT,
+            validate_triton_runtime_pair,
+        )
+    except api.BackendPluginLifecycleError as error:
+        if (
+            error.field != "runtime_pair_validator"
+            or error.actual not in {"registered", "selected", "active"}
+        ):
+            raise
+        # A forged/unsupported record may already claim a published state in
+        # a newly attached Registry.  Replay the version-independent manifest
+        # guards first; they purge such records without loading plugin code.
+        # A supported Python record remains published, so the retry still
+        # fails closed and requires reset before Triton's contract can attach.
+        registry.validate()
+        registry.register_runtime_pair_validator(
+            TRITON_RUNTIME_INTERFACE_CONTRACT,
+            validate_triton_runtime_pair,
+        )
+    return registry
 
 
 def _enum_value(value):
@@ -295,6 +322,9 @@ def get_backend(target) -> Backend:
                     "manual Legacy backend for this target."
                 ),
             )
+        raise
+    except api.BackendPluginError:
+        _prune_registry_backends(registry)
         raise
     return _cache_decision(decision)
 

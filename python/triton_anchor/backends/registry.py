@@ -68,6 +68,16 @@ _BACKEND_ENTRY_POINT_GROUP = "triton.backends"
 _PREFLIGHT_PROFILES = {"triton_version", "full"}
 _UNSET = object()
 _MISSING = object()
+_TYPE_MRO_DESCRIPTOR = type.__dict__["__mro__"]
+
+
+def _is_class_object(value: Any) -> bool:
+    """Recognize a class without consulting a spoofable ``__class__``."""
+    try:
+        mro = _TYPE_MRO_DESCRIPTOR.__get__(value, type(value))
+    except (AttributeError, TypeError):
+        return False
+    return type(mro) is tuple and bool(mro) and mro[0] is value
 
 
 def _stable_type_name(value: Any) -> str:
@@ -196,14 +206,22 @@ def _is_well_formed_interface_issue(
         issue.remediation,
     )
     return (
-        all(isinstance(value, str) for value in required)
+        type(issue.field) is str
+        and issue.field in {"compiler_cls", "driver_cls"}
+        and all(type(value) is str and bool(value.strip()) for value in required)
         and (
             issue.expected_signature is None
-            or isinstance(issue.expected_signature, str)
+            or (
+                type(issue.expected_signature) is str
+                and bool(issue.expected_signature.strip())
+            )
         )
         and (
             issue.actual_signature is None
-            or isinstance(issue.actual_signature, str)
+            or (
+                type(issue.actual_signature) is str
+                and bool(issue.actual_signature.strip())
+            )
         )
     )
 
@@ -502,9 +520,10 @@ class BackendPluginRegistry:
         """Attach one named pre-initialize runtime-pair validator.
 
         Registering the identical callback again is idempotent. Replacing a
-        name, or attaching a new name, is only safe before any pair validation
-        is in flight and before a record has been published. Validators are
-        process contracts and intentionally survive :meth:`reset`.
+        name requires an empty Registry (normally immediately after reset).
+        Attaching a new name is only safe outside load/pair-validation races
+        and before a record has been published. Validators are process
+        contracts and intentionally survive :meth:`reset`.
         """
         if not isinstance(contract_id, str) or not contract_id.strip():
             raise ValueError("runtime-pair validator contract_id must be non-empty")
@@ -517,24 +536,49 @@ class BackendPluginRegistry:
             if current is callback:
                 return
 
-            if self._registering:
-                record_id = sorted(self._registering)[0]
+            lifecycle_operations = {
+                **self._loading,
+                **self._registering,
+            }
+            if lifecycle_operations:
+                record_id = sorted(lifecycle_operations)[0]
                 record = self._records.get(record_id)
                 raise BackendPluginLifecycleError(
-                    "Runtime-pair validator registration raced interface "
-                    "validation",
+                    "Runtime-pair validator registration raced plugin load or "
+                    "interface validation",
                     plugin_id=record.plugin_id if record is not None else None,
                     entry_point=(
                         record.entry_point_name if record is not None else None
                     ),
                     field="runtime_pair_validator",
                     expected=(
-                        "validator registration before runtime-pair validation"
+                        "validator registration before plugin load and "
+                        "runtime-pair validation"
                     ),
-                    actual="registration in progress",
+                    actual="plugin lifecycle operation in progress",
                     remediation=(
                         "Reset the Registry, then register the validator before "
                         "loading or selecting plugins."
+                    ),
+                )
+
+            if current is not _MISSING and self._records:
+                record = sorted(
+                    self._records.values(), key=lambda item: item.record_id
+                )[0]
+                raise BackendPluginLifecycleError(
+                    "Runtime-pair validator cannot be replaced after plugin "
+                    "discovery",
+                    plugin_id=record.plugin_id,
+                    entry_point=record.entry_point_name,
+                    field="runtime_pair_validator",
+                    expected=(
+                        "an empty Registry before replacing a named validator"
+                    ),
+                    actual=record.state.value,
+                    remediation=(
+                        "Reset the Registry, then replace the validator before "
+                        "discovering or loading plugins."
                     ),
                 )
 
@@ -1752,13 +1796,74 @@ class BackendPluginRegistry:
     ) -> Optional[BackendPluginInterfaceError]:
         """Run a lock-free validator snapshot and aggregate its findings."""
         issues: list[BackendPluginInterfaceIssue] = []
+        missing_fields: list[str] = []
+        invalid_fields: list[str] = []
+        field_error_messages: Dict[str, set[str]] = {}
+        runtime_fields = {"compiler_cls", "driver_cls"}
+
+        def absorb_interface_error(
+            contract_id: str,
+            error: BackendPluginInterfaceError,
+        ) -> None:
+            absorbed = False
+            invalid_component = False
+            for issue in error.interface_issues:
+                if (
+                    type(issue) is BackendPluginInterfaceIssue
+                    and _is_well_formed_interface_issue(issue)
+                ):
+                    issues.append(issue)
+                    absorbed = True
+                else:
+                    invalid_component = True
+            for field_name in error.missing_fields:
+                if type(field_name) is str and field_name in runtime_fields:
+                    missing_fields.append(field_name)
+                    absorbed = True
+                else:
+                    invalid_component = True
+            for field_name in error.invalid_fields:
+                if type(field_name) is str and field_name in runtime_fields:
+                    invalid_fields.append(field_name)
+                    absorbed = True
+                else:
+                    invalid_component = True
+            for field_name, message in error.field_errors.items():
+                if (
+                    type(field_name) is str
+                    and field_name in runtime_fields
+                    and type(message) is str
+                    and bool(message.strip())
+                ):
+                    field_error_messages.setdefault(field_name, set()).add(
+                        message
+                    )
+                    absorbed = True
+                else:
+                    invalid_component = True
+            if invalid_component:
+                issues.append(
+                    _runtime_pair_validator_failure(
+                        contract_id,
+                        "backend_plugin_interface_error",
+                        "invalid_result",
+                    )
+                )
+            if not absorbed and not invalid_component:
+                issues.append(
+                    _runtime_pair_validator_failure(
+                        contract_id,
+                        "backend_plugin_interface_error",
+                        "validator_rejection",
+                    )
+                )
+
         for contract_id, callback in validators:
             try:
                 result = callback(context)
             except BackendPluginInterfaceError as exc:
-                # Raising a structured error is the validator contract's
-                # terminal form; preserve its identity for diagnostics.
-                return exc
+                absorb_interface_error(contract_id, exc)
+                continue
             except Exception as exc:
                 issues.append(
                     _runtime_pair_validator_failure(
@@ -1775,9 +1880,8 @@ class BackendPluginRegistry:
             try:
                 iterator = iter(result)
             except BackendPluginInterfaceError as exc:
-                # Preserve an explicitly raised structured error even when a
-                # lazy result raises while producing its iterator.
-                return exc
+                absorb_interface_error(contract_id, exc)
+                continue
             except Exception:
                 issues.append(
                     _runtime_pair_validator_failure(
@@ -1794,8 +1898,8 @@ class BackendPluginRegistry:
                 except StopIteration:
                     break
                 except BackendPluginInterfaceError as exc:
-                    # A generator may choose the same terminal contract form.
-                    return exc
+                    absorb_interface_error(contract_id, exc)
+                    break
                 except Exception as exc:
                     issues.append(
                         _runtime_pair_validator_failure(
@@ -1805,7 +1909,7 @@ class BackendPluginRegistry:
                         )
                     )
                     break
-                if not isinstance(issue, BackendPluginInterfaceIssue):
+                if type(issue) is not BackendPluginInterfaceIssue:
                     issues.append(
                         _runtime_pair_validator_failure(
                             contract_id,
@@ -1825,9 +1929,21 @@ class BackendPluginRegistry:
                     break
                 issues.append(issue)
 
-        if not issues:
+        if not (
+            issues
+            or missing_fields
+            or invalid_fields
+            or field_error_messages
+        ):
             return None
+        field_errors = {
+            field_name: " | ".join(sorted(messages))
+            for field_name, messages in sorted(field_error_messages.items())
+        }
         return BackendPluginInterfaceError(
+            missing_fields,
+            invalid_fields=invalid_fields,
+            field_errors=field_errors,
             interface_issues=issues,
             plugin_id=context.plugin_id,
             entry_point=context.entry_point,
@@ -1956,13 +2072,6 @@ class BackendPluginRegistry:
 
                     self._transition(record, PluginLifecycleState.REGISTERED)
                     epoch = self._lifecycle_epoch
-                    initialization_context = MappingProxyType(
-                        {
-                            "environment": self._get_environment(),
-                            "manifest": _manifest_snapshot(record.manifest),
-                            "record_id": record.record_id,
-                        }
-                    )
                     token = object()
                     self._registering[record_id] = (
                         epoch,
@@ -1997,13 +2106,14 @@ class BackendPluginRegistry:
                     for name, value in values.items()
                     if value is not _MISSING
                     and value is not None
-                    and not isinstance(value, type)
+                    and not _is_class_object(value)
                 )
 
                 primary_error: Optional[BackendPluginError] = None
                 cleanup_error: Optional[BackendPluginLifecycleError] = None
                 cleanup_called = False
                 initialized = False
+                initialization_context: Optional[Mapping[str, Any]] = None
                 if missing or invalid or field_errors:
                     primary_error = BackendPluginInterfaceError(
                         missing,
@@ -2029,10 +2139,69 @@ class BackendPluginRegistry:
                     primary_error is None
                     and record.source is PluginSource.MANIFEST
                 ):
-                    initializer, primary_error = self._read_hook(
-                        record,
-                        "initialize",
-                    )
+                    # Materialize the lifecycle context only after every
+                    # runtime-pair validator passes.  Besides preserving the
+                    # documented boundary, this prevents a rejected plugin's
+                    # global ABC mutations from being reached by snapshot
+                    # helpers before interface validation.
+                    with self._condition:
+                        current = self._records.get(record_id)
+                        if (
+                            epoch != self._lifecycle_epoch
+                            or current is None
+                        ):
+                            primary_error = self._stale_operation_error(
+                                record,
+                                "register",
+                                epoch,
+                                self._lifecycle_epoch,
+                            )
+                        elif current.state is PluginLifecycleState.REJECTED:
+                            primary_error = current.error or (
+                                BackendPluginLifecycleError(
+                                    "Backend plugin state changed before "
+                                    "initialization",
+                                    plugin_id=record.plugin_id,
+                                    entry_point=record.entry_point_name,
+                                    field="state",
+                                    expected=PluginLifecycleState.LOADED.value,
+                                    actual=current.state.value,
+                                    remediation=(
+                                        "Resolve the recorded validation or "
+                                        "conflict error before registering."
+                                    ),
+                                )
+                            )
+                        elif current.state is not PluginLifecycleState.LOADED:
+                            primary_error = BackendPluginLifecycleError(
+                                "Backend plugin state changed before "
+                                "initialization",
+                                plugin_id=record.plugin_id,
+                                entry_point=record.entry_point_name,
+                                field="state",
+                                expected=PluginLifecycleState.LOADED.value,
+                                actual=current.state.value,
+                                remediation=(
+                                    "Retry registration through the Registry."
+                                ),
+                            )
+                        else:
+                            initialization_context = MappingProxyType(
+                                {
+                                    "environment": self._get_environment(),
+                                    "manifest": _manifest_snapshot(
+                                        record.manifest
+                                    ),
+                                    "record_id": record.record_id,
+                                }
+                            )
+                    if primary_error is not None:
+                        initializer = _MISSING
+                    else:
+                        initializer, primary_error = self._read_hook(
+                            record,
+                            "initialize",
+                        )
                     if primary_error is None and initializer is not _MISSING:
                         primary_error = self._bind_hook(
                             record,
