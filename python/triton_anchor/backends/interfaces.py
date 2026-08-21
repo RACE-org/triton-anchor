@@ -25,6 +25,8 @@ _OPTIONAL_DEFAULT = object()
 # metaclass.
 _TYPE_DICT_GETSET = type.__dict__["__dict__"]
 _TYPE_MRO_GETSET = type.__dict__["__mro__"]
+_TYPE_MODULE_GETSET = type.__dict__["__module__"]
+_TYPE_QUALNAME_GETSET = type.__dict__["__qualname__"]
 
 
 def _class_dict(candidate: type) -> Mapping[str, Any]:
@@ -36,9 +38,8 @@ def _class_mro(candidate: type) -> tuple[type, ...]:
 
 
 def _qualified_class_name(candidate: type) -> str:
-    namespace = _class_dict(candidate)
-    module = namespace.get("__module__")
-    qualname = namespace.get("__qualname__")
+    module = _TYPE_MODULE_GETSET.__get__(candidate, type(candidate))
+    qualname = _TYPE_QUALNAME_GETSET.__get__(candidate, type(candidate))
     if type(module) is not str:
         module = "<unknown>"
     if type(qualname) is not str:

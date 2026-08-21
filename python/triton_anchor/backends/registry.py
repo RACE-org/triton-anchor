@@ -122,8 +122,12 @@ def _run_runtime_pair_validators(
 ]:
     """Invoke trusted integration validators without masking programming bugs."""
     contract_ids = []
-    required_surface = []
-    issues = []
+    required_surface: Dict[
+        Tuple[str, str, str, str, str], RuntimeInterfaceMember
+    ] = {}
+    issues: Dict[
+        Tuple[str, str, str, str, str, str], BackendPluginInterfaceIssue
+    ] = {}
     for name, validator in validators:
         result = validator(context)
         if type(result) is CoroutineType:
@@ -149,9 +153,41 @@ def _run_runtime_pair_validators(
         ):
             raise TypeError("runtime pair validator returned invalid issues")
         contract_ids.append(name)
-        required_surface.extend(result.required_surface)
-        issues.extend(result.issues)
-    return tuple(contract_ids), tuple(required_surface), tuple(issues)
+        for member in result.required_surface:
+            member_key = (
+                member.field,
+                member.owner,
+                member.name,
+                member.descriptor_kind,
+                member.signature or "",
+            )
+            required_surface.setdefault(member_key, member)
+        for issue in result.issues:
+            issue_key = (
+                issue.field,
+                issue.owner,
+                issue.member,
+                issue.problem,
+                issue.expected,
+                issue.actual,
+            )
+            issues.setdefault(issue_key, issue)
+    field_order = {"compiler_cls": 0, "driver_cls": 1}
+    ordered_surface = tuple(
+        required_surface[key]
+        for key in sorted(
+            required_surface,
+            key=lambda key: (field_order.get(key[0], 999),) + key,
+        )
+    )
+    ordered_issues = tuple(
+        issues[key]
+        for key in sorted(
+            issues,
+            key=lambda key: (field_order.get(key[0], 999),) + key,
+        )
+    )
+    return tuple(contract_ids), ordered_surface, ordered_issues
 
 
 def _freeze_json_value(value: Any) -> Any:
