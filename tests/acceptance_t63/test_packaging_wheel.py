@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
@@ -18,6 +17,9 @@ sys.path.insert(0, str(HERE))
 from packaging_wheel_acceptance import (  # noqa: E402
     ABI_MATERIAL_KEYS,
     EXPECTED_BUILD_INFO,
+    REQUIRED_EXTENSION_PACKAGE,
+    setup_distribution_package_inventory,
+    source_python_package_inventory,
     validate_wheel_archive,
 )
 
@@ -30,7 +32,7 @@ def _supplied_wheel() -> Path:
 
 
 def test_built_wheel_payload_and_provenance() -> None:
-    result = validate_wheel_archive(_supplied_wheel())
+    result = validate_wheel_archive(_supplied_wheel(), HERE.parents[1])
     assert result["archive_status"] == "PASS"
 
 
@@ -84,29 +86,13 @@ def test_source_template_is_explicitly_not_generated() -> None:
 
 def test_every_source_python_package_is_declared_for_the_wheel() -> None:
     repo_root = HERE.parents[1]
-    setup_tree = ast.parse((repo_root / "setup.py").read_text(encoding="utf-8"))
-    declared = None
-    for node in setup_tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "get_packages":
-            for child in node.body:
-                if not isinstance(child, ast.Assign):
-                    continue
-                if any(
-                    isinstance(target, ast.Name) and target.id == "packages"
-                    for target in child.targets
-                ):
-                    declared = set(ast.literal_eval(child.value))
-    assert declared is not None, "setup.py get_packages() has no static package list"
+    source_packages = source_python_package_inventory(repo_root)
+    declared_packages = setup_distribution_package_inventory(repo_root)
 
-    source_packages = set()
-    for base, prefix in (
-        (repo_root / "python/triton_anchor", "triton_anchor"),
-        (repo_root / "triton/python/triton", "triton"),
-    ):
-        for init_file in base.rglob("__init__.py"):
-            relative = init_file.parent.relative_to(base)
-            suffix = "." + ".".join(relative.parts) if relative.parts else ""
-            source_packages.add(prefix + suffix)
-
-    omitted = sorted(source_packages.difference(declared))
-    assert not omitted, "source Python package(s) omitted from wheel: " + ", ".join(omitted)
+    assert REQUIRED_EXTENSION_PACKAGE in source_packages
+    assert REQUIRED_EXTENSION_PACKAGE in declared_packages
+    omitted = sorted(source_packages - declared_packages)
+    assert not omitted, (
+        "source Python package(s) omitted from setup.py Distribution.packages: "
+        + ", ".join(omitted)
+    )

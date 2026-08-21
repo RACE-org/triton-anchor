@@ -10,8 +10,11 @@ cannot make a broken wheel look healthy.
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import email.parser
 import hashlib
+import io
 import json
 import os
 import re
@@ -86,6 +89,28 @@ ABI_MATERIAL_KEYS = (
 
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
+PROJECT_PACKAGE_ROOTS = ("triton", "triton_anchor")
+SOURCE_PACKAGE_ROOTS = (
+    (Path("triton/python/triton"), "triton"),
+    (Path("python/triton_anchor"), "triton_anchor"),
+)
+REQUIRED_EXTENSION_PACKAGE = "triton_anchor.language.ext"
+REQUIRED_EXTENSION_INIT = "triton_anchor/language/ext/__init__.py"
+
+_SETUP_PACKAGE_INVENTORY_PROBE = r'''
+import json
+import pathlib
+import setuptools
+import sys
+from distutils.core import run_setup
+
+distribution = run_setup(
+    str(pathlib.Path(sys.argv[1]).resolve()),
+    stop_after="config",
+)
+print("T63_SETUP_PACKAGES=" + json.dumps(distribution.packages))
+'''
+
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
@@ -96,7 +121,209 @@ def _assert(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def validate_wheel_archive(wheel: Path) -> dict:
+def source_python_package_inventory(repo_root: Path) -> frozenset[str]:
+    """Return the checked-in import packages that define the wheel surface."""
+    repo_root = Path(repo_root).resolve(strict=True)
+    packages: set[str] = set()
+    for relative_root, package_root in SOURCE_PACKAGE_ROOTS:
+        source_root = repo_root / relative_root
+        _assert(source_root.is_dir(), f"source package root is absent: {source_root}")
+        for init_file in source_root.rglob("__init__.py"):
+            relative = init_file.parent.relative_to(source_root)
+            suffix = "." + ".".join(relative.parts) if relative.parts else ""
+            packages.add(package_root + suffix)
+    return frozenset(packages)
+
+
+def setup_distribution_package_inventory(repo_root: Path) -> frozenset[str]:
+    """Read ``packages`` from the Distribution produced by the real setup.py."""
+    repo_root = Path(repo_root).resolve(strict=True)
+    setup_path = repo_root / "setup.py"
+    _assert(setup_path.is_file(), f"setup.py is absent: {setup_path}")
+    env = os.environ.copy()
+    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        env.pop(key, None)
+    env["PYTHONNOUSERSITE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", _SETUP_PACKAGE_INVENTORY_PROBE, str(setup_path)],
+        cwd=repo_root,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    _assert(
+        completed.returncode == 0,
+        "could not evaluate setup.py Distribution metadata: " + completed.stderr,
+    )
+    marker = "T63_SETUP_PACKAGES="
+    payloads = [
+        line[len(marker):]
+        for line in completed.stdout.splitlines()
+        if line.startswith(marker)
+    ]
+    _assert(len(payloads) == 1, f"setup.py package probe was ambiguous: {completed.stdout!r}")
+    packages = json.loads(payloads[0])
+    _assert(isinstance(packages, list), "setup.py Distribution.packages is not a list")
+    _assert(
+        all(type(package) is str and package for package in packages),
+        f"setup.py Distribution.packages contains an invalid name: {packages!r}",
+    )
+    _assert(
+        len(packages) == len(set(packages)),
+        f"setup.py Distribution.packages contains duplicate names: {packages!r}",
+    )
+    return frozenset(packages)
+
+
+def _wheel_python_package_inventory(names: tuple[str, ...]) -> frozenset[str]:
+    packages = {
+        ".".join(PurePosixPath(name).parent.parts)
+        for name in names
+        if PurePosixPath(name).name == "__init__.py"
+    }
+    return frozenset(package for package in packages if package)
+
+
+def _project_packages(packages: frozenset[str]) -> frozenset[str]:
+    return frozenset(
+        package
+        for package in packages
+        if any(
+            package == root or package.startswith(root + ".")
+            for root in PROJECT_PACKAGE_ROOTS
+        )
+    )
+
+
+def _validate_package_inventories(
+    repo_root: Path,
+    wheel_packages: frozenset[str],
+) -> dict[str, list[str]]:
+    source_packages = source_python_package_inventory(repo_root)
+    declared_packages = setup_distribution_package_inventory(repo_root)
+    declared_project_packages = _project_packages(declared_packages)
+    wheel_project_packages = _project_packages(wheel_packages)
+
+    _assert(
+        REQUIRED_EXTENSION_PACKAGE in source_packages,
+        f"source inventory omits {REQUIRED_EXTENSION_PACKAGE}",
+    )
+    _assert(
+        REQUIRED_EXTENSION_PACKAGE in declared_packages,
+        f"setup.py Distribution.packages omits {REQUIRED_EXTENSION_PACKAGE}",
+    )
+    _assert(
+        REQUIRED_EXTENSION_PACKAGE in wheel_packages,
+        f"wheel package inventory omits {REQUIRED_EXTENSION_PACKAGE}",
+    )
+
+    omitted_from_setup = sorted(source_packages - declared_packages)
+    _assert(
+        not omitted_from_setup,
+        "source Python package(s) omitted from setup.py Distribution.packages: "
+        + ", ".join(omitted_from_setup),
+    )
+    missing_from_wheel = sorted(declared_project_packages - wheel_project_packages)
+    _assert(
+        not missing_from_wheel,
+        "declared Python package(s) omitted from wheel: " + ", ".join(missing_from_wheel),
+    )
+
+    # A fresh wheel should not expose project packages absent from the declared
+    # source surface.  These reverse checks also catch stale build-tree payload.
+    declared_without_source = sorted(declared_project_packages - source_packages)
+    wheel_without_declaration = sorted(wheel_project_packages - declared_project_packages)
+    _assert(
+        not declared_without_source,
+        "setup.py declares package(s) absent from source inventory: "
+        + ", ".join(declared_without_source),
+    )
+    _assert(
+        not wheel_without_declaration,
+        "wheel contains undeclared Python package(s): " + ", ".join(wheel_without_declaration),
+    )
+
+    return {
+        "source": sorted(source_packages),
+        "declared": sorted(declared_project_packages),
+        "wheel": sorted(wheel_project_packages),
+    }
+
+
+def _record_member_digest_and_size(
+    archive: zipfile.ZipFile,
+    member: str,
+) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with archive.open(member) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    encoded = base64.urlsafe_b64encode(digest.digest())
+    return "sha256=" + encoded.rstrip(b"=").decode("ascii"), size
+
+
+def _validate_record(
+    archive: zipfile.ZipFile,
+    names: tuple[str, ...],
+) -> dict[str, object]:
+    file_names = tuple(name for name in names if not name.endswith("/"))
+    record_paths = [name for name in file_names if name.endswith(".dist-info/RECORD")]
+    _assert(len(record_paths) == 1, f"expected one RECORD file: {record_paths}")
+    record_path = record_paths[0]
+    rows = list(
+        csv.reader(io.StringIO(archive.read(record_path).decode("utf-8"), newline=""))
+    )
+    _assert(all(len(row) == 3 for row in rows), "wheel RECORD contains a malformed row")
+    paths = [row[0] for row in rows]
+    _assert(len(paths) == len(set(paths)), "wheel RECORD contains duplicate member rows")
+    _assert(
+        set(paths) == set(file_names),
+        "wheel RECORD membership differs from archive membership: "
+        f"missing={sorted(set(file_names) - set(paths))}, "
+        f"extra={sorted(set(paths) - set(file_names))}",
+    )
+    by_path = {row[0]: row for row in rows}
+    _assert(
+        REQUIRED_EXTENSION_INIT in by_path,
+        f"wheel RECORD omits {REQUIRED_EXTENSION_INIT}",
+    )
+
+    for member in file_names:
+        recorded_hash, recorded_size = by_path[member][1:]
+        if member == record_path:
+            _assert(
+                recorded_hash == "" and recorded_size == "",
+                "the RECORD row for RECORD must have empty hash and size",
+            )
+            continue
+        actual_hash, actual_size = _record_member_digest_and_size(archive, member)
+        _assert(
+            recorded_hash == actual_hash,
+            f"wheel RECORD hash mismatch for {member}",
+        )
+        _assert(
+            recorded_size == str(actual_size),
+            f"wheel RECORD size mismatch for {member}",
+        )
+
+    extension_row = by_path[REQUIRED_EXTENSION_INIT]
+    return {
+        "path": record_path,
+        "member_count": len(rows),
+        "extension_member": {
+            "path": extension_row[0],
+            "hash": extension_row[1],
+            "size": int(extension_row[2]),
+        },
+        "status": "PASS",
+    }
+
+
+def validate_wheel_archive(wheel: Path, repo_root: Path) -> dict:
     """Validate package payload and independently verify build provenance."""
     wheel = Path(wheel).resolve(strict=True)
     _assert(wheel.suffix == ".whl", f"not a wheel path: {wheel}")
@@ -105,6 +332,7 @@ def validate_wheel_archive(wheel: Path) -> dict:
         corrupt = archive.testzip()
         _assert(corrupt is None, f"wheel contains corrupt member: {corrupt}")
         names = tuple(archive.namelist())
+        _assert(len(names) == len(set(names)), "wheel contains duplicate archive members")
         name_set = set(names)
         unsafe = [
             name
@@ -115,6 +343,10 @@ def validate_wheel_archive(wheel: Path) -> dict:
 
         missing = sorted(REQUIRED_WHEEL_FILES.difference(name_set))
         _assert(not missing, "wheel is missing required file(s): " + ", ".join(missing))
+
+        wheel_packages = _wheel_python_package_inventory(names)
+        package_inventories = _validate_package_inventories(repo_root, wheel_packages)
+        record_evidence = _validate_record(archive, names)
 
         build_info_paths = [
             name for name in names if PurePosixPath(name).name == "_build_info.json"
@@ -190,10 +422,8 @@ def validate_wheel_archive(wheel: Path) -> dict:
 
         metadata_paths = [name for name in names if name.endswith(".dist-info/METADATA")]
         wheel_metadata_paths = [name for name in names if name.endswith(".dist-info/WHEEL")]
-        record_paths = [name for name in names if name.endswith(".dist-info/RECORD")]
         _assert(len(metadata_paths) == 1, f"expected one METADATA file: {metadata_paths}")
         _assert(len(wheel_metadata_paths) == 1, f"expected one WHEEL file: {wheel_metadata_paths}")
-        _assert(len(record_paths) == 1, f"expected one RECORD file: {record_paths}")
         metadata = email.parser.BytesParser().parsebytes(archive.read(metadata_paths[0]))
         _assert(metadata.get("Name") == "triton-anchor", "wheel project Name is not triton-anchor")
         _assert(metadata.get("Version") == "0.2.0", "wheel project Version is not 0.2.0")
@@ -216,6 +446,8 @@ def validate_wheel_archive(wheel: Path) -> dict:
         "wheel": str(wheel),
         "wheel_size": wheel.stat().st_size,
         "member_count": len(names),
+        "package_inventories": package_inventories,
+        "record": record_evidence,
         "build_info": build_info,
         "requires_dist": [str(req) for req in requirements],
         "archive_status": "PASS",
@@ -235,6 +467,7 @@ prefix = pathlib.Path(sys.prefix).resolve()
 import packaging
 import triton
 import triton_anchor
+import triton_anchor.language.ext
 from triton._C import libtriton
 from triton_anchor.backends import get_backend_plugin_registry, load_build_info
 
@@ -242,6 +475,7 @@ modules = {
     "packaging": pathlib.Path(packaging.__file__).resolve(),
     "triton": pathlib.Path(triton.__file__).resolve(),
     "triton_anchor": pathlib.Path(triton_anchor.__file__).resolve(),
+    "triton_anchor.language.ext": pathlib.Path(triton_anchor.language.ext.__file__).resolve(),
     "libtriton": pathlib.Path(libtriton.__file__).resolve(),
 }
 for name, path in modules.items():
@@ -374,7 +608,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    archive_result = validate_wheel_archive(args.wheel)
+    archive_result = validate_wheel_archive(args.wheel, args.repo_root)
     if args.work_dir is None:
         with tempfile.TemporaryDirectory(prefix="t63-wheel-acceptance-") as temporary:
             installed_result = install_and_probe(
