@@ -12,13 +12,13 @@
 > 本文是已冻结合同。维护者已确认 Protocol/Manifest Schema 1.0 未对外发布，并批准
 > D-01～D-12 推荐 bundle。后续生产代码和测试必须遵守本文，不能自行发明 native ABI。
 
-## 1. 建议结论
+## 1. 已批准结论
 
 本阶段不允许修改版本 pin，而 Manifest 1.0 当前接受 `native_in_process` 和
 `subprocess`，却没有可实施的 native C ABI 或 subprocess IPC/IR 合同。仓库也不能
 证明 1.0 是否已对外发布。
 
-建议维护者在确认 1.0 **从未对外发布**后，批准：
+维护者已确认 1.0 **从未对外发布**，并批准：
 
 1. 首次冻结的 Schema/Protocol 1.0 只支持 `python_only`；
 2. Schema 与 `parse_manifest` 对 `native_in_process`、`subprocess` 同域拒绝；
@@ -32,7 +32,7 @@ Native SPEC GAP，而不是声称现有静态检查已经证明动态 ABI 安全
 
 若 1.0 已发布，收窄 enum/parser 接受域是 breaking change。维护者只能明确批准
 security erratum，或将本阶段标为协议阻塞。若维护者希望本阶段实现 native 1.0，
-本文必须先补成可编译的 normative C header 并重新审批；当前草案不能授权该路径。
+本文必须先补成可编译的 normative C header 并重新审批；本 ADR 不能授权该路径。
 
 ## 2. 当前事实与问题陈述
 
@@ -119,8 +119,9 @@ baseline shape（包括 isolation enum 与 pattern anchor 修正）；**从该�
 
 ### 5.2 无法从仓库推出发布事实
 
-版本常量、文件名和本地 wheel 不足以证明第三方是否消费过 1.0。维护者必须填写
-D-01；`unknown` 不是可以破坏兼容性的答案。
+版本常量、文件名和本地 wheel 不足以证明第三方是否消费过 1.0；该事实只能由发布
+责任人确认。维护者已在 D-01 明确记录 `unpublished`；`unknown` 不是可以破坏兼容性的
+答案。
 
 ### 5.3 本阶段可选 disposition
 
@@ -142,7 +143,7 @@ Shipped Draft 2020-12 Schema 是 structural oracle；`parse_manifest` 必须对�
 instance 得出相同 ACCEPT/REJECT。实现可以共享轻量 predicate，但运行时不依赖
 jsonschema。
 
-若 D-02 允许进入实现，获批后的 `nonEmptyString` 规范语义为：
+依据已批准的 D-02，冻结后的 `nonEmptyString` 规范语义为：
 
 - 必须是非空 string；
 - 首尾不得是 Schema regex 认定的 whitespace；
@@ -500,7 +501,7 @@ D-12=deferred-separate-ADR
 若 D-01 为 published/unknown，不能使用该快捷批准。
 
 除 §5.3 已完整描述的 blocked/security-erratum disposition 外，选择任一非推荐值都表示
-草案缺少相应规范，必须退回修订并重新审批，不能仅填写该值后直接开始生产代码。
+本 ADR 缺少相应规范，必须退回修订并重新审批，不能仅填写该值后直接开始生产代码。
 
 ## 14. 批准后的提交与验证边界
 
@@ -524,10 +525,10 @@ loader helper 或版本 pin 修改。
 
 ## 15. 维护者批准记录
 
-- 审批人：**维护者（本次用户确认）**
+- 审批角色：**维护者；姓名或公开 handle 未提供**
 - 审批日期：**2026-08-21**
 - D-01～D-12 批准值：**§13 推荐 bundle，逐项记录于决策矩阵**
-- 1.0 发布事实的证据/责任人：**维护者明确确认 1.0 未对外发布；发布事实由维护者负责**
+- 1.0 发布事实的证据/责任人：**维护者在本任务会话书面确认“确认上述发布状态并批准推荐 bundle”；发布事实由维护者负责**
 - 是否接受 security erratum：**不适用；D-01 为 unpublished**
 - 备注/偏离：**无**
 
