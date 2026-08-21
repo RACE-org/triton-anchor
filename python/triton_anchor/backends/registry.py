@@ -718,15 +718,18 @@ class BackendPluginRegistry:
             )
         if len(matches) > 1:
             if reject_conflicts:
-                for conflict in detect_conflicts(
-                    self._records.values()
-                ).fatal_conflicts:
-                    if (
-                        conflict.kind.value == "duplicate_plugin_id"
-                        and conflict.claim == identifier
-                    ):
-                        self._reject_conflicted(conflict)
-                        raise conflict.to_error()
+                match_ids = {record.record_id for record in matches}
+                related_conflicts = tuple(
+                    conflict
+                    for conflict in detect_conflicts(
+                        self._records.values()
+                    ).fatal_conflicts
+                    if match_ids.intersection(conflict.record_ids)
+                )
+                for conflict in related_conflicts:
+                    self._reject_conflicted(conflict)
+                if related_conflicts:
+                    raise related_conflicts[0].to_error()
             raise BackendPluginConflictError(
                 f"Backend plugin key '{identifier}' is ambiguous across records: "
                 + ", ".join(record.record_id for record in matches),

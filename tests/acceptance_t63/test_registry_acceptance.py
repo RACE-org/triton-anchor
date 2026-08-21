@@ -1988,7 +1988,7 @@ def test_registry_records_every_fatal_conflict_for_each_participant(
     registry = registry_for(reversed(distributions))
     records = registry.validate()
     with pytest.raises(BackendPluginConflictError):
-        registry.load(records[0].record_id)
+        registry.load("vendor.alpha")
 
     for record in registry.list():
         diagnostics = [error.to_dict() for error in record.errors]
