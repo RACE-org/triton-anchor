@@ -253,10 +253,7 @@ def _call_shapes(
     ]
     for split in range(len(positional_or_keyword) + 1):
         args = tuple(positional_only) + (sentinel,) * split
-        kwargs = {
-            name: sentinel
-            for name in positional_or_keyword[split:]
-        }
+        kwargs = {name: sentinel for name in positional_or_keyword[split:]}
         kwargs.update(keyword_only)
         if has_var_keyword:
             extra_name = "__t63_contract_extra__"
@@ -271,20 +268,13 @@ def _signature_accepts_contract(
     expected: inspect.Signature,
     candidate: inspect.Signature,
 ) -> bool:
-    expected_kinds = {
-        parameter.kind for parameter in expected.parameters.values()
-    }
-    candidate_kinds = {
-        parameter.kind for parameter in candidate.parameters.values()
-    }
+    expected_kinds = {parameter.kind for parameter in expected.parameters.values()}
+    candidate_kinds = {parameter.kind for parameter in candidate.parameters.values()}
     for variadic_kind in {
         inspect.Parameter.VAR_POSITIONAL,
         inspect.Parameter.VAR_KEYWORD,
     }:
-        if (
-            variadic_kind in expected_kinds
-            and variadic_kind not in candidate_kinds
-        ):
+        if variadic_kind in expected_kinds and variadic_kind not in candidate_kinds:
             return False
     for args, kwargs in _call_shapes(expected):
         try:
@@ -493,9 +483,7 @@ class AbstractRuntimePairValidator:
                 kind = _descriptor_kind(descriptor)
                 function = _descriptor_function(descriptor, kind)
                 raw_signature = (
-                    _safe_function_signature(function)
-                    if function is not None
-                    else None
+                    _safe_function_signature(function) if function is not None else None
                 )
                 signature = (
                     _bound_signature(raw_signature, kind)

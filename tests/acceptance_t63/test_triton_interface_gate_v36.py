@@ -522,15 +522,11 @@ def test_real_v36_surface_is_loaded_from_canonical_modules(
     f6_runtime: _Harness,
 ) -> None:
     assert (
-        f6_runtime.backends.register_runtime_interface_contract(
-            f6_runtime.registry
-        )
+        f6_runtime.backends.register_runtime_interface_contract(f6_runtime.registry)
         is None
     )
     assert (
-        f6_runtime.backends.register_runtime_interface_contract(
-            f6_runtime.registry
-        )
+        f6_runtime.backends.register_runtime_interface_contract(f6_runtime.registry)
         is None
     )
     assert f6_runtime.compiler_contract.__module__ == ("triton.backends.compiler")
