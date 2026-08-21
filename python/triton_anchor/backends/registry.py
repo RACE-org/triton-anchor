@@ -66,6 +66,11 @@ _PREFLIGHT_PROFILES = {"triton_version", "full"}
 _UNSET = object()
 
 
+def _stable_exception_name(error: BaseException) -> str:
+    error_type = type(error)
+    return f"{error_type.__module__}.{error_type.__qualname__}"
+
+
 def _error_identity(error: BackendPluginError) -> Tuple[Any, ...]:
     """Return a deterministic identity used to suppress repeated findings."""
     return (
@@ -378,7 +383,7 @@ class BackendPluginRegistry:
             error = BackendPluginCompatibilityError(
                 "Core environment metadata",
                 "readable CoreEnvironment",
-                f"<error: {exc}>",
+                f"<error: {_stable_exception_name(exc)}>",
                 remediation=(
                     "Repair or rebuild triton-anchor so its generated build "
                     "metadata can be read before validating plugins."
@@ -910,6 +915,7 @@ class BackendPluginRegistry:
             self._reject_manifest_scope(
                 exc,
                 PluginCompatibilityStatus.INCOMPATIBLE,
+                specialize_error=True,
             )
             return self._records[record.record_id]
 
@@ -968,7 +974,10 @@ class BackendPluginRegistry:
         if ordered_errors:
             compatibility_status = (
                 PluginCompatibilityStatus.NOT_CHECKED
-                if isinstance(ordered_errors[0], BackendPluginManifestError)
+                if any(
+                    isinstance(error, BackendPluginManifestError)
+                    for error in ordered_errors
+                )
                 else PluginCompatibilityStatus.INCOMPATIBLE
             )
             return self._reject_many(
@@ -1574,7 +1583,15 @@ class BackendPluginRegistry:
             records = (
                 (self._resolve(identifier),)
                 if identifier is not None
-                else tuple(self._records.values())
+                else tuple(
+                    sorted(
+                        self._records.values(),
+                        key=lambda record: (
+                            record.registry_key,
+                            record.record_id,
+                        ),
+                    )
+                )
             )
             results = []
             for record in records:

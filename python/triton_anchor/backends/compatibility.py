@@ -74,7 +74,7 @@ class _CompatibilityEvaluation:
 
 _ERROR_FIELD_RANK = {
     "distribution metadata": 10,
-    "distribution.files": 10,
+    "distribution.files": 20,
     "wheel platform metadata": 10,
     "wheel platform tag": 10,
     "Core build provenance": 10,
@@ -108,6 +108,12 @@ _ERROR_FIELD_RANK = {
     "kernel_required_capabilities": 111,
     "requires_capabilities,kernel_required_capabilities": 110,
 }
+
+
+def _stable_exception_name(error: BaseException) -> str:
+    """Describe an exception without embedding its potentially unstable text."""
+    error_type = type(error)
+    return f"{error_type.__module__}.{error_type.__qualname__}"
 
 
 def _actual_or_unknown(value: Optional[str]) -> str:
@@ -317,11 +323,11 @@ def _distribution_wheel_tags(
         )
     try:
         wheel_text = read_text("WHEEL")
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         raise BackendPluginCompatibilityError(
             "wheel platform metadata",
             "readable WHEEL metadata",
-            f"<error: {exc}>",
+            f"<error: {_stable_exception_name(exc)}>",
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
@@ -348,11 +354,11 @@ def _distribution_wheel_tags(
         tags = set()
         for raw_tag in raw_tags:
             tags.update(parse_tag(raw_tag))
-    except Exception as exc:
+    except (TypeError, ValueError) as exc:
         raise BackendPluginCompatibilityError(
             "wheel platform metadata",
             "valid wheel Tag values",
-            f"<invalid: {exc}>",
+            f"<invalid: {_stable_exception_name(exc)}>",
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation="Rebuild the backend wheel with valid PEP 425 tags.",

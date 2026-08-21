@@ -237,6 +237,7 @@ def make_distribution(
     manifest_text: Optional[str] = None,
     files: Optional[Iterable[str]] = None,
     write_manifest_file: bool = True,
+    wheel_metadata: Optional[str] = WHEEL_METADATA,
 ) -> FakeDistribution:
     directory.mkdir(parents=True, exist_ok=True)
     plugin_list = list(plugins) if plugins is not None else [good_plugin()]
@@ -263,6 +264,7 @@ def make_distribution(
         entry_points=entry_points,
         manifest_path=manifest_path,
         files=files,
+        wheel_metadata=wheel_metadata,
     )
 
 
@@ -1352,6 +1354,248 @@ def test_registry_does_not_mask_validator_programming_errors(
     assert entry_point.load_calls == 0
 
 
+@pytest.mark.parametrize(
+    "plugin_overrides,error_type,field_or_dimension",
+    [
+        (
+            {"backend_protocol": ">=2.0,<3.0"},
+            BackendPluginProtocolError,
+            "backend_protocol",
+        ),
+        (
+            {"requires_core": ">=0.3,<0.4"},
+            BackendPluginCompatibilityError,
+            "triton-anchor Core version",
+        ),
+        (
+            {"requires_triton": {"version": ">=3.7,<3.8"}},
+            BackendPluginCompatibilityError,
+            "Triton version",
+        ),
+        (
+            {
+                "requires_triton": {
+                    "version": ">=3.6,<3.7",
+                    "commit": OTHER_COMMIT,
+                }
+            },
+            BackendPluginCompatibilityError,
+            "vendored Triton commit",
+        ),
+        (
+            {"requires_llvm_version": ">=23,<24"},
+            BackendPluginCompatibilityError,
+            "LLVM version",
+        ),
+        (
+            {"requires_llvm_commit": OTHER_COMMIT},
+            BackendPluginCompatibilityError,
+            "LLVM commit",
+        ),
+        (
+            {"requires_mlir_version": ">=23,<24"},
+            BackendPluginCompatibilityError,
+            "MLIR version",
+        ),
+        (
+            {"requires_mlir_commit": OTHER_COMMIT},
+            BackendPluginCompatibilityError,
+            "MLIR commit",
+        ),
+    ],
+    ids=(
+        "protocol",
+        "core",
+        "triton-version",
+        "triton-commit",
+        "llvm-version",
+        "llvm-commit",
+        "mlir-version",
+        "mlir-commit",
+    ),
+)
+def test_registry_reports_each_independent_compatibility_dimension(
+    tmp_path: Path,
+    plugin_overrides: Mapping[str, Any],
+    error_type: type[Exception],
+    field_or_dimension: str,
+) -> None:
+    registry, entry_point = _validation_fixture(
+        tmp_path,
+        plugin_overrides=plugin_overrides,
+    )
+    record = registry.validate()[0]
+    assert record.state is PluginLifecycleState.REJECTED
+    assert len(record.errors) == 1
+    assert isinstance(record.error, error_type)
+    diagnostic = record.error.to_dict()
+    assert (diagnostic["dimension"] or diagnostic["field"]) == field_or_dimension
+    assert diagnostic["plugin_id"] == "vendor.alpha"
+    assert diagnostic["entry_point"] == "alpha"
+    assert diagnostic["expected"]
+    assert diagnostic["actual"]
+    assert diagnostic["remediation"]
+
+    with pytest.raises(error_type):
+        registry.validate(record.record_id)
+    assert registry.diagnostics(record.record_id)["errors"] == [diagnostic]
+    assert entry_point.load_calls == 0
+
+
+def test_registry_reports_full_version_and_commit_matrix_in_total_order(
+    tmp_path: Path,
+) -> None:
+    registry, entry_point = _validation_fixture(
+        tmp_path,
+        plugin_overrides={
+            "backend_protocol": ">=2.0,<3.0",
+            "requires_core": ">=0.3,<0.4",
+            "requires_triton": {
+                "version": ">=3.7,<3.8",
+                "commit": OTHER_COMMIT,
+            },
+            "requires_llvm_version": ">=23,<24",
+            "requires_llvm_commit": OTHER_COMMIT,
+            "requires_mlir_version": ">=23,<24",
+            "requires_mlir_commit": OTHER_COMMIT,
+        },
+    )
+    record = registry.validate()[0]
+    diagnostics = [error.to_dict() for error in record.errors]
+    assert [
+        diagnostic["dimension"] or diagnostic["field"]
+        for diagnostic in diagnostics
+    ] == [
+        "backend_protocol",
+        "triton-anchor Core version",
+        "Triton version",
+        "vendored Triton commit",
+        "LLVM version",
+        "LLVM commit",
+        "MLIR version",
+        "MLIR commit",
+    ]
+    assert registry.diagnostics(record.record_id)["errors"] == diagnostics
+    with pytest.raises(BackendPluginProtocolError):
+        registry.load(record.record_id)
+    assert entry_point.load_calls == 0
+
+
+def test_registry_orders_provenance_before_inventory_and_versions(
+    tmp_path: Path,
+) -> None:
+    plugin = good_plugin(backend_protocol=">=2.0,<3.0")
+    entry_point = FakeEntryPoint("alpha", structural_plugin("alpha"))
+    distribution = make_distribution(
+        tmp_path,
+        plugins=[plugin],
+        entry_points=[entry_point],
+    )
+    registry = registry_for([distribution])
+    assert one_record(registry).state is PluginLifecycleState.DISCOVERED
+    distribution.files = None
+    distribution._wheel_metadata = None
+    record = registry.validate()[0]
+    diagnostics = [error.to_dict() for error in record.errors]
+    assert [
+        diagnostic["dimension"] or diagnostic["field"]
+        for diagnostic in diagnostics
+    ] == [
+        "wheel platform metadata",
+        "distribution.files",
+        "backend_protocol",
+    ]
+    assert all(
+        diagnostic["plugin_id"] == "vendor.alpha"
+        for diagnostic in diagnostics
+    )
+    assert all(
+        diagnostic["entry_point"] == "alpha"
+        for diagnostic in diagnostics
+    )
+    assert record.compatibility_status is PluginCompatibilityStatus.NOT_CHECKED
+    assert entry_point.load_calls == 0
+
+
+def test_registry_attributes_environment_root_error_without_unstable_repr(
+    tmp_path: Path,
+) -> None:
+    entry_point = FakeEntryPoint("alpha", structural_plugin("alpha"))
+    distribution = make_distribution(tmp_path, entry_points=[entry_point])
+
+    def unavailable_environment() -> CoreEnvironment:
+        raise RuntimeError(object())
+
+    registry = registry_for(
+        [distribution],
+        environment_provider=unavailable_environment,
+    )
+    record = registry.validate()[0]
+    diagnostic = record.error.to_dict()
+    assert diagnostic["plugin_id"] == "vendor.alpha"
+    assert diagnostic["entry_point"] == "alpha"
+    assert diagnostic["actual"] == "<error: builtins.RuntimeError>"
+    assert "0x" not in json.dumps(diagnostic, sort_keys=True)
+
+    root_diagnostic = registry.diagnostics()["registry_errors"][0]
+    assert root_diagnostic["plugin_id"] is None
+    assert root_diagnostic["entry_point"] is None
+    assert root_diagnostic["actual"] == diagnostic["actual"]
+    assert entry_point.load_calls == 0
+
+
+def test_registry_does_not_mask_wheel_parser_programming_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, entry_point = _validation_fixture(tmp_path)
+    record_id = one_record(registry).record_id
+
+    def broken_parser(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("wheel parser bug sentinel")
+
+    monkeypatch.setattr(
+        "triton_anchor.backends.compatibility.Parser.parsestr",
+        broken_parser,
+    )
+    with pytest.raises(AssertionError, match="wheel parser bug sentinel"):
+        registry.validate(record_id)
+    assert entry_point.load_calls == 0
+
+
+def test_registry_batch_diagnostics_are_sorted_by_registry_key(
+    tmp_path: Path,
+) -> None:
+    zeta = good_plugin(
+        plugin_id="vendor.zeta",
+        entry_point="zeta",
+        targets=["zeta"],
+    )
+    alpha = good_plugin(
+        plugin_id="vendor.alpha",
+        entry_point="alpha",
+        targets=["alpha"],
+    )
+    zeta_distribution = make_distribution(
+        tmp_path / "a-first",
+        name="a-first",
+        plugins=[zeta],
+    )
+    alpha_distribution = make_distribution(
+        tmp_path / "z-last",
+        name="z-last",
+        plugins=[alpha],
+    )
+    registry = registry_for([zeta_distribution, alpha_distribution])
+    assert [record.registry_key for record in registry.list()] == [
+        "vendor.zeta",
+        "vendor.alpha",
+    ]
+    assert [
+        plugin["registry_key"] for plugin in registry.diagnostics()["plugins"]
+    ] == ["vendor.alpha", "vendor.zeta"]
+
+
 def test_registry_protocol_optional_field_old_producer_gets_default() -> None:
     result = consume_protocol_field(
         object(), producer_protocol_version="1.0", consumer_protocol_version="1.1"
@@ -1888,7 +2132,7 @@ def test_registry_duplicate_plugin_id_is_fatal_before_either_import(
         tmp_path / "second", name="second", plugins=[second], entry_points=[second_ep]
     )
     registry = registry_for([second_dist, first_dist])
-    records = registry.validate()
+    registry.validate()
     report = registry.conflicts()
     duplicate = [item for item in report.fatal_conflicts if item.kind.value == "duplicate_plugin_id"]
     assert len(duplicate) == 1

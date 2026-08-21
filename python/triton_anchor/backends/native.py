@@ -138,16 +138,26 @@ def _package_path_hash(item: Any) -> Optional[str]:
     return str(value)
 
 
-def _distribution_file_map(distribution: Any) -> Mapping[str, Any]:
+def _stable_exception_name(error: BaseException) -> str:
+    error_type = type(error)
+    return f"{error_type.__module__}.{error_type.__qualname__}"
+
+
+def _distribution_file_map(
+    plugin: BackendPluginManifest,
+    distribution: Any,
+) -> Mapping[str, Any]:
     try:
         files = distribution.files
-    except Exception as exc:
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
         raise BackendPluginManifestError(
             "Cannot inspect backend native files because the wheel RECORD "
             "file list is unreadable",
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
             field="distribution.files",
             expected="readable wheel RECORD entries",
-            actual="<error: {}>".format(exc),
+            actual="<error: {}>".format(_stable_exception_name(exc)),
             remediation=(
                 "Reinstall the backend from a standards-compliant wheel with "
                 "a complete RECORD."
@@ -157,6 +167,8 @@ def _distribution_file_map(distribution: Any) -> Mapping[str, Any]:
         raise BackendPluginManifestError(
             "Cannot inspect backend native files because the wheel RECORD "
             "file list is unavailable",
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
             field="distribution.files",
             expected="readable wheel RECORD entries",
             actual="<unavailable>",
@@ -173,18 +185,24 @@ def _distribution_file_map(distribution: Any) -> Mapping[str, Any]:
                 raise BackendPluginManifestError(
                     "Backend wheel RECORD contains a duplicate path: "
                     + normalized,
+                    plugin_id=plugin.plugin_id,
+                    entry_point=plugin.entry_point,
                     field="distribution.files",
                     expected="one RECORD entry per installed path",
                     actual=normalized,
                     remediation="Rebuild the backend wheel with a valid RECORD.",
                 )
             result[normalized] = item
-    except Exception as exc:
+    except BackendPluginManifestError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
         raise BackendPluginManifestError(
             "Cannot normalize backend wheel RECORD entries",
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
             field="distribution.files",
             expected="relative POSIX package paths",
-            actual="<error: {}>".format(exc),
+            actual="<error: {}>".format(_stable_exception_name(exc)),
             remediation="Rebuild and reinstall the backend wheel.",
         ) from exc
     return result
@@ -600,7 +618,7 @@ def inspect_native_artifacts(
     ``native_in_process`` wheels must declare every native binary and each
     declaration must be verifiable from RECORD.
     """
-    file_map = _distribution_file_map(distribution)
+    file_map = _distribution_file_map(plugin, distribution)
     discovered_native = _discover_native_paths(distribution, file_map)
     declared = tuple(sorted(set(plugin.native_libraries)))
 
