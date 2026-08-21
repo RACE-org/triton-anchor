@@ -2,10 +2,11 @@
 
 - 状态：**Accepted — 推荐 bundle 已获维护者批准**
 - 日期：2026-08-20
-- 适用对象：triton-anchor Core 0.2.0、Triton 3.3.0
+- 适用对象：triton-anchor Core 0.2.0 的 Triton 3.3/3.6 分支；规范条款不依赖 Triton 专属 Python abstract surface
 - 当前版本 pin：Backend Plugin Protocol 1.0、Manifest Schema 1.0
-- 验收基线提交：`fe8f2253c365f9d8799cade6428b7efebbc9b90c`
-- 被测生产代码：`444ead1ac0b314d971dfef6f2592e5f091d38690`
+- 公共规范来源提交：`b7449445461406a9381091d389cd7d960b1cd5cb`、`c9ab004e9bbaec34e018600c81f458fe11b3df6f`
+- Triton 3.6 验收基线提交：`c4a98fd835cd46fa369e5b5c6ce4fbe200d48cf3`
+- Triton 3.6 被测生产代码：`735f9ee357e1e698e81785b002c1b39c925008af`
 - 关联追踪矩阵：`docs/adr/0001-t63-common-governance-traceability.md`
 
 > [!IMPORTANT]
@@ -81,8 +82,8 @@ provenance 才能把声明绑定到可信 builder；即便有签名，进程内�
 - 不承诺 Triton/LLVM/MLIR C++ ABI 永久稳定；
 - 不实现 native 或 subprocess backend；
 - 不修改 Protocol/Schema/Core/Triton/LLVM 版本 pin；
-- 不处理 F4 wheel 漏包、F5 Legacy 行为或 F6 Triton 3.3 abstract surface；
-- 不处理真实硬件 JIT、v3.0/v3.6 移植或 T10.2。
+- 不处理 wheel payload、Legacy 行为或任一 Triton 版本的 compiler/driver abstract surface；
+- 不处理真实硬件 JIT、其他 Triton 分支生产代码或 T10.2。
 
 ## 4. 强制系统不变量
 
@@ -194,15 +195,15 @@ evaluator。手工构造 dataclass 绕过 parser 时，所有 operational public
 
 ## 7. Backend Plugin Protocol 1.0 Python 合同
 
-本节只适用于 Manifest plugin；不改变 Legacy bypass 或 F5 行为。
+本节只适用于 Manifest plugin；不改变范围外的 Legacy bypass 行为。
 
 ### 7.1 Required runtime surface
 
 - `compiler_cls: type`
 - `driver_cls: type`
 
-两者在 entry point load 后、initialize 前验证。类型的 Triton 3.3 abstract-method
-完整性属于 F6，不在本阶段改变。
+两者在 entry point load 后、initialize 前验证。具体 Triton 分支的 abstract-method
+完整性属于版本专属验收，不在本阶段改变。
 
 ### 7.2 Optional synchronous hooks
 
@@ -517,11 +518,11 @@ D-12=deferred-separate-ADR
 structured error 与 no-import/no-dlopen/no-init/no-compile 状态门；不得加入 query symbol、
 loader helper 或版本 pin 修改。
 
-冻结 baseline JUnit 中的 177 个 testcase identity 必须全部保留。门禁直接比较 JUnit
-的 `(classname, name)` tuple，不从 XML 猜测路径式 pytest nodeid。参数化 differential/lifecycle
-测试可增加节点；最终总数为 `N` 时，只能有 F4 2 个、F5 3 个、F6 1 个 FAIL 和真实
-硬件 1 个 BLOCKED，故语义 PASS 为 `N - 7`。仅 `N == 177` 时是 170 PASS / 6 FAIL /
-1 BLOCKED。SPEC GAP 与 NOT RUN 必须为 0。
+Triton 3.6 公共 baseline JUnit 中的 157 个 testcase identity 必须全部保留。门禁直接
+比较 JUnit 的 `(classname, name)` tuple，不从 XML 猜测路径式 pytest nodeid。参数化
+differential/lifecycle 测试可增加节点；最终公共套件总数为 `N` 时必须为 `N` PASS、
+0 FAIL、0 BLOCKED、0 SPEC GAP、0 NOT RUN。版本专属、Legacy、wheel payload 和硬件
+节点不在公共分母中，另行记录，不得借其状态稀释公共结果。
 
 ## 15. 维护者批准记录
 
@@ -533,3 +534,16 @@ loader helper 或版本 pin 修改。
 - 备注/偏离：**无**
 
 本 ADR 自上述批准记录起生效。后续实现必须按 §14 的独立提交和验证边界推进。
+
+## 16. Triton 3.6 环境附录（非规范性）
+
+Triton 3.6 的独立适配事实为：Triton `3.6.0`，vendored commit
+`6cc4505027d7b39fe18a44a7f89085b8babb7400`，LLVM/MLIR commit
+`a992f29451b9e140424f35ac5e20177db4afbdc0`（fixture version `22.0.0git`）。这些 pin
+只进入 v3.6 fixture/environment，不改变 Protocol 1.0、Manifest Schema 1.0、错误顺序、
+lifecycle 或 explicit-rejection wire contract。
+
+v3.6 源码树未提供匹配的已构建 `triton._C.libtriton`，因此直接 `import triton` 的
+源码环境探针失败；公共 Registry/Schema/Native 测试不导入 Triton。该 wheel/build
+环境事实不授权复用 v3.3 wheel、LLVM build-info 或 JUnit，也不把版本专属 abstract
+surface 引入公共规范。
