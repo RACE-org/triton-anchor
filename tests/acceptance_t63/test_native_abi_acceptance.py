@@ -24,10 +24,8 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
-from packaging.tags import Tag
-
 import triton_anchor.backends.native as native_module
-
+from packaging.tags import Tag
 from triton_anchor.backends import (
     BACKEND_SELECTOR_ENV,
     BackendPluginCompatibilityError,
@@ -54,7 +52,6 @@ from triton_anchor.backends import (
     validate_backend_plugin,
     validate_triton_requirement,
 )
-
 
 TRITON_COMMIT = "6cc4505027d7b39fe18a44a7f89085b8babb7400"
 LLVM_COMMIT = "a992f29451b9e140424f35ac5e20177db4afbdc0"
@@ -140,8 +137,7 @@ def _compile_shared(
     output.parent.mkdir(parents=True, exist_ok=True)
     source = output.with_suffix(".c")
     source.write_text(
-        "__attribute__((visibility(\"default\"))) "
-        f"int {symbol}(void) {{ return 63; }}\n",
+        f'__attribute__((visibility("default"))) int {symbol}(void) {{ return 63; }}\n',
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -228,9 +224,7 @@ def _native_plugin(
         entry_point=entry_point,
         backend_protocol=">=1.0,<2.0",
         requires_core=">=0.2,<0.3",
-        requires_triton=TritonRequirement(
-            version=">=3.6,<3.7", commit=TRITON_COMMIT
-        ),
+        requires_triton=TritonRequirement(version=">=3.6,<3.7", commit=TRITON_COMMIT),
         requires_llvm_version=">=22,<23",
         requires_llvm_commit=LLVM_COMMIT,
         requires_mlir_version=">=22,<23",
@@ -308,7 +302,9 @@ def _distribution(
     _compile_shared(tmp_path, relative=relative, symbol=symbol, soname=soname)
     entry_point = entry_point or FakeEntryPoint(
         "native",
-        SimpleNamespace(compiler_cls=type("Compiler", (), {}), driver_cls=type("Driver", (), {})),
+        SimpleNamespace(
+            compiler_cls=type("Compiler", (), {}), driver_cls=type("Driver", (), {})
+        ),
     )
     return FakeDistribution(
         tmp_path,
@@ -344,9 +340,7 @@ def _assert_missing_manifest_rejection(
     assert error.remediation
 
 
-def _runtime_sentinels() -> tuple[
-    dict[str, int], FakeEntryPoint, Any, type, type
-]:
+def _runtime_sentinels() -> tuple[dict[str, int], FakeEntryPoint, Any, type, type]:
     calls = {
         "construct": 0,
         "initialize": 0,
@@ -456,9 +450,7 @@ def _forged_native_record(
         state=state,
         compatibility_status=PluginCompatibilityStatus.COMPATIBLE,
         entry_point=entry_point,
-        distribution=(
-            _BombDistribution() if distribution is None else distribution
-        ),
+        distribution=(_BombDistribution() if distribution is None else distribution),
         manifest=plugin,
         compatibility_report=CompatibilityReport(
             plugin_id=plugin.plugin_id,
@@ -820,9 +812,7 @@ def test_manual_manifest_shape_cannot_bypass_operational_public_apis() -> None:
             validate_triton_requirement(plugin, _environment())
         assert caught.value.field == expected_field
 
-        calls, entry_point, preloaded, compiler_cls, driver_cls = (
-            _runtime_sentinels()
-        )
+        calls, entry_point, preloaded, compiler_cls, driver_cls = _runtime_sentinels()
         record = _forged_native_record(
             plugin,
             state=PluginLifecycleState.ACTIVE,
@@ -908,12 +898,8 @@ def test_parser_rejected_shape_cannot_be_forged_into_any_lifecycle_state() -> No
             compiler_cls=compiler_cls,
             driver_cls=driver_cls,
         )
-        diagnostics_registry = _registry_with_forged_record(
-            diagnostics_record
-        )
-        diagnostic = diagnostics_registry.diagnostics(
-            diagnostics_record.record_id
-        )
+        diagnostics_registry = _registry_with_forged_record(diagnostics_record)
+        diagnostic = diagnostics_registry.diagnostics(diagnostics_record.record_id)
         assert diagnostic["state"] == "rejected"
         assert diagnostic["plugin_diagnostics"] is None
         assert diagnostic["errors"][0]["field"] == "isolation_mode"
@@ -978,12 +964,8 @@ def test_missing_manifest_shape_cannot_be_forged_into_any_lifecycle_state() -> N
             compiler_cls=compiler_cls,
             driver_cls=driver_cls,
         )
-        diagnostics_registry = _registry_with_forged_record(
-            diagnostics_record
-        )
-        diagnostic = diagnostics_registry.diagnostics(
-            diagnostics_record.record_id
-        )
+        diagnostics_registry = _registry_with_forged_record(diagnostics_record)
+        diagnostic = diagnostics_registry.diagnostics(diagnostics_record.record_id)
         assert diagnostic["state"] == "rejected"
         assert diagnostic["plugin_diagnostics"] is None
         assert diagnostic["errors"][0]["field"] == "manifest"
@@ -1114,9 +1096,7 @@ def test_manifest_rejection_actual_is_stable_and_never_executes_repr() -> None:
         assert caught.value.actual.startswith("<invalid type: ")
         assert "0x" not in caught.value.actual
 
-        calls, entry_point, preloaded, compiler_cls, driver_cls = (
-            _runtime_sentinels()
-        )
+        calls, entry_point, preloaded, compiler_cls, driver_cls = _runtime_sentinels()
         record = _forged_native_record(
             plugin,
             state=PluginLifecycleState.ACTIVE,
@@ -1184,9 +1164,7 @@ def test_diagnostics_safely_renders_forged_record_source() -> None:
         ),
     )
     for source, expected_source in variants:
-        calls, entry_point, preloaded, compiler_cls, driver_cls = (
-            _runtime_sentinels()
-        )
+        calls, entry_point, preloaded, compiler_cls, driver_cls = _runtime_sentinels()
         record = replace(
             _forged_native_record(
                 _native_plugin(),
@@ -1269,9 +1247,7 @@ def test_standalone_selector_rejects_duck_typed_manifest_before_projection() -> 
     assert caught.value.field == "manifest"
     diagnostic = registry.diagnostics(record.record_id)
     assert diagnostic["errors"][0]["field"] == "manifest"
-    assert diagnostic["manifest"] == {
-        "type": "<invalid type: types.SimpleNamespace>"
-    }
+    assert diagnostic["manifest"] == {"type": "<invalid type: types.SimpleNamespace>"}
     assert secondary_bomb.repr_calls == 0
     assert entry_point.load_calls == 0
     assert all(value == 0 for value in calls.values())
@@ -1365,9 +1341,7 @@ def test_unsupported_sibling_does_not_poison_valid_same_target_selection() -> No
         FakeEntryPoint,
         dict[str, int],
     ]:
-        bad_calls, bad_ep, bad_object, bad_compiler, bad_driver = (
-            _runtime_sentinels()
-        )
+        bad_calls, bad_ep, bad_object, bad_compiler, bad_driver = _runtime_sentinels()
         bad_record = _forged_native_record(
             _native_plugin(),
             state=PluginLifecycleState.VALIDATED,
@@ -1704,6 +1678,7 @@ def test_triton_adapter_rechecks_manifest_before_public_mapping(
     compiler_module = ModuleType(module_name + ".compiler")
     driver_module.DriverBase = type("DriverBase", (), {})
     compiler_module.BaseBackend = type("BaseBackend", (), {})
+    compiler_module.GPUTarget = type("GPUTarget", (), {})
     monkeypatch.setitem(sys.modules, package_name, package)
     monkeypatch.setitem(sys.modules, module_name + ".driver", driver_module)
     monkeypatch.setitem(sys.modules, module_name + ".compiler", compiler_module)
@@ -1881,9 +1856,7 @@ def test_triton_adapter_rechecks_manifest_before_public_mapping(
     with pytest.raises(BackendPluginManifestError) as caught:
         adapter.activate_backend(forged_backend, target="native")
     _assert_explicit_rejection(caught.value)
-    _assert_rejected_record(
-        activate_registry.inspect(activate_record.record_id)
-    )
+    _assert_rejected_record(activate_registry.inspect(activate_record.record_id))
     assert compiler_resolution_calls == []
 
     unreadable_targets = _IterBomb()
@@ -1895,9 +1868,7 @@ def test_triton_adapter_rechecks_manifest_before_public_mapping(
         compiler_cls=compiler_cls,
         driver_cls=driver_cls,
     )
-    legacy_overlap_registry = _registry_with_forged_record(
-        legacy_overlap_record
-    )
+    legacy_overlap_registry = _registry_with_forged_record(legacy_overlap_record)
     monkeypatch.setattr(
         adapter,
         "_registry",
@@ -1925,9 +1896,7 @@ def test_triton_adapter_rechecks_manifest_before_public_mapping(
         compiler_cls=compiler_cls,
         driver_cls=driver_cls,
     )
-    parser_rejected_registry = _registry_with_forged_record(
-        parser_rejected_record
-    )
+    parser_rejected_registry = _registry_with_forged_record(parser_rejected_record)
     monkeypatch.setattr(
         adapter,
         "_registry",
@@ -2039,6 +2008,7 @@ def test_triton_adapter_rechecks_manifest_before_public_mapping(
 
     class BrokenRegistry:
         generation = 63
+        lifecycle_epoch = 7
 
         def validate(self, _record_id: str) -> Any:
             raise AssertionError("adapter registry implementation sentinel")
@@ -2146,9 +2116,7 @@ def test_two_native_plugins_duplicate_soname_and_symbol_are_fatal() -> None:
         assert diagnostic["actual"]
 
     registry = BackendPluginRegistry(distribution_provider=lambda: ())
-    registry._records = {
-        record.record_id: record for record in (second, first)
-    }
+    registry._records = {record.record_id: record for record in (second, first)}
     registry._discovered = True
     registry._reject_all_fatal_conflicts((second, first))
     rejected = {record.record_id: record for record in registry.list()}
@@ -2160,12 +2128,10 @@ def test_two_native_plugins_duplicate_soname_and_symbol_are_fatal() -> None:
         ]
         assert all(item["plugin_id"] == record.plugin_id for item in diagnostics)
         assert all(
-            item["entry_point"] == record.entry_point_name
-            for item in diagnostics
+            item["entry_point"] == record.entry_point_name for item in diagnostics
         )
         assert all(
-            item["related_record_ids"]
-            == sorted(set(rejected) - {record.record_id})
+            item["related_record_ids"] == sorted(set(rejected) - {record.record_id})
             for item in diagnostics
         )
         assert all(
@@ -2302,9 +2268,9 @@ def test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0(
         source = output.with_suffix(".cc")
         source.write_text(
             "#include <string>\n"
-            "extern \"C\" __attribute__((visibility(\"default\")))\n"
+            'extern "C" __attribute__((visibility("default")))\n'
             "unsigned long vendor_cxx_string_size(void) {\n"
-            "  return std::string(\"t63\").size();\n"
+            '  return std::string("t63").size();\n'
             "}\n",
             encoding="utf-8",
         )
@@ -2341,9 +2307,7 @@ def test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0(
             entry_point=f"native-{abi}",
             plugin_id=f"vendor.native.{abi}",
         )
-        artifacts.append(
-            inspect_native_artifacts(plugin, distribution).artifacts[0]
-        )
+        artifacts.append(inspect_native_artifacts(plugin, distribution).artifacts[0])
         with pytest.raises(BackendPluginManifestError) as caught:
             parse_manifest(manifest)
         _assert_explicit_rejection(caught.value)
@@ -2367,10 +2331,10 @@ def test_native_static_inspection_does_not_prove_dlopen_success(
     source.write_text(
         "#include <stdio.h>\n"
         "__attribute__((constructor)) static void t63_constructor(void) {\n"
-        f"  FILE *stream = fopen({json.dumps(os.fspath(marker))}, \"w\");\n"
-        "  if (stream != NULL) { fputs(\"loaded\", stream); fclose(stream); }\n"
+        f'  FILE *stream = fopen({json.dumps(os.fspath(marker))}, "w");\n'
+        '  if (stream != NULL) { fputs("loaded", stream); fclose(stream); }\n'
         "}\n"
-        "__attribute__((visibility(\"default\")))\n"
+        '__attribute__((visibility("default")))\n'
         "int vendor_t63_entry(void) { return 63; }\n",
         encoding="utf-8",
     )
