@@ -5,6 +5,34 @@ Registry are available here.  Triton's compiler and runtime driver consume
 Registry-selected records through the W9 adapter.
 """
 
+from .capabilities import (
+    CapabilityReport,
+    evaluate_capabilities,
+    evaluate_plugin_capabilities,
+    validate_capabilities,
+    validate_plugin_capabilities,
+)
+from .compatibility import (
+    CompatibilityCheck,
+    CompatibilityReport,
+    validate_backend_plugin,
+    validate_triton_requirement,
+)
+from .conflicts import (
+    Conflict,
+    ConflictKind,
+    ConflictReport,
+    ConflictSeverity,
+    detect_conflicts,
+    detect_static_conflicts,
+)
+from .environment import (
+    CORE_ABI_FINGERPRINT_SCHEMA,
+    CoreEnvironment,
+    collect_core_environment,
+    load_build_info,
+    normalize_toolchain_version,
+)
 from .errors import (
     BackendPluginCapabilityError,
     BackendPluginCompatibilityError,
@@ -15,42 +43,9 @@ from .errors import (
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
+    BackendPluginNoCandidateError,
     BackendPluginProtocolError,
     BackendPluginSelectionError,
-)
-from .capabilities import (
-    CapabilityReport,
-    evaluate_capabilities,
-    evaluate_plugin_capabilities,
-    validate_capabilities,
-    validate_plugin_capabilities,
-)
-from .conflicts import (
-    Conflict,
-    ConflictKind,
-    ConflictReport,
-    ConflictSeverity,
-    detect_conflicts,
-    detect_static_conflicts,
-)
-from .legacy import LegacyBackendPluginShim
-from .environment import (
-    CORE_ABI_FINGERPRINT_SCHEMA,
-    CoreEnvironment,
-    collect_core_environment,
-    load_build_info,
-    normalize_toolchain_version,
-)
-from .compatibility import (
-    CompatibilityCheck,
-    CompatibilityReport,
-    validate_backend_plugin,
-    validate_triton_requirement,
-)
-from .native import (
-    NativeArtifact,
-    NativeInspectionReport,
-    inspect_native_artifacts,
 )
 from .interfaces import (
     AbstractRuntimePairValidator,
@@ -59,6 +54,11 @@ from .interfaces import (
     RuntimeInterfaceSurface,
     RuntimePairValidationContext,
     RuntimePairValidationResult,
+)
+from .legacy import (
+    LegacyBackendPluginShim,
+    LegacyRuntimePair,
+    LegacyRuntimePairMaterializationContext,
 )
 from .manifest import (
     MANIFEST_FILENAME,
@@ -75,6 +75,11 @@ from .manifest import (
     require_operational_manifest,
     unsupported_isolation_mode_error,
     validate_manifest_semantics,
+)
+from .native import (
+    NativeArtifact,
+    NativeInspectionReport,
+    inspect_native_artifacts,
 )
 from .protocol import (
     BACKEND_PLUGIN_PROTOCOL_VERSION,
@@ -93,18 +98,20 @@ from .protocol import (
     consume_protocol_field,
     evaluate_protocol_field_removal,
 )
-from .selection import (
-    BACKEND_SELECTOR_ENV,
-    SelectionDecision,
-    SelectionMethod,
-    select_backend,
-    select_backend_plugin,
-)
 from .registry import (
     BackendPluginRecord,
     BackendPluginRegistry,
     backend_plugin_registry,
     get_backend_plugin_registry,
+)
+from .selection import (
+    BACKEND_SELECTOR_ENV,
+    LegacySelectionLease,
+    RuntimeSelectionLease,
+    SelectionDecision,
+    SelectionMethod,
+    select_backend,
+    select_backend_plugin,
 )
 
 __all__ = [
@@ -126,6 +133,7 @@ __all__ = [
     "BackendPluginLifecycleError",
     "BackendPluginLoadError",
     "BackendPluginManifestError",
+    "BackendPluginNoCandidateError",
     "BackendPluginProtocolError",
     "BackendPluginSelectionError",
     "BackendPluginManifest",
@@ -141,6 +149,9 @@ __all__ = [
     "CORE_ABI_FINGERPRINT_SCHEMA",
     "CoreEnvironment",
     "LegacyBackendPluginShim",
+    "LegacyRuntimePair",
+    "LegacyRuntimePairMaterializationContext",
+    "LegacySelectionLease",
     "NativeArtifact",
     "NativeInspectionReport",
     "PluginCompatibilityStatus",
@@ -155,6 +166,7 @@ __all__ = [
     "RuntimeInterfaceSurface",
     "RuntimePairValidationContext",
     "RuntimePairValidationResult",
+    "RuntimeSelectionLease",
     "SelectionDecision",
     "SelectionMethod",
     "TritonRequirement",

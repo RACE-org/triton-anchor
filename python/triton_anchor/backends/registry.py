@@ -6,6 +6,7 @@ import importlib.metadata
 import inspect
 import os
 import threading
+import weakref
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from types import CoroutineType, MappingProxyType
@@ -37,6 +38,7 @@ from .compatibility import (
 from .conflicts import ConflictReport, detect_conflicts
 from .environment import CoreEnvironment, collect_core_environment
 from .errors import (
+    BackendPluginCapabilityError,
     BackendPluginCompatibilityError,
     BackendPluginConflictError,
     BackendPluginDiscoveryError,
@@ -47,18 +49,23 @@ from .errors import (
     BackendPluginManifestError,
     BackendPluginSelectionError,
 )
+from .interfaces import (
+    BackendPluginInterfaceIssue,
+    RuntimeInterfaceMember,
+    RuntimePairValidationContext,
+    RuntimePairValidationResult,
+)
+from .legacy import (
+    LegacyBackendPluginShim,
+    LegacyRuntimePair,
+    LegacyRuntimePairMaterializationContext,
+)
 from .manifest import (
     MANIFEST_FILENAME,
     BackendPluginManifest,
     load_distribution_manifest,
     operational_record_manifest_error,
     stable_manifest_actual,
-)
-from .interfaces import (
-    BackendPluginInterfaceIssue,
-    RuntimeInterfaceMember,
-    RuntimePairValidationContext,
-    RuntimePairValidationResult,
 )
 from .native import NativeInspectionReport, inspect_native_artifacts
 from .protocol import (
@@ -67,13 +74,56 @@ from .protocol import (
     PluginSource,
     can_transition,
 )
-from .selection import SelectionDecision, select_backend
-
+from .selection import (
+    LegacySelectionLease,
+    RuntimeSelectionLease,
+    SelectionDecision,
+    SelectionMethod,
+    _capability_names,
+    _target_name,
+    select_backend,
+)
 
 _BACKEND_ENTRY_POINT_GROUP = "triton.backends"
 _PREFLIGHT_PROFILES = {"triton_version", "full"}
 _UNSET = object()
 _MISSING = object()
+
+
+@dataclass(frozen=True)
+class _LegacySelectionProposal:
+    record_id: str
+    registry_key: str
+    entry_point_name: str
+    target: str
+    generation: int
+    lifecycle_epoch: int
+    compiler_cls: type = field(repr=False, compare=False)
+    driver_cls: type = field(repr=False, compare=False)
+    registry_identity: object = field(repr=False, compare=False)
+    runtime_identity: object = field(repr=False, compare=False)
+    proposal_identity: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _RuntimeSelectionProposal:
+    record_id: str
+    registry_key: str
+    plugin_id: str
+    entry_point_name: str
+    target: str
+    generation: int
+    lifecycle_epoch: int
+    method: SelectionMethod
+    selector: Optional[str]
+    priority: int
+    candidate_record_ids: Tuple[str, ...]
+    capability_report: Optional[CapabilityReport] = field(repr=False, compare=False)
+    compiler_cls: type = field(repr=False, compare=False)
+    driver_cls: type = field(repr=False, compare=False)
+    registry_identity: object = field(repr=False, compare=False)
+    runtime_identity: object = field(repr=False, compare=False)
+    proposal_identity: object = field(repr=False, compare=False)
 
 
 def _stable_exception_name(error: BaseException) -> str:
@@ -122,12 +172,8 @@ def _run_runtime_pair_validators(
 ]:
     """Invoke trusted integration validators without masking programming bugs."""
     contract_ids = []
-    required_surface: Dict[
-        Tuple[str, str, str, str, str], RuntimeInterfaceMember
-    ] = {}
-    issues: Dict[
-        Tuple[str, str, str, str, str, str], BackendPluginInterfaceIssue
-    ] = {}
+    required_surface: Dict[Tuple[str, str, str, str, str], RuntimeInterfaceMember] = {}
+    issues: Dict[Tuple[str, str, str, str, str, str], BackendPluginInterfaceIssue] = {}
     for name, validator in validators:
         result = validator(context)
         if type(result) is CoroutineType:
@@ -148,8 +194,7 @@ def _run_runtime_pair_validators(
         ):
             raise TypeError("runtime pair validator returned an invalid surface")
         if type(result.issues) is not tuple or any(
-            type(issue) is not BackendPluginInterfaceIssue
-            for issue in result.issues
+            type(issue) is not BackendPluginInterfaceIssue for issue in result.issues
         ):
             raise TypeError("runtime pair validator returned invalid issues")
         contract_ids.append(name)
@@ -268,6 +313,7 @@ class BackendPluginRecord:
     plugin_object: Any = field(default=None, repr=False, compare=False)
     compiler_cls: Optional[type] = field(default=None, repr=False, compare=False)
     driver_cls: Optional[type] = field(default=None, repr=False, compare=False)
+    runtime_identity: Optional[object] = field(default=None, repr=False, compare=False)
     initialized: bool = False
     shutdown_called: bool = False
     selected_targets: Tuple[str, ...] = ()
@@ -304,30 +350,22 @@ class BackendPluginRecord:
             else:
                 isolation_mode = self.manifest.isolation_mode
                 manifest = {
-                    "plugin_id": _manifest_diagnostic_scalar(
-                        self.manifest.plugin_id
-                    ),
+                    "plugin_id": _manifest_diagnostic_scalar(self.manifest.plugin_id),
                     "entry_point": _manifest_diagnostic_scalar(
                         self.manifest.entry_point
                     ),
                     "backend_protocol": _manifest_diagnostic_scalar(
                         self.manifest.backend_protocol
                     ),
-                    "targets": _manifest_diagnostic_sequence(
-                        self.manifest.targets
-                    ),
+                    "targets": _manifest_diagnostic_sequence(self.manifest.targets),
                     "capabilities": _manifest_diagnostic_sequence(
                         self.manifest.capabilities
                     ),
                     "requires_capabilities": _manifest_diagnostic_sequence(
                         self.manifest.requires_capabilities
                     ),
-                    "isolation_mode": stable_manifest_actual(
-                        isolation_mode
-                    ),
-                    "priority": _manifest_diagnostic_scalar(
-                        self.manifest.priority
-                    ),
+                    "isolation_mode": stable_manifest_actual(isolation_mode),
+                    "priority": _manifest_diagnostic_scalar(self.manifest.priority),
                 }
         return {
             "record_id": self.record_id,
@@ -501,10 +539,7 @@ def _source_hint(distribution: Any) -> Optional[PluginSource]:
     if files is None:
         return None
     try:
-        if any(
-            PurePosixPath(str(item)).name == MANIFEST_FILENAME
-            for item in files
-        ):
+        if any(PurePosixPath(str(item)).name == MANIFEST_FILENAME for item in files):
             return PluginSource.MANIFEST
     except Exception:
         return None
@@ -550,9 +585,7 @@ class BackendPluginRegistry:
         self._distribution_provider = (
             distribution_provider or importlib.metadata.distributions
         )
-        self._environment_provider = (
-            environment_provider or collect_core_environment
-        )
+        self._environment_provider = environment_provider or collect_core_environment
         self._core_abi_fingerprint = core_abi_fingerprint
         self._supported_tags = (
             tuple(supported_tags) if supported_tags is not None else None
@@ -562,9 +595,7 @@ class BackendPluginRegistry:
             plugin_provided=(),
         ).core_provided
         if preflight_profile not in _PREFLIGHT_PROFILES:
-            raise ValueError(
-                "preflight_profile must be 'triton_version' or 'full'"
-            )
+            raise ValueError("preflight_profile must be 'triton_version' or 'full'")
         self._preflight_profile = preflight_profile
         self._records: Dict[str, BackendPluginRecord] = {}
         self._registry_errors: Tuple[BackendPluginError, ...] = ()
@@ -583,6 +614,16 @@ class BackendPluginRegistry:
         self._selections: Dict[str, SelectionDecision] = {}
         self._reset_hooks: list = []
         self._runtime_pair_validators: Dict[str, Callable[[Any], Any]] = {}
+        self._legacy_runtime_pair_materializer: Optional[
+            Tuple[str, Callable[[LegacyRuntimePairMaterializationContext], Any]]
+        ] = None
+        self._legacy_selection_proposals: weakref.WeakKeyDictionary[
+            LegacySelectionLease, _LegacySelectionProposal
+        ] = weakref.WeakKeyDictionary()
+        self._runtime_selection_proposals: weakref.WeakKeyDictionary[
+            RuntimeSelectionLease, _RuntimeSelectionProposal
+        ] = weakref.WeakKeyDictionary()
+        self._registry_identity = object()
         self._resetting = False
         self._lifecycle_epoch = 0
         self._generation = 0
@@ -675,11 +716,92 @@ class BackendPluginRegistry:
                 )
             self._runtime_pair_validators[name] = validator
 
+    def register_legacy_runtime_pair_materializer(
+        self,
+        name: str,
+        materializer: Callable[[LegacyRuntimePairMaterializationContext], Any],
+    ) -> None:
+        """Register the one version-owned Legacy entry-point materializer.
+
+        The hook is process-stable and identity-idempotent.  Replacing it, or
+        installing it while any plugin load/register operation is in flight,
+        could let one Legacy record observe two package-layout contracts and
+        is therefore rejected.  Reset clears materialized records but retains
+        this integration contract.
+        """
+        if type(name) is not str or not name.strip():
+            raise TypeError("Legacy runtime pair materializer name must be non-empty")
+        if not callable(materializer):
+            raise TypeError("Legacy runtime pair materializer must be callable")
+        with self._condition:
+            existing = self._legacy_runtime_pair_materializer
+            if (
+                existing is not None
+                and existing[0] == name
+                and existing[1] is materializer
+            ):
+                return
+            if existing is not None:
+                raise BackendPluginLifecycleError(
+                    "Legacy runtime pair materializer is already registered",
+                    field="legacy_runtime_pair_materializer",
+                    expected=("the original materializer name and object identity"),
+                    actual="a different materializer contract",
+                    remediation=(
+                        "Reuse the process-owned Triton Legacy materializer; "
+                        "never replace it after adapter initialization."
+                    ),
+                )
+            self._ensure_not_resetting("register_legacy_runtime_pair_materializer")
+            published_legacy = tuple(
+                sorted(
+                    record.record_id
+                    for record in self._records.values()
+                    if record.source is PluginSource.LEGACY
+                    and (
+                        record.plugin_object is not None
+                        or record.runtime_identity is not None
+                        or record.state
+                        in {
+                            PluginLifecycleState.LOADED,
+                            PluginLifecycleState.REGISTERED,
+                            PluginLifecycleState.SELECTED,
+                            PluginLifecycleState.ACTIVE,
+                        }
+                    )
+                )
+            )
+            if self._loading or self._registering or published_legacy:
+                raise BackendPluginLifecycleError(
+                    "Legacy runtime pair materializer registration is too late",
+                    field="legacy_runtime_pair_materializer",
+                    expected=(
+                        "materializer registration before plugin lifecycle "
+                        "operations or Legacy runtime publication"
+                    ),
+                    actual=(
+                        "plugin lifecycle operation in progress"
+                        if self._loading or self._registering
+                        else "Legacy runtime pair already materialized"
+                    ),
+                    remediation=(
+                        "Register the Triton Legacy materializer during adapter "
+                        "initialization, before resolving a backend."
+                    ),
+                )
+            self._legacy_runtime_pair_materializer = (name, materializer)
+
     @property
     def generation(self) -> int:
         """Return the Registry epoch used to invalidate W9 adapter snapshots."""
         with self._lock:
             return self._generation
+
+    @property
+    def lifecycle_epoch(self) -> int:
+        """Return the reset-only epoch for long-lived adapter caches."""
+        with self._lock:
+            return self._lifecycle_epoch
 
     def _get_environment(self) -> CoreEnvironment:
         if self._environment is not None:
@@ -741,9 +863,7 @@ class BackendPluginRegistry:
         compatibility_status: PluginCompatibilityStatus,
         error: Optional[BackendPluginError] = None,
     ) -> BackendPluginRecord:
-        distribution_name, distribution_version = _distribution_identity(
-            distribution
-        )
+        distribution_name, distribution_version = _distribution_identity(distribution)
         name = _entry_point_name(entry_point)
         record = BackendPluginRecord(
             record_id=self._allocate_record_id(distribution_name, name),
@@ -899,7 +1019,7 @@ class BackendPluginRegistry:
                         key=lambda ep: (
                             _entry_point_name(ep),
                             _entry_point_value(ep),
-                        )
+                        ),
                     )
                 )
                 try:
@@ -966,9 +1086,7 @@ class BackendPluginRegistry:
                         )
                     continue
 
-                manifests = {
-                    plugin.entry_point: plugin for plugin in document.plugins
-                }
+                manifests = {plugin.entry_point: plugin for plugin in document.plugins}
                 for entry_point in ordered_entry_points:
                     manifest = manifests[_entry_point_name(entry_point)]
                     self._store_record(
@@ -1158,10 +1276,15 @@ class BackendPluginRegistry:
             decision.record_id == record.record_id
             for decision in self._selections.values()
         )
-        published = selected or record.state in {
-            PluginLifecycleState.SELECTED,
-            PluginLifecycleState.ACTIVE,
-        } or bool(record.selected_targets)
+        published = (
+            selected
+            or record.state
+            in {
+                PluginLifecycleState.SELECTED,
+                PluginLifecycleState.ACTIVE,
+            }
+            or bool(record.selected_targets)
+        )
         rejected = replace(
             record,
             state=PluginLifecycleState.REJECTED,
@@ -1172,6 +1295,7 @@ class BackendPluginRegistry:
             plugin_object=None,
             compiler_cls=None,
             driver_cls=None,
+            runtime_identity=None,
             initialized=False,
             shutdown_called=False,
             selected_targets=(),
@@ -1258,10 +1382,7 @@ class BackendPluginRegistry:
             ):
                 continue
             candidate_error = error
-            if (
-                specialize_error
-                and isinstance(error, BackendPluginCompatibilityError)
-            ):
+            if specialize_error and isinstance(error, BackendPluginCompatibilityError):
                 candidate_error = BackendPluginCompatibilityError(
                     error.dimension,
                     error.expected,
@@ -1276,9 +1397,7 @@ class BackendPluginRegistry:
                 compatibility_status,
             )
 
-    def _validate_record(
-        self, record: BackendPluginRecord
-    ) -> BackendPluginRecord:
+    def _validate_record(self, record: BackendPluginRecord) -> BackendPluginRecord:
         # This precedes every state/source/profile shortcut.  A manually
         # forged VALIDATED/ACTIVE/REJECTED record is still not authorization.
         record = self._guard_operational_record(record)
@@ -1297,9 +1416,7 @@ class BackendPluginRegistry:
                 actual="<missing>",
                 remediation="Repair the backend Manifest and rediscover it.",
             )
-            return self._reject(
-                record, error, PluginCompatibilityStatus.NOT_CHECKED
-            )
+            return self._reject(record, error, PluginCompatibilityStatus.NOT_CHECKED)
 
         try:
             environment = self._get_environment()
@@ -1480,10 +1597,7 @@ class BackendPluginRegistry:
         operations: Mapping[str, Tuple[int, int, object]],
         thread_id: int,
     ) -> bool:
-        return any(
-            owner == thread_id
-            for _epoch, owner, _token in operations.values()
-        )
+        return any(owner == thread_id for _epoch, owner, _token in operations.values())
 
     def _active_wait_edge(
         self,
@@ -1493,11 +1607,7 @@ class BackendPluginRegistry:
         edge = self._waiting_on.get(waiter_thread)
         if edge is None:
             return None
-        operations = (
-            self._loading
-            if edge.operation == "load"
-            else self._registering
-        )
+        operations = self._loading if edge.operation == "load" else self._registering
         target = operations.get(edge.record_id)
         if (
             target is not None
@@ -1511,12 +1621,8 @@ class BackendPluginRegistry:
 
     @staticmethod
     def _wait_cycle_actual(edges: Iterable[_LifecycleWait]) -> str:
-        items = sorted(
-            {(edge.record_id, edge.operation) for edge in edges}
-        )
-        return ", ".join(
-            f"{operation}({record_id})" for record_id, operation in items
-        )
+        items = sorted({(edge.record_id, edge.operation) for edge in edges})
+        return ", ".join(f"{operation}({record_id})" for record_id, operation in items)
 
     def _wait_for_lifecycle_operation(
         self,
@@ -1626,9 +1732,7 @@ class BackendPluginRegistry:
     ) -> Tuple[Any, Optional[BackendPluginLifecycleError]]:
         try:
             statically_present = (
-                inspect.getattr_static(
-                    record.plugin_object, hook_name, _MISSING
-                )
+                inspect.getattr_static(record.plugin_object, hook_name, _MISSING)
                 is not _MISSING
             )
         except Exception as exc:
@@ -1682,9 +1786,7 @@ class BackendPluginRegistry:
         args: Tuple[Any, ...],
     ) -> Optional[BackendPluginLifecycleError]:
         expected = (
-            "initialize(context)"
-            if hook_name == "initialize"
-            else f"{hook_name}()"
+            "initialize(context)" if hook_name == "initialize" else f"{hook_name}()"
         )
         try:
             signature = inspect.signature(hook)
@@ -1699,9 +1801,7 @@ class BackendPluginRegistry:
                 f"Unable to inspect backend {hook_name} signature",
                 expected=expected,
                 actual=_stable_exception_actual(exc),
-                remediation=(
-                    f"Expose an introspectable valid {hook_name} signature."
-                ),
+                remediation=(f"Expose an introspectable valid {hook_name} signature."),
             )
         try:
             signature.bind(*args)
@@ -1712,9 +1812,7 @@ class BackendPluginRegistry:
                 f"Backend plugin {hook_name} hook has an incompatible signature",
                 expected=expected,
                 actual=f"callable does not accept {expected}",
-                remediation=(
-                    f"Fix the {hook_name} signature to match Protocol 1.0."
-                ),
+                remediation=(f"Fix the {hook_name} signature to match Protocol 1.0."),
             )
         return None
 
@@ -1740,9 +1838,7 @@ class BackendPluginRegistry:
                 "Backend plugin shutdown() failed",
                 expected="successful cleanup returning None",
                 actual=_stable_exception_actual(exc),
-                remediation=(
-                    "Fix shutdown() so Registry reset can release resources."
-                ),
+                remediation=("Fix shutdown() so Registry reset can release resources."),
             )
         if inspect.isawaitable(value):
             actual = _stable_type_name(value)
@@ -1794,6 +1890,25 @@ class BackendPluginRegistry:
                 }:
                     return record
 
+                legacy_materializer = None
+                if record.source is PluginSource.LEGACY:
+                    legacy_materializer = self._legacy_runtime_pair_materializer
+                    if legacy_materializer is None:
+                        raise BackendPluginLifecycleError(
+                            "Legacy backend loading has no runtime pair materializer",
+                            entry_point=record.entry_point_name,
+                            field="legacy_runtime_pair_materializer",
+                            expected=(
+                                "a version-owned Legacy materializer registered "
+                                "before first consumption"
+                            ),
+                            actual="<unregistered>",
+                            remediation=(
+                                "Initialize the Triton backend adapter before "
+                                "loading this Legacy record."
+                            ),
+                        )
+
                 operation = self._loading.get(record.record_id)
                 if operation is not None:
                     wait_epoch, owner, existing_token = operation
@@ -1837,15 +1952,71 @@ class BackendPluginRegistry:
                 # Entry-point loading and plugin construction are
                 # plugin-controlled and must run outside the Registry lock.
                 load_exception: Optional[Exception] = None
+                preserve_load_exception = False
                 try:
-                    loaded = record.entry_point.load()
-                    plugin = loaded() if isinstance(loaded, type) else loaded
+                    loaded_root = record.entry_point.load()
                 except _BackendPluginWaitCycleError as exc:
                     load_exception = exc.for_record(record)
+                    preserve_load_exception = True
                     plugin = None
                 except Exception as exc:
                     load_exception = exc
                     plugin = None
+                else:
+                    if legacy_materializer is None:
+                        plugin = (
+                            loaded_root()
+                            if isinstance(loaded_root, type)
+                            else loaded_root
+                        )
+                    else:
+                        _materializer_name, materializer = legacy_materializer
+                        context = LegacyRuntimePairMaterializationContext(
+                            record_id=record.record_id,
+                            entry_point_name=record.entry_point_name,
+                            entry_point_value=record.entry_point_value,
+                            loaded_root=loaded_root,
+                        )
+                        try:
+                            runtime_pair = materializer(context)
+                        except _BackendPluginWaitCycleError as exc:
+                            load_exception = exc.for_record(record)
+                            preserve_load_exception = True
+                            plugin = None
+                        except AssertionError:
+                            # The materializer is trusted adapter code. Keep
+                            # programming assertions authoritative; the outer
+                            # BaseException-safe finally still releases the
+                            # load token and all waiters.
+                            raise
+                        except BackendPluginError as exc:
+                            # A version adapter may provide a more precise
+                            # materialization/import diagnostic. Preserve that
+                            # public contract instead of hiding it behind the
+                            # generic entry-point load error.
+                            load_exception = exc
+                            preserve_load_exception = True
+                            plugin = None
+                        except Exception as exc:
+                            load_exception = exc
+                            plugin = None
+                        else:
+                            if inspect.isawaitable(runtime_pair):
+                                _close_unawaited(runtime_pair)
+                                raise TypeError(
+                                    "Legacy runtime pair materializer must be "
+                                    "synchronous"
+                                )
+                            if type(runtime_pair) is not LegacyRuntimePair:
+                                raise TypeError(
+                                    "Legacy runtime pair materializer must return "
+                                    "an exact LegacyRuntimePair"
+                                )
+                            plugin = LegacyBackendPluginShim.from_runtime_pair(
+                                record.entry_point_name,
+                                runtime_pair,
+                                loaded_root,
+                            )
 
                 with self._condition:
                     stale = (
@@ -1864,10 +2035,7 @@ class BackendPluginRegistry:
                     elif load_exception is not None:
                         error = (
                             load_exception
-                            if isinstance(
-                                load_exception,
-                                _BackendPluginWaitCycleError,
-                            )
+                            if preserve_load_exception
                             else BackendPluginLoadError(
                                 f"Failed to load backend plugin "
                                 f"'{record.registry_key}'",
@@ -1875,9 +2043,7 @@ class BackendPluginRegistry:
                                 entry_point=record.entry_point_name,
                                 field="entry_point.load",
                                 expected="a loadable backend plugin object",
-                                actual=_stable_exception_actual(
-                                    load_exception
-                                ),
+                                actual=_stable_exception_actual(load_exception),
                                 remediation=(
                                     "Fix the backend Python package or native "
                                     "dependencies and reinstall it."
@@ -1913,16 +2079,11 @@ class BackendPluginRegistry:
                                 )
                             )
                             error = None
-                    self._finish_operation(
-                        self._loading, record.record_id, token
-                    )
+                    self._finish_operation(self._loading, record.record_id, token)
                     operation_finished = True
 
                 if error is not None:
-                    if (
-                        load_exception is not None
-                        and error is not load_exception
-                    ):
+                    if load_exception is not None and error is not load_exception:
                         raise error from load_exception
                     raise error
                 return result
@@ -1931,9 +2092,7 @@ class BackendPluginRegistry:
                 # BaseException or error normalization itself fails.
                 if not operation_finished:
                     with self._condition:
-                        self._finish_operation(
-                            self._loading, record.record_id, token
-                        )
+                        self._finish_operation(self._loading, record.record_id, token)
 
     def register(
         self,
@@ -2029,6 +2188,25 @@ class BackendPluginRegistry:
                     self._reject(record, error, record.compatibility_status)
                     raise error
 
+                if (
+                    record.source is PluginSource.LEGACY
+                    and not self._runtime_pair_validators
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Legacy runtime pair has no registered interface contract",
+                        entry_point=record.entry_point_name,
+                        field="runtime_pair_validator",
+                        expected=(
+                            "a version-owned runtime interface validator before "
+                            "Legacy registration"
+                        ),
+                        actual="<unregistered>",
+                        remediation=(
+                            "Register the current Triton abstract runtime surface "
+                            "before preparing a Legacy selection."
+                        ),
+                    )
+
                 self._transition(record, PluginLifecycleState.REGISTERED)
                 epoch = self._lifecycle_epoch
                 initialization_context = MappingProxyType(
@@ -2056,9 +2234,7 @@ class BackendPluginRegistry:
                 field_errors: Dict[str, str] = {}
                 for name in ("compiler_cls", "driver_cls"):
                     try:
-                        values[name] = getattr(
-                            record.plugin_object, name, _MISSING
-                        )
+                        values[name] = getattr(record.plugin_object, name, _MISSING)
                     except Exception as exc:
                         values[name] = _MISSING
                         field_errors[name] = _stable_exception_actual(exc)
@@ -2131,20 +2307,13 @@ class BackendPluginRegistry:
                                 epoch,
                                 self._lifecycle_epoch,
                             )
-                            self._finish_operation(
-                                self._registering, record_id, token
-                            )
+                            self._finish_operation(self._registering, record_id, token)
                             operation_finished = True
                     if validation_stale:
                         raise stale_error
 
-                if (
-                    primary_error is None
-                    and record.source is PluginSource.MANIFEST
-                ):
-                    initializer, primary_error = self._read_hook(
-                        record, "initialize"
-                    )
+                if primary_error is None and record.source is PluginSource.MANIFEST:
+                    initializer, primary_error = self._read_hook(record, "initialize")
                     if primary_error is None and initializer is not _MISSING:
                         primary_error = self._bind_hook(
                             record,
@@ -2155,9 +2324,7 @@ class BackendPluginRegistry:
                     if primary_error is None and initializer is not _MISSING:
                         initializer_invoked = True
                         try:
-                            initialize_result = initializer(
-                                initialization_context
-                            )
+                            initialize_result = initializer(initialization_context)
                         except _BackendPluginWaitCycleError as exc:
                             primary_error = exc.for_record(record)
                         except Exception as exc:
@@ -2165,9 +2332,7 @@ class BackendPluginRegistry:
                                 record,
                                 "initialize",
                                 "Backend plugin initialize() failed",
-                                expected=(
-                                    "successful initialization returning None"
-                                ),
+                                expected=("successful initialization returning None"),
                                 actual=_stable_exception_actual(exc),
                                 remediation=(
                                     "Fix initialize(), release partial resources, "
@@ -2207,14 +2372,11 @@ class BackendPluginRegistry:
                             else:
                                 initialized = True
                     if primary_error is not None and initializer_invoked:
-                        cleanup_called, cleanup_error = self._call_shutdown(
-                            record
-                        )
+                        cleanup_called, cleanup_error = self._call_shutdown(record)
 
                 with self._condition:
                     stale = (
-                        epoch != self._lifecycle_epoch
-                        or record_id not in self._records
+                        epoch != self._lifecycle_epoch or record_id not in self._records
                     )
                     if not stale:
                         # Validity and publication are one atomic Registry
@@ -2246,15 +2408,14 @@ class BackendPluginRegistry:
                                     state=PluginLifecycleState.REGISTERED,
                                     compiler_cls=values["compiler_cls"],
                                     driver_cls=values["driver_cls"],
+                                    runtime_identity=object(),
                                     initialized=initialized,
                                 )
                             )
                             if result.source is PluginSource.MANIFEST:
                                 self._cleanup_stack.append(result)
                             error = None
-                        self._finish_operation(
-                            self._registering, record_id, token
-                        )
+                        self._finish_operation(self._registering, record_id, token)
                         operation_finished = True
 
                 if not stale:
@@ -2278,9 +2439,7 @@ class BackendPluginRegistry:
                     )
                     if cleanup_error is not None and self._resetting:
                         self._reset_operation_errors.append(cleanup_error)
-                    self._finish_operation(
-                        self._registering, record_id, token
-                    )
+                    self._finish_operation(self._registering, record_id, token)
                     operation_finished = True
 
                 raise error
@@ -2289,9 +2448,944 @@ class BackendPluginRegistry:
                 # strand concurrent callers or make reset wait forever.
                 if not operation_finished:
                     with self._condition:
-                        self._finish_operation(
-                            self._registering, record_id, token
+                        self._finish_operation(self._registering, record_id, token)
+
+    def prepare_runtime_selection(
+        self,
+        target: Any,
+        *,
+        kernel_required_capabilities: Iterable[str] = (),
+        explicit_selector: Optional[str] = None,
+        environment: Optional[Mapping[str, str]] = None,
+    ) -> RuntimeSelectionLease:
+        """Load/register one static Manifest winner without publishing it."""
+        with self._condition:
+            self._ensure_not_resetting("prepare_runtime_selection")
+            records = self.validate()
+            operational_records = tuple(
+                record
+                for record in records
+                if operational_record_manifest_error(record) is None
+            )
+            self._reject_all_fatal_conflicts(operational_records)
+            decision = select_backend(
+                records,
+                target=target,
+                kernel_required_capabilities=kernel_required_capabilities,
+                core_provided_capabilities=self._core_capabilities,
+                explicit_selector=explicit_selector,
+                environment=os.environ if environment is None else environment,
+            )
+            if decision.is_legacy:
+                raise BackendPluginSelectionError(
+                    "Manifest runtime preparation cannot consume Legacy",
+                    entry_point=decision.entry_point_name,
+                    field="source",
+                    expected=PluginSource.MANIFEST.value,
+                    actual=PluginSource.LEGACY.value,
+                    remediation=(
+                        "Use prepare_legacy_selection() and the version adapter "
+                        "probe before publishing Legacy."
+                    ),
+                )
+            previous_decision = self._selections.get(decision.target)
+            if (
+                previous_decision is not None
+                and previous_decision.record_id != decision.record_id
+            ):
+                previous = self._records.get(previous_decision.record_id)
+                if (
+                    previous is not None
+                    and previous.state is PluginLifecycleState.ACTIVE
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Cannot replace an ACTIVE runtime selection",
+                        plugin_id=previous.plugin_id,
+                        entry_point=previous.entry_point_name,
+                        field="active selection",
+                        expected=previous.record_id,
+                        actual=decision.record_id,
+                        remediation="Reset runtime state before switching plugins.",
+                    )
+            generation = self._generation
+            lifecycle_epoch = self._lifecycle_epoch
+
+        registered = self.register(decision.record_id)
+
+        with self._condition:
+            self._ensure_not_resetting("prepare_runtime_selection")
+            current = self._records.get(decision.record_id)
+            current_selection = self._selections.get(decision.target)
+            if (
+                lifecycle_epoch != self._lifecycle_epoch
+                or current is None
+                or (
+                    generation != self._generation
+                    and current_selection is not None
+                    and current_selection.record_id != decision.record_id
+                )
+            ):
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime proposal became stale during registration",
+                    plugin_id=decision.plugin_id,
+                    entry_point=decision.entry_point_name,
+                    field="registry generation",
+                    expected=(
+                        f"generation={generation}; lifecycle_epoch={lifecycle_epoch}"
+                    ),
+                    actual=(
+                        f"generation={self._generation}; "
+                        f"lifecycle_epoch={self._lifecycle_epoch}"
+                    ),
+                    remediation="Retry runtime preparation after reset completes.",
+                )
+            if current.runtime_identity is not registered.runtime_identity:
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime identity changed during preparation",
+                    plugin_id=current.plugin_id,
+                    entry_point=current.entry_point_name,
+                    field="runtime_identity",
+                    expected="the registered runtime pair incarnation",
+                    actual="a different runtime pair incarnation",
+                    remediation="Retry static runtime preparation.",
+                )
+            if (
+                current.source is not PluginSource.MANIFEST
+                or current.compatibility_status
+                is not PluginCompatibilityStatus.COMPATIBLE
+                or current.runtime_identity is None
+                or current.compiler_cls is None
+                or current.driver_cls is None
+                or current.plugin_id is None
+            ):
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime pair is not registered and compatible",
+                    plugin_id=current.plugin_id,
+                    entry_point=current.entry_point_name,
+                    field="state",
+                    expected="a compatible registered Manifest runtime pair",
+                    actual=current.state.value,
+                    remediation="Resolve Manifest validation diagnostics first.",
+                )
+            proposal_identity = object()
+            lease = RuntimeSelectionLease(
+                record_id=current.record_id,
+                registry_key=current.registry_key,
+                plugin_id=current.plugin_id,
+                entry_point_name=current.entry_point_name,
+                target=decision.target,
+                generation=self._generation,
+                lifecycle_epoch=self._lifecycle_epoch,
+                method=decision.method,
+                selector=decision.selector,
+                priority=decision.priority,
+                candidate_record_ids=decision.candidate_record_ids,
+                capability_report=decision.capability_report,
+                compiler_cls=current.compiler_cls,
+                driver_cls=current.driver_cls,
+                _registry_identity=self._registry_identity,
+                _runtime_identity=current.runtime_identity,
+                _proposal_identity=proposal_identity,
+            )
+            self._runtime_selection_proposals[lease] = _RuntimeSelectionProposal(
+                record_id=lease.record_id,
+                registry_key=lease.registry_key,
+                plugin_id=lease.plugin_id,
+                entry_point_name=lease.entry_point_name,
+                target=lease.target,
+                generation=lease.generation,
+                lifecycle_epoch=lease.lifecycle_epoch,
+                method=lease.method,
+                selector=lease.selector,
+                priority=lease.priority,
+                candidate_record_ids=lease.candidate_record_ids,
+                capability_report=lease.capability_report,
+                compiler_cls=lease.compiler_cls,
+                driver_cls=lease.driver_cls,
+                registry_identity=lease._registry_identity,
+                runtime_identity=lease._runtime_identity,
+                proposal_identity=lease._proposal_identity,
+            )
+            return lease
+
+    def commit_runtime_selection(
+        self,
+        lease: RuntimeSelectionLease,
+        *,
+        activate: bool = False,
+    ) -> SelectionDecision:
+        """CAS-publish a probed Manifest runtime proposal."""
+        if type(lease) is not RuntimeSelectionLease:
+            raise TypeError("lease must be an exact RuntimeSelectionLease")
+        if type(activate) is not bool:
+            raise TypeError("activate must be a bool")
+        with self._condition:
+            self._ensure_not_resetting("commit_runtime_selection")
+            if lease._registry_identity is not self._registry_identity:
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime lease belongs to another Registry",
+                    plugin_id=lease.plugin_id,
+                    entry_point=lease.entry_point_name,
+                    field="registry",
+                    expected="the preparing Registry instance",
+                    actual="a foreign Registry lease",
+                )
+            proposal = self._runtime_selection_proposals.pop(lease, None)
+            if proposal is None:
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime lease is not an exact Registry proposal",
+                    plugin_id=lease.plugin_id,
+                    entry_point=lease.entry_point_name,
+                    field="runtime selection proposal",
+                    expected="the exact lease object returned by this Registry",
+                    actual="a copied, changed, consumed, or unknown proposal",
+                    remediation="Prepare a fresh runtime lease without copying it.",
+                )
+            if (
+                lease.record_id != proposal.record_id
+                or lease.registry_key != proposal.registry_key
+                or lease.plugin_id != proposal.plugin_id
+                or lease.entry_point_name != proposal.entry_point_name
+                or lease.target != proposal.target
+                or lease.generation != proposal.generation
+                or lease.lifecycle_epoch != proposal.lifecycle_epoch
+                or lease.method is not proposal.method
+                or lease.selector != proposal.selector
+                or lease.priority != proposal.priority
+                or lease.candidate_record_ids != proposal.candidate_record_ids
+                or lease.capability_report is not proposal.capability_report
+                or lease.compiler_cls is not proposal.compiler_cls
+                or lease.driver_cls is not proposal.driver_cls
+                or lease._registry_identity is not proposal.registry_identity
+                or lease._runtime_identity is not proposal.runtime_identity
+                or lease._proposal_identity is not proposal.proposal_identity
+            ):
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime lease fields changed after preparation",
+                    plugin_id=proposal.plugin_id,
+                    entry_point=proposal.entry_point_name,
+                    field="runtime selection proposal",
+                    expected="the immutable Registry-owned proposal snapshot",
+                    actual="one or more lease fields changed",
+                    remediation="Discard the changed lease and prepare again.",
+                )
+            if proposal.lifecycle_epoch != self._lifecycle_epoch:
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime lease is stale",
+                    plugin_id=proposal.plugin_id,
+                    entry_point=proposal.entry_point_name,
+                    field="registry generation",
+                    expected=(
+                        f"generation={proposal.generation}; "
+                        f"lifecycle_epoch={proposal.lifecycle_epoch}"
+                    ),
+                    actual=(
+                        f"generation={self._generation}; "
+                        f"lifecycle_epoch={self._lifecycle_epoch}"
+                    ),
+                    remediation="Discard the probed result and prepare again.",
+                )
+            record = self._records.get(proposal.record_id)
+            if record is None or (
+                record.source is not PluginSource.MANIFEST
+                or record.compatibility_status
+                is not PluginCompatibilityStatus.COMPATIBLE
+                or record.runtime_identity is not proposal.runtime_identity
+                or record.compiler_cls is not proposal.compiler_cls
+                or record.driver_cls is not proposal.driver_cls
+            ):
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime lease identity changed",
+                    plugin_id=proposal.plugin_id,
+                    entry_point=proposal.entry_point_name,
+                    field="runtime_identity",
+                    expected="the exact prepared Manifest runtime pair",
+                    actual="missing or changed",
+                    remediation="Prepare a fresh runtime lease.",
+                )
+
+            existing = self._selections.get(proposal.target)
+            same_record_published = (
+                record.state
+                in {
+                    PluginLifecycleState.SELECTED,
+                    PluginLifecycleState.ACTIVE,
+                }
+                and bool(record.selected_targets)
+                and (existing is None or existing.record_id == record.record_id)
+            )
+            if proposal.generation != self._generation and not same_record_published:
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime lease is stale",
+                    plugin_id=proposal.plugin_id,
+                    entry_point=proposal.entry_point_name,
+                    field="registry generation",
+                    expected=(
+                        f"generation={proposal.generation}; "
+                        f"lifecycle_epoch={proposal.lifecycle_epoch}"
+                    ),
+                    actual=(
+                        f"generation={self._generation}; "
+                        f"lifecycle_epoch={self._lifecycle_epoch}"
+                    ),
+                    remediation="Discard the probed result and prepare again.",
+                )
+            if existing is not None and existing.record_id == proposal.record_id:
+                if (
+                    proposal.target not in record.selected_targets
+                    or record.state
+                    not in {
+                        PluginLifecycleState.SELECTED,
+                        PluginLifecycleState.ACTIVE,
+                    }
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Existing Manifest selection has inconsistent state",
+                        plugin_id=record.plugin_id,
+                        entry_point=record.entry_point_name,
+                        field="selected_targets",
+                        expected=proposal.target,
+                        actual=", ".join(record.selected_targets) or "<none>",
+                        remediation="Reset and prepare a fresh runtime selection.",
+                    )
+                if activate and record.state is PluginLifecycleState.SELECTED:
+                    conflict = self._legacy_activation_conflict(record)
+                    if conflict is not None:
+                        raise conflict
+                    self._transition(record, PluginLifecycleState.ACTIVE)
+                    record = self._replace(
+                        replace(record, state=PluginLifecycleState.ACTIVE)
+                    )
+                    existing = replace(existing, record=record)
+                    self._selections[proposal.target] = existing
+                return self._selections[proposal.target]
+
+            previous = None
+            previous_replacement = None
+            if existing is not None:
+                previous = self._records.get(existing.record_id)
+                if (
+                    previous is not None
+                    and previous.state is PluginLifecycleState.ACTIVE
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Cannot replace an ACTIVE runtime selection",
+                        plugin_id=previous.plugin_id,
+                        entry_point=previous.entry_point_name,
+                        field="active selection",
+                        expected=previous.record_id,
+                        actual=record.record_id,
+                        remediation="Reset runtime state before switching plugins.",
+                    )
+                if previous is not None:
+                    remaining_targets = tuple(
+                        target
+                        for target in previous.selected_targets
+                        if target != proposal.target
+                    )
+                    previous_state = previous.state
+                    if (
+                        previous_state is PluginLifecycleState.SELECTED
+                        and not remaining_targets
+                    ):
+                        self._transition(previous, PluginLifecycleState.REGISTERED)
+                        previous_state = PluginLifecycleState.REGISTERED
+                    previous_replacement = replace(
+                        previous,
+                        state=previous_state,
+                        selected_targets=remaining_targets,
+                    )
+
+            if activate:
+                conflict = self._legacy_activation_conflict(record)
+                if conflict is not None:
+                    raise conflict
+            selected = record
+            if selected.state is PluginLifecycleState.REGISTERED:
+                self._transition(selected, PluginLifecycleState.SELECTED)
+                selected = replace(selected, state=PluginLifecycleState.SELECTED)
+            if activate and selected.state is PluginLifecycleState.SELECTED:
+                self._transition(selected, PluginLifecycleState.ACTIVE)
+                selected = replace(selected, state=PluginLifecycleState.ACTIVE)
+            if selected.state not in {
+                PluginLifecycleState.SELECTED,
+                PluginLifecycleState.ACTIVE,
+            }:
+                raise BackendPluginLifecycleError(
+                    "Manifest runtime record is not selectable",
+                    plugin_id=selected.plugin_id,
+                    entry_point=selected.entry_point_name,
+                    field="state",
+                    expected="registered, selected, or active",
+                    actual=selected.state.value,
+                )
+            # Every operation that can reject the proposal has completed.
+            # The remaining replacements and decision write are no-fail
+            # mutations under the Registry Condition, so callers never see a
+            # half-removed previous selection after a failed commit.
+            if previous_replacement is not None:
+                self._replace(previous_replacement)
+            selected = self._replace(
+                replace(
+                    selected,
+                    selected_targets=tuple(
+                        sorted(set(selected.selected_targets).union({proposal.target}))
+                    ),
+                )
+            )
+            decision = SelectionDecision(
+                record_id=selected.record_id,
+                registry_key=selected.registry_key,
+                plugin_id=selected.plugin_id,
+                entry_point_name=selected.entry_point_name,
+                target=proposal.target,
+                method=proposal.method,
+                selector=proposal.selector,
+                priority=proposal.priority,
+                is_legacy=False,
+                candidate_record_ids=proposal.candidate_record_ids,
+                capability_report=proposal.capability_report,
+                record=selected,
+            )
+            self._selections[proposal.target] = decision
+            self._generation += 1
+            return decision
+
+    def prepare_legacy_selection(
+        self,
+        record_id: str,
+        target: Any,
+        *,
+        kernel_required_capabilities: Iterable[str] = (),
+    ) -> LegacySelectionLease:
+        """Register/F6-gate one exact Legacy record and return a CAS lease.
+
+        Target interpretation remains version-neutral: strings, mappings, and
+        target objects exposing ``backend`` use the same normalization as W8.
+        A non-empty kernel capability request fails before discovery, loading,
+        or materialization because Legacy records have no verified capability
+        declaration.
+        """
+        target_name = _target_name(target)
+        required_capabilities = _capability_names(
+            kernel_required_capabilities,
+            "kernel_required_capabilities",
+        )
+        if required_capabilities:
+            raise BackendPluginCapabilityError(
+                required_capabilities,
+                scope="kernel",
+                available_capabilities=(),
+                missing_kernel_capabilities=required_capabilities,
+            )
+        if (
+            type(record_id) is not str
+            or not record_id
+            or record_id != record_id.strip()
+        ):
+            raise BackendPluginSelectionError(
+                "Legacy selection requires an exact non-empty record_id",
+                field="record_id",
+                expected="an exact Legacy record_id from Registry.list()",
+                actual=(
+                    record_id
+                    if type(record_id) is str
+                    else _stable_type_name(record_id)
+                ),
+                remediation=(
+                    "Enumerate metadata-only Registry records and pass the exact "
+                    "Legacy record_id."
+                ),
+            )
+
+        with self._condition:
+            self._ensure_not_resetting("prepare_legacy_selection")
+            self.discover()
+            record = self._records.get(record_id)
+            if record is None:
+                raise BackendPluginSelectionError(
+                    f"Unknown Legacy backend record '{record_id}'",
+                    field="record_id",
+                    expected="an exact Legacy record_id from Registry.list()",
+                    actual=record_id,
+                    remediation=(
+                        "Rediscover backends and use the exact record_id; registry "
+                        "keys and entry-point names are not accepted here."
+                    ),
+                )
+            record = self._guard_operational_record(record)
+            if record.state is PluginLifecycleState.REJECTED:
+                if record.error is not None:
+                    raise record.error
+                raise BackendPluginLifecycleError(
+                    "Rejected Legacy backend cannot be prepared",
+                    entry_point=record.entry_point_name,
+                    field="state",
+                    expected="a discovered Legacy record",
+                    actual=record.state.value,
+                )
+            if record.source is not PluginSource.LEGACY:
+                raise BackendPluginSelectionError(
+                    "Legacy selection lease requires a Legacy record",
+                    plugin_id=record.plugin_id,
+                    entry_point=record.entry_point_name,
+                    field="source",
+                    expected=PluginSource.LEGACY.value,
+                    actual=_source_diagnostic_value(record.source),
+                    remediation=(
+                        "Use Registry.select() for Manifest records and reserve "
+                        "this API for governed Legacy fallback."
+                    ),
+                )
+
+        # Entry-point import, materialization, F6 validation, and any trusted
+        # integration code run through load/register outside this caller's
+        # lock scope.  register() owns its own short publication sections.
+        registered = self.register(record_id)
+
+        with self._condition:
+            self._ensure_not_resetting("prepare_legacy_selection")
+            current = self._records.get(record_id)
+            if current is None:
+                raise self._stale_operation_error(
+                    registered,
+                    "prepare Legacy selection",
+                    max(0, self._lifecycle_epoch - 1),
+                    self._lifecycle_epoch,
+                )
+            if (
+                current.source is not PluginSource.LEGACY
+                or current.compatibility_status
+                is not PluginCompatibilityStatus.LEGACY_UNVERIFIED
+            ):
+                raise BackendPluginLifecycleError(
+                    "Legacy runtime pair lost its unverified source identity",
+                    plugin_id=current.plugin_id,
+                    entry_point=current.entry_point_name,
+                    field="compatibility_status",
+                    expected=PluginCompatibilityStatus.LEGACY_UNVERIFIED.value,
+                    actual=current.compatibility_status.value,
+                    remediation=(
+                        "Reset and rediscover the exact Legacy distribution; do "
+                        "not synthesize Manifest compatibility for fallback."
+                    ),
+                )
+            if (
+                current.state
+                not in {
+                    PluginLifecycleState.REGISTERED,
+                    PluginLifecycleState.SELECTED,
+                    PluginLifecycleState.ACTIVE,
+                }
+                or current.runtime_identity is None
+                or current.compiler_cls is None
+                or current.driver_cls is None
+            ):
+                raise BackendPluginLifecycleError(
+                    "Legacy runtime pair is not registered",
+                    entry_point=current.entry_point_name,
+                    field="state",
+                    expected="registered, selected, or active after F6",
+                    actual=current.state.value,
+                    remediation="Retry the exact Legacy record registration.",
+                )
+            proposal_identity = object()
+            lease = LegacySelectionLease(
+                record_id=current.record_id,
+                registry_key=current.registry_key,
+                entry_point_name=current.entry_point_name,
+                target=target_name,
+                generation=self._generation,
+                lifecycle_epoch=self._lifecycle_epoch,
+                compiler_cls=current.compiler_cls,
+                driver_cls=current.driver_cls,
+                _registry_identity=self._registry_identity,
+                _runtime_identity=current.runtime_identity,
+                _proposal_identity=proposal_identity,
+            )
+            self._legacy_selection_proposals[lease] = _LegacySelectionProposal(
+                record_id=lease.record_id,
+                registry_key=lease.registry_key,
+                entry_point_name=lease.entry_point_name,
+                target=lease.target,
+                generation=lease.generation,
+                lifecycle_epoch=lease.lifecycle_epoch,
+                compiler_cls=lease.compiler_cls,
+                driver_cls=lease.driver_cls,
+                registry_identity=lease._registry_identity,
+                runtime_identity=lease._runtime_identity,
+                proposal_identity=lease._proposal_identity,
+            )
+            return lease
+
+    @staticmethod
+    def _legacy_selection_stale_error(
+        lease: LegacySelectionLease,
+        *,
+        actual_generation: int,
+        actual_lifecycle_epoch: int,
+    ) -> BackendPluginLifecycleError:
+        return BackendPluginLifecycleError(
+            "Legacy selection lease is stale",
+            entry_point=lease.entry_point_name,
+            field="generation",
+            expected=(
+                f"generation={lease.generation}; "
+                f"lifecycle_epoch={lease.lifecycle_epoch}"
+            ),
+            actual=(
+                f"generation={actual_generation}; "
+                f"lifecycle_epoch={actual_lifecycle_epoch}"
+            ),
+            remediation=(
+                "Discard the probed result and prepare a new lease after the "
+                "current Registry reset/selection operation completes."
+            ),
+        )
+
+    def _legacy_activation_conflict(
+        self,
+        record: BackendPluginRecord,
+    ) -> Optional[BackendPluginConflictError]:
+        active_ids = tuple(
+            sorted(
+                candidate.record_id
+                for candidate in self._records.values()
+                if candidate.record_id != record.record_id
+                and candidate.state is PluginLifecycleState.ACTIVE
+            )
+        )
+        if not active_ids:
+            return None
+        related = active_ids + (record.record_id,)
+        return BackendPluginConflictError(
+            "Cannot activate more than one backend plugin: " + ", ".join(related),
+            entry_point=record.entry_point_name,
+            field="active",
+            expected="one ACTIVE backend plugin",
+            actual=", ".join(related),
+            conflict_kind="legacy_runtime_selection",
+            related_record_ids=active_ids,
+            remediation=(
+                "Keep the current active record or reset runtime state before "
+                "committing a different Legacy driver."
+            ),
+        )
+
+    def _legacy_runtime_owner_conflict(
+        self,
+        record: BackendPluginRecord,
+    ) -> Optional[BackendPluginConflictError]:
+        owner_ids = tuple(
+            sorted(
+                candidate.record_id
+                for candidate in self._records.values()
+                if candidate.record_id != record.record_id
+                and candidate.source is PluginSource.LEGACY
+                and candidate.state
+                in {
+                    PluginLifecycleState.SELECTED,
+                    PluginLifecycleState.ACTIVE,
+                }
+                and bool(candidate.selected_targets)
+            )
+        )
+        if not owner_ids:
+            return None
+        related = owner_ids + (record.record_id,)
+        return BackendPluginConflictError(
+            "A different governed Legacy runtime pair is already published: "
+            + ", ".join(related),
+            plugin_id=record.plugin_id,
+            entry_point=record.entry_point_name,
+            field="compiler_cls,driver_cls",
+            expected="one process-wide governed Legacy runtime pair",
+            actual=", ".join(related),
+            conflict_kind="legacy_runtime_selection",
+            related_record_ids=related,
+            remediation=(
+                "Reuse the published Legacy record for every target, or reset "
+                "before selecting a different Legacy runtime pair."
+            ),
+        )
+
+    def commit_legacy_selection(
+        self,
+        lease: LegacySelectionLease,
+        *,
+        target: Any = None,
+        activate: bool = False,
+        inactive_manifest_record_ids: Tuple[str, ...] = (),
+    ) -> SelectionDecision:
+        """CAS-publish an exact Legacy selection, optionally as ACTIVE.
+
+        Plugin probes and construction occur in the version adapter between
+        ``prepare`` and this method.  Commit itself executes no plugin code and
+        atomically verifies the reset epoch, selection generation, record
+        identity, runtime incarnation, and any existing target selection.
+        """
+        if type(lease) is not LegacySelectionLease:
+            raise TypeError("lease must be an exact LegacySelectionLease")
+        if type(activate) is not bool:
+            raise TypeError("activate must be a bool")
+        if (
+            type(inactive_manifest_record_ids) is not tuple
+            or any(
+                type(record_id) is not str or not record_id
+                for record_id in inactive_manifest_record_ids
+            )
+            or len(set(inactive_manifest_record_ids))
+            != len(inactive_manifest_record_ids)
+        ):
+            raise TypeError(
+                "inactive_manifest_record_ids must be a tuple of unique "
+                "non-empty strings"
+            )
+        selection_target = lease.target if target is None else _target_name(target)
+        with self._condition:
+            self._ensure_not_resetting("commit_legacy_selection")
+            if lease._registry_identity is not self._registry_identity:
+                raise BackendPluginLifecycleError(
+                    "Legacy selection lease belongs to another Registry",
+                    entry_point=lease.entry_point_name,
+                    field="registry",
+                    expected="a lease prepared by this Registry instance",
+                    actual="a foreign Registry lease",
+                    remediation="Prepare the Legacy selection on this Registry.",
+                )
+            proposal = self._legacy_selection_proposals.pop(lease, None)
+            if proposal is None:
+                raise BackendPluginLifecycleError(
+                    "Legacy selection lease is not an exact Registry proposal",
+                    entry_point=lease.entry_point_name,
+                    field="Legacy selection proposal",
+                    expected="the exact lease object returned by this Registry",
+                    actual="a copied, changed, consumed, or unknown proposal",
+                    remediation="Prepare a fresh Legacy lease without copying it.",
+                )
+            if (
+                lease.record_id != proposal.record_id
+                or lease.registry_key != proposal.registry_key
+                or lease.entry_point_name != proposal.entry_point_name
+                or lease.target != proposal.target
+                or lease.generation != proposal.generation
+                or lease.lifecycle_epoch != proposal.lifecycle_epoch
+                or lease.compiler_cls is not proposal.compiler_cls
+                or lease.driver_cls is not proposal.driver_cls
+                or lease._registry_identity is not proposal.registry_identity
+                or lease._runtime_identity is not proposal.runtime_identity
+                or lease._proposal_identity is not proposal.proposal_identity
+            ):
+                raise BackendPluginLifecycleError(
+                    "Legacy selection lease fields changed after preparation",
+                    entry_point=proposal.entry_point_name,
+                    field="Legacy selection proposal",
+                    expected="the immutable Registry-owned proposal snapshot",
+                    actual="one or more lease fields changed",
+                    remediation="Discard the changed lease and prepare again.",
+                )
+            if proposal.lifecycle_epoch != self._lifecycle_epoch:
+                raise self._legacy_selection_stale_error(
+                    lease,
+                    actual_generation=self._generation,
+                    actual_lifecycle_epoch=self._lifecycle_epoch,
+                )
+
+            record = self._records.get(lease.record_id)
+            if record is None:
+                raise self._legacy_selection_stale_error(
+                    lease,
+                    actual_generation=self._generation,
+                    actual_lifecycle_epoch=self._lifecycle_epoch,
+                )
+            if record.state is PluginLifecycleState.REJECTED:
+                if record.error is not None:
+                    raise record.error
+                raise BackendPluginLifecycleError(
+                    "Rejected Legacy backend cannot be selected",
+                    entry_point=record.entry_point_name,
+                    field="state",
+                    expected="registered, selected, or active",
+                    actual=record.state.value,
+                )
+            if (
+                record.source is not PluginSource.LEGACY
+                or record.compatibility_status
+                is not PluginCompatibilityStatus.LEGACY_UNVERIFIED
+                or record.runtime_identity is not lease._runtime_identity
+                or record.compiler_cls is not lease.compiler_cls
+                or record.driver_cls is not lease.driver_cls
+            ):
+                raise BackendPluginLifecycleError(
+                    "Legacy selection lease runtime identity changed",
+                    entry_point=lease.entry_point_name,
+                    field="runtime_identity",
+                    expected="the exact F6-validated Legacy runtime pair",
+                    actual="a different record runtime incarnation",
+                    remediation=(
+                        "Discard the probe result and prepare a new exact-record "
+                        "Legacy selection lease."
+                    ),
+                )
+
+            existing = self._selections.get(selection_target)
+            same_existing = (
+                existing is not None and existing.record_id == lease.record_id
+            )
+            same_record_published = (
+                record.state
+                in {
+                    PluginLifecycleState.SELECTED,
+                    PluginLifecycleState.ACTIVE,
+                }
+                and bool(record.selected_targets)
+                and (existing is None or existing.record_id == record.record_id)
+            )
+            if lease.generation != self._generation and not same_record_published:
+                raise self._legacy_selection_stale_error(
+                    lease,
+                    actual_generation=self._generation,
+                    actual_lifecycle_epoch=self._lifecycle_epoch,
+                )
+            legacy_owner_conflict = self._legacy_runtime_owner_conflict(record)
+            if legacy_owner_conflict is not None:
+                raise legacy_owner_conflict
+
+            previous = None
+            previous_replacement = None
+            replace_inactive_manifest = False
+            if existing is not None and not same_existing:
+                previous = self._records.get(existing.record_id)
+                replace_inactive_manifest = (
+                    existing.record_id in inactive_manifest_record_ids
+                    and previous is not None
+                    and previous.source is PluginSource.MANIFEST
+                    and previous.state is PluginLifecycleState.SELECTED
+                )
+                if not replace_inactive_manifest:
+                    raise BackendPluginConflictError(
+                        f"Legacy target '{selection_target}' is already selected by "
+                        f"record '{existing.record_id}'",
+                        entry_point=record.entry_point_name,
+                        field="target selection",
+                        expected=existing.record_id,
+                        actual=lease.record_id,
+                        conflict_kind="legacy_runtime_selection",
+                        claim=selection_target,
+                        related_record_ids=(existing.record_id,),
+                        remediation=(
+                            "Keep the current exact-record selection or reset "
+                            "before selecting a different Legacy backend."
+                        ),
+                    )
+                remaining_targets = tuple(
+                    item
+                    for item in previous.selected_targets
+                    if item != selection_target
+                )
+                previous_state = previous.state
+                if not remaining_targets:
+                    self._transition(previous, PluginLifecycleState.REGISTERED)
+                    previous_state = PluginLifecycleState.REGISTERED
+                previous_replacement = replace(
+                    previous,
+                    state=previous_state,
+                    selected_targets=remaining_targets,
+                )
+
+            if same_existing:
+                # A repeated/concurrent commit for the exact runtime record is
+                # idempotent even though the first commit advanced generation.
+                if selection_target not in record.selected_targets:
+                    raise BackendPluginLifecycleError(
+                        "Existing Legacy selection has inconsistent target state",
+                        entry_point=record.entry_point_name,
+                        field="selected_targets",
+                        expected=selection_target,
+                        actual=", ".join(record.selected_targets) or "<none>",
+                        remediation="Reset and recreate the Legacy selection.",
+                    )
+                if activate and record.state is not PluginLifecycleState.ACTIVE:
+                    conflict = self._legacy_activation_conflict(record)
+                    if conflict is not None:
+                        raise conflict
+                    if record.state is not PluginLifecycleState.SELECTED:
+                        raise BackendPluginLifecycleError(
+                            "Existing Legacy selection cannot be activated",
+                            entry_point=record.entry_point_name,
+                            field="state",
+                            expected=PluginLifecycleState.SELECTED.value,
+                            actual=record.state.value,
                         )
+                    self._transition(record, PluginLifecycleState.ACTIVE)
+                    record = self._replace(
+                        replace(record, state=PluginLifecycleState.ACTIVE)
+                    )
+                return self._selections[selection_target]
+
+            if record.state not in {
+                PluginLifecycleState.REGISTERED,
+                PluginLifecycleState.SELECTED,
+                PluginLifecycleState.ACTIVE,
+            }:
+                raise BackendPluginLifecycleError(
+                    "Legacy runtime pair is not selectable",
+                    entry_point=record.entry_point_name,
+                    field="state",
+                    expected="registered, selected, or active",
+                    actual=record.state.value,
+                    remediation="Prepare a fresh Legacy selection lease.",
+                )
+
+            if activate:
+                conflict = self._legacy_activation_conflict(record)
+                if conflict is not None:
+                    raise conflict
+
+            selected = record
+            if selected.state is PluginLifecycleState.REGISTERED:
+                self._transition(selected, PluginLifecycleState.SELECTED)
+                selected = replace(
+                    selected,
+                    state=PluginLifecycleState.SELECTED,
+                )
+            if activate and selected.state is PluginLifecycleState.SELECTED:
+                self._transition(selected, PluginLifecycleState.ACTIVE)
+                selected = replace(
+                    selected,
+                    state=PluginLifecycleState.ACTIVE,
+                )
+            # All validation is complete.  Replace the inactive Manifest
+            # owner and publish the Legacy decision as one no-fail mutation
+            # sequence while the Registry Condition is held.
+            if previous_replacement is not None:
+                self._replace(previous_replacement)
+                del self._selections[selection_target]
+            selected = self._replace(
+                replace(
+                    selected,
+                    selected_targets=tuple(
+                        sorted(set(selected.selected_targets).union({selection_target}))
+                    ),
+                )
+            )
+            decision = SelectionDecision(
+                record_id=selected.record_id,
+                registry_key=selected.registry_key,
+                plugin_id=None,
+                entry_point_name=selected.entry_point_name,
+                target=selection_target,
+                method=SelectionMethod.LEGACY_RUNTIME_PROBE,
+                selector=None,
+                priority=0,
+                is_legacy=True,
+                candidate_record_ids=(selected.record_id,),
+                capability_report=None,
+                record=selected,
+            )
+            self._selections[selection_target] = decision
+            self._generation += 1
+            return decision
 
     def select(
         self,
@@ -2315,25 +3409,18 @@ class BackendPluginRegistry:
                 if operational_record_manifest_error(record) is None
             ]
 
-            selection_environment = (
-                os.environ if environment is None else environment
-            )
+            selection_environment = os.environ if environment is None else environment
             # Fatal conflicts must reject the involved records before the
             # static selection algorithm raises (selection itself is not
             # changed); this also covers compiler/runtime entry paths that
             # resolve through select().
             self._reject_all_fatal_conflicts(
-                tuple(
-                    record
-                    for record in operational_records
-                )
+                tuple(record for record in operational_records)
             )
             decision = select_backend(
                 records,
                 target=target,
-                kernel_required_capabilities=(
-                    kernel_required_capabilities
-                ),
+                kernel_required_capabilities=(kernel_required_capabilities),
                 core_provided_capabilities=self._core_capabilities,
                 explicit_selector=explicit_selector,
                 environment=selection_environment,
@@ -2551,9 +3638,7 @@ class BackendPluginRegistry:
                 )
 
             self._transition(record, PluginLifecycleState.ACTIVE)
-            return self._replace(
-                replace(record, state=PluginLifecycleState.ACTIVE)
-            )
+            return self._replace(replace(record, state=PluginLifecycleState.ACTIVE))
 
     def _diagnostics_value(self, record: BackendPluginRecord) -> Dict[str, Any]:
         """Call and snapshot one optional diagnostics hook outside the lock."""
@@ -2574,9 +3659,7 @@ class BackendPluginRegistry:
                 "Backend plugin diagnostics() failed",
                 expected="a Mapping result from a synchronous hook",
                 actual=_stable_exception_actual(exc),
-                remediation=(
-                    "Fix diagnostics() so it is synchronous and read-only."
-                ),
+                remediation=("Fix diagnostics() so it is synchronous and read-only."),
             )
             return {"error": error.to_dict()}
         if inspect.isawaitable(value):
@@ -2666,9 +3749,7 @@ class BackendPluginRegistry:
                                     "from inside its diagnostics hook."
                                 ),
                             )
-                            result["plugin_diagnostics"] = {
-                                "error": error.to_dict()
-                            }
+                            result["plugin_diagnostics"] = {"error": error.to_dict()}
                         else:
                             token = object()
                             self._diagnosing[record.record_id] = (
@@ -2708,20 +3789,16 @@ class BackendPluginRegistry:
                 # Do not retain tokens if Registry snapshot construction itself
                 # fails after one or more operations have been claimed.
                 for record, token in operations:
-                    self._finish_operation(
-                        self._diagnosing, record.record_id, token
-                    )
+                    self._finish_operation(self._diagnosing, record.record_id, token)
                 raise
 
-        by_record_id = {
-            record.record_id: result for record, result in prepared
-        }
+        by_record_id = {record.record_id: result for record, result in prepared}
         try:
             for record, token in operations:
                 try:
-                    by_record_id[record.record_id][
-                        "plugin_diagnostics"
-                    ] = self._diagnostics_value(record)
+                    by_record_id[record.record_id]["plugin_diagnostics"] = (
+                        self._diagnostics_value(record)
+                    )
                 finally:
                     with self._condition:
                         self._finish_operation(
@@ -2733,9 +3810,7 @@ class BackendPluginRegistry:
             # for all later records as well.
             with self._condition:
                 for record, token in operations:
-                    self._finish_operation(
-                        self._diagnosing, record.record_id, token
-                    )
+                    self._finish_operation(self._diagnosing, record.record_id, token)
 
         results = [result for _record, result in prepared]
         if identifier is not None:
@@ -2765,12 +3840,9 @@ class BackendPluginRegistry:
                         "Cannot reset the Registry re-entrantly from a plugin hook",
                         field="reset",
                         expected="reset from outside plugin lifecycle hooks",
-                        actual=(
-                            "current thread owns an in-progress plugin operation"
-                        ),
+                        actual=("current thread owns an in-progress plugin operation"),
                         remediation=(
-                            "Return from the plugin hook before resetting the "
-                            "Registry."
+                            "Return from the plugin hook before resetting the Registry."
                         ),
                     )
 
@@ -2791,6 +3863,8 @@ class BackendPluginRegistry:
                 self._environment_error = None
                 self._discovered = False
                 self._selections.clear()
+                self._legacy_selection_proposals.clear()
+                self._runtime_selection_proposals.clear()
                 self._condition.notify_all()
 
                 while self._loading or self._registering or self._diagnosing:

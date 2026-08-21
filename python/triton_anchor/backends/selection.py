@@ -19,13 +19,14 @@ from .capabilities import (
 from .conflicts import detect_static_conflicts
 from .errors import (
     BackendPluginError,
+    BackendPluginNoCandidateError,
     BackendPluginSelectionError,
 )
 from .manifest import (
     BackendPluginManifest,
     operational_record_manifest_error,
 )
-
+from .protocol import PluginSource
 
 BACKEND_SELECTOR_ENV = "TRITON_ANCHOR_BACKEND"
 _SELECTABLE_MANIFEST_STATES = {
@@ -44,6 +45,7 @@ class SelectionMethod(str, Enum):
     ENVIRONMENT = "environment"
     SOLE_CANDIDATE = "sole_candidate"
     MANIFEST_PRIORITY = "manifest_priority"
+    LEGACY_RUNTIME_PROBE = "legacy_runtime_probe"
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,79 @@ class SelectionDecision:
                 if self.capability_report is not None
                 else None
             ),
+        }
+
+
+@dataclass(frozen=True, eq=False)
+class LegacySelectionLease:
+    """One Registry-owned, reset-bound Legacy runtime selection proposal.
+
+    The public fields let a version adapter run target/driver probes without
+    importing Triton into Core.  Private identity tokens bind the proposal to
+    the exact Registry and successfully F6-validated runtime incarnation that
+    prepared it, while a one-shot token rejects copies, mutation, and reuse;
+    callers cannot use a lease as a generic record selector.
+    """
+
+    record_id: str
+    registry_key: str
+    entry_point_name: str
+    target: str
+    generation: int
+    lifecycle_epoch: int
+    compiler_cls: type = field(repr=False, compare=False)
+    driver_cls: type = field(repr=False, compare=False)
+    _registry_identity: object = field(repr=False, compare=False)
+    _runtime_identity: object = field(repr=False, compare=False)
+    _proposal_identity: object = field(repr=False, compare=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return diagnostics without exposing process-identity tokens."""
+        return {
+            "record_id": self.record_id,
+            "registry_key": self.registry_key,
+            "entry_point": self.entry_point_name,
+            "target": self.target,
+            "generation": self.generation,
+            "lifecycle_epoch": self.lifecycle_epoch,
+        }
+
+
+@dataclass(frozen=True, eq=False)
+class RuntimeSelectionLease:
+    """One uncommitted Manifest runtime pair bound to Registry state."""
+
+    record_id: str
+    registry_key: str
+    plugin_id: str
+    entry_point_name: str
+    target: str
+    generation: int
+    lifecycle_epoch: int
+    method: SelectionMethod
+    selector: Optional[str]
+    priority: int
+    candidate_record_ids: Tuple[str, ...]
+    capability_report: Optional[CapabilityReport]
+    compiler_cls: type = field(repr=False, compare=False)
+    driver_cls: type = field(repr=False, compare=False)
+    _registry_identity: object = field(repr=False, compare=False)
+    _runtime_identity: object = field(repr=False, compare=False)
+    _proposal_identity: object = field(repr=False, compare=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "record_id": self.record_id,
+            "registry_key": self.registry_key,
+            "plugin_id": self.plugin_id,
+            "entry_point": self.entry_point_name,
+            "target": self.target,
+            "generation": self.generation,
+            "lifecycle_epoch": self.lifecycle_epoch,
+            "method": self.method.value,
+            "selector": self.selector,
+            "priority": self.priority,
+            "candidate_record_ids": list(self.candidate_record_ids),
         }
 
 
@@ -198,9 +273,7 @@ def _project_record(record: Any) -> _RecordView:
         if manifest is not None
         else _optional_record_string(record, "plugin_id")
     )
-    if plugin_id is not None and (
-        not isinstance(plugin_id, str) or not plugin_id
-    ):
+    if plugin_id is not None and (not isinstance(plugin_id, str) or not plugin_id):
         raise BackendPluginSelectionError(
             f"Backend record '{record_id}' has an invalid plugin_id",
             field="plugin_id",
@@ -310,9 +383,7 @@ def _unsupported_claims_target(record: Any, target_name: str) -> bool:
     return type(entry_point_name) is str and entry_point_name == target_name
 
 
-def _capability_names(
-    values: Iterable[str], field_name: str
-) -> Tuple[str, ...]:
+def _capability_names(values: Iterable[str], field_name: str) -> Tuple[str, ...]:
     if isinstance(values, (str, bytes)):
         raise BackendPluginSelectionError(
             f"Selection input '{field_name}' must be an iterable of strings",
@@ -332,9 +403,7 @@ def _capability_names(
             remediation=f"Pass {field_name} as a list, tuple, or set.",
         ) from exc
     if any(
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
+        not isinstance(value, str) or not value or value != value.strip()
         for value in result
     ):
         raise BackendPluginSelectionError(
@@ -418,9 +487,7 @@ def _matching_selector(
     views: Tuple[_RecordView, ...],
     selector: str,
 ) -> _RecordView:
-    matches = tuple(
-        view for view in views if selector in view.selector_keys
-    )
+    matches = tuple(view for view in views if selector in view.selector_keys)
     if not matches:
         raise BackendPluginSelectionError(
             f"No backend plugin matches selector '{selector}'",
@@ -435,8 +502,7 @@ def _matching_selector(
     if len(matches) > 1:
         record_ids = tuple(sorted(view.record_id for view in matches))
         raise BackendPluginSelectionError(
-            f"Backend selector '{selector}' is ambiguous: "
-            + ", ".join(record_ids),
+            f"Backend selector '{selector}' is ambiguous: " + ", ".join(record_ids),
             field="backend_selector",
             expected="one backend record",
             actual=", ".join(record_ids),
@@ -644,9 +710,7 @@ def select_backend(
                 remediation=f"Set or remove {BACKEND_SELECTOR_ENV}.",
             )
         if environment_selector is not None:
-            selector = _non_empty_string(
-                environment_selector, BACKEND_SELECTOR_ENV
-            )
+            selector = _non_empty_string(environment_selector, BACKEND_SELECTOR_ENV)
             method = SelectionMethod.ENVIRONMENT
 
     if selector is not None:
@@ -739,6 +803,21 @@ def select_backend(
                 kernel_required=kernel_required,
             )
             raise AssertionError("incompatible capability report did not raise")
+        unknown_manifest_scope = [
+            (_unsupported_record_sort_key(record), error)
+            for record, error in unsupported_records
+            if (
+                getattr(record, "source", None) is not PluginSource.LEGACY
+                and getattr(record, "manifest", None) is None
+            )
+        ]
+        unknown_manifest_scope.sort(key=lambda item: item[0])
+        if unknown_manifest_scope:
+            # A present-but-unparseable Manifest has unknown target scope.
+            # Treating an entry-point name mismatch as proof that it is
+            # irrelevant would turn a Manifest rejection into Legacy
+            # fallback permission.
+            raise unknown_manifest_scope[0][1]
         unsupported_target = [
             (_unsupported_record_sort_key(record), error)
             for record, error in unsupported_records
@@ -753,13 +832,40 @@ def select_backend(
                 continue
             targets = tuple(getattr(view.manifest, "targets", ()) or ())
             error = getattr(view.record, "error", None)
-            if (
-                target_name in targets
-                and isinstance(error, BackendPluginError)
-            ):
+            if target_name in targets and isinstance(error, BackendPluginError):
                 rejected.append((view.record_id, error))
         if rejected:
             raise sorted(rejected, key=lambda item: item[0])[0][1]
+        ineligible_manifest = []
+        for view in views:
+            if view.is_legacy or view.manifest is None or view.state == "rejected":
+                continue
+            targets = tuple(getattr(view.manifest, "targets", ()) or ())
+            reason = _manifest_ineligible_reason(view)
+            if target_name in targets and reason is not None:
+                ineligible_manifest.append((view.record_id, view, reason))
+        if ineligible_manifest:
+            _record_id, first_view, reason = sorted(
+                ineligible_manifest,
+                key=lambda item: item[0],
+            )[0]
+            raise BackendPluginSelectionError(
+                f"Manifest backend '{first_view.record_id}' cannot be "
+                f"selected: {reason}",
+                plugin_id=first_view.plugin_id,
+                entry_point=first_view.entry_point_name,
+                field="state",
+                expected="validated-or-later and compatible",
+                actual=(
+                    f"state={first_view.state or '<unknown>'}; "
+                    "compatibility="
+                    f"{first_view.compatibility_status or '<unknown>'}"
+                ),
+                remediation=(
+                    "Run Registry validation and resolve its diagnostics before "
+                    "considering Legacy fallback."
+                ),
+            )
         legacy_ids = tuple(
             view.record_id
             for view in views
@@ -771,9 +877,8 @@ def select_backend(
             if legacy_ids
             else ""
         )
-        raise BackendPluginSelectionError(
-            f"No compatible Manifest backend declares target '{target_name}'."
-            + detail,
+        raise BackendPluginNoCandidateError(
+            f"No compatible Manifest backend declares target '{target_name}'." + detail,
             field="targets",
             expected=target_name,
             actual="<no compatible candidate>",
@@ -802,8 +907,7 @@ def select_backend(
         record_ids = tuple(view.record_id for view in highest)
         raise BackendPluginSelectionError(
             f"Backend selection for target '{target_name}' is ambiguous at "
-            f"priority {highest_priority}: "
-            + ", ".join(record_ids),
+            f"priority {highest_priority}: " + ", ".join(record_ids),
             field="priority",
             expected="one unique highest-priority candidate",
             actual=", ".join(record_ids),
@@ -829,6 +933,8 @@ select_backend_plugin = select_backend
 
 __all__ = [
     "BACKEND_SELECTOR_ENV",
+    "LegacySelectionLease",
+    "RuntimeSelectionLease",
     "SelectionDecision",
     "SelectionMethod",
     "select_backend",

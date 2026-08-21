@@ -22,7 +22,6 @@ from typing import Any, Iterable, Mapping, Optional
 
 import pytest
 from packaging.tags import Tag
-
 from triton_anchor.backends import (
     BACKEND_SELECTOR_ENV,
     DIAGNOSTICS_FIELD_POLICY,
@@ -38,11 +37,13 @@ from triton_anchor.backends import (
     BackendPluginRegistry,
     BackendPluginSelectionError,
     CoreEnvironment,
+    LegacyRuntimePair,
     PluginCompatibilityStatus,
     PluginIsolationMode,
     PluginLifecycleState,
     PluginSource,
     ProtocolFieldStatus,
+    RuntimePairValidationResult,
     SelectionMethod,
     consume_protocol_field,
     evaluate_manifest_semantics,
@@ -52,7 +53,6 @@ from triton_anchor.backends import (
     select_backend,
 )
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = (
     REPOSITORY_ROOT
@@ -60,9 +60,7 @@ SCHEMA_PATH = (
 )
 MANIFEST_SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 SCHEMA_ROOT_REQUIRED = tuple(MANIFEST_SCHEMA["required"])
-SCHEMA_PLUGIN_REQUIRED = tuple(
-    MANIFEST_SCHEMA["$defs"]["plugin"]["required"]
-)
+SCHEMA_PLUGIN_REQUIRED = tuple(MANIFEST_SCHEMA["$defs"]["plugin"]["required"])
 
 TRITON_COMMIT = "6cc4505027d7b39fe18a44a7f89085b8babb7400"
 LLVM_COMMIT = "a992f29451b9e140424f35ac5e20177db4afbdc0"
@@ -346,9 +344,7 @@ def wait_for_lifecycle_wait_count(
             if len(registry._waiting_on) == count:
                 return
         if time.monotonic() >= deadline:
-            pytest.fail(
-                f"Registry did not expose {count} lifecycle wait edge(s)"
-            )
+            pytest.fail(f"Registry did not expose {count} lifecycle wait edge(s)")
         time.sleep(0.001)
 
 
@@ -395,29 +391,21 @@ def assert_wait_cycle_results(
     diagnostics = []
     for name, future in futures.items():
         try:
-            error = future.exception(
-                timeout=max(0.001, deadline - time.monotonic())
-            )
+            error = future.exception(timeout=max(0.001, deadline - time.monotonic()))
         except TimeoutError:
             pytest.fail("daemon lifecycle future did not terminate before timeout")
         assert isinstance(error, BackendPluginLifecycleError)
         diagnostic = error.to_dict()
         diagnostics.append(diagnostic)
         assert diagnostic["code"] == "backend_plugin_lifecycle_error"
-        assert diagnostic["message"] == (
-            "Backend plugin lifecycle wait cycle detected"
-        )
+        assert diagnostic["message"] == ("Backend plugin lifecycle wait cycle detected")
         assert diagnostic["plugin_id"] == f"vendor.{name}"
         assert diagnostic["entry_point"] == name
         assert diagnostic["field"] == "lifecycle.wait_cycle"
-        assert diagnostic["expected"] == (
-            "an acyclic load/register wait graph"
-        )
+        assert diagnostic["expected"] == ("an acyclic load/register wait graph")
         assert diagnostic["actual"] == expected_actual
         assert "0x" not in diagnostic["actual"]
-    assert {diagnostic["actual"] for diagnostic in diagnostics} == {
-        expected_actual
-    }
+    assert {diagnostic["actual"] for diagnostic in diagnostics} == {expected_actual}
 
 
 def assert_lifecycle_ledgers_empty(registry: BackendPluginRegistry) -> None:
@@ -472,12 +460,8 @@ def test_registry_discovers_no_plugins_without_collecting_environment() -> None:
 
 def test_registry_discovers_one_valid_manifest_without_loading(tmp_path: Path) -> None:
     marker = tmp_path / "imported"
-    entry_point = FakeEntryPoint(
-        "alpha", structural_plugin("alpha"), marker=marker
-    )
-    distribution = make_distribution(
-        tmp_path / "dist", entry_points=[entry_point]
-    )
+    entry_point = FakeEntryPoint("alpha", structural_plugin("alpha"), marker=marker)
+    distribution = make_distribution(tmp_path / "dist", entry_points=[entry_point])
     registry = registry_for([distribution])
 
     record = one_record(registry)
@@ -492,9 +476,7 @@ def test_registry_discovers_two_independent_plugins_deterministically(
     tmp_path: Path,
 ) -> None:
     alpha = good_plugin()
-    beta = good_plugin(
-        plugin_id="vendor.beta", entry_point="beta", targets=["beta"]
-    )
+    beta = good_plugin(plugin_id="vendor.beta", entry_point="beta", targets=["beta"])
     alpha_ep = FakeEntryPoint("alpha", structural_plugin("alpha"))
     beta_ep = FakeEntryPoint("beta", structural_plugin("beta"))
     alpha_dist = make_distribution(
@@ -568,12 +550,8 @@ def test_registry_preserves_schema_allowed_unknown_fields() -> None:
         good_manifest([plugin], future_root_field=["preserve-me"])
     )
     assert document.extensions == {"future_root_field": ["preserve-me"]}
-    assert document.plugins[0].extensions == {
-        "future_optional": {"enabled": True}
-    }
-    assert document.plugins[0].requires_triton.extensions == {
-        "future_triton_field": 17
-    }
+    assert document.plugins[0].extensions == {"future_optional": {"enabled": True}}
+    assert document.plugins[0].requires_triton.extensions == {"future_triton_field": 17}
 
 
 def test_registry_rejects_duplicate_json_member_names(tmp_path: Path) -> None:
@@ -595,9 +573,7 @@ def test_registry_discovery_rejects_malformed_manifest_without_import(
     tmp_path: Path, manifest_text: Any
 ) -> None:
     marker = tmp_path / "imported"
-    entry_point = FakeEntryPoint(
-        "alpha", structural_plugin(), marker=marker
-    )
+    entry_point = FakeEntryPoint("alpha", structural_plugin(), marker=marker)
     manifest_path = tmp_path / "dist/triton_anchor_backend.json"
     manifest_path.parent.mkdir(parents=True)
     if isinstance(manifest_text, bytes):
@@ -657,9 +633,7 @@ def test_registry_rejects_manifest_entry_point_absent_from_distribution(
 ) -> None:
     """Exercise the opposite coverage direction: declared but not installed."""
     marker = tmp_path / "must-not-import"
-    installed_ep = FakeEntryPoint(
-        "beta", structural_plugin("beta"), marker=marker
-    )
+    installed_ep = FakeEntryPoint("beta", structural_plugin("beta"), marker=marker)
     distribution = make_distribution(
         tmp_path / "unknown-manifest-entry-point",
         plugins=[good_plugin(entry_point="alpha")],
@@ -716,12 +690,8 @@ def test_registry_rejects_duplicate_entry_points_inside_one_manifest(
     assert {error.field for error in errors} == {"plugins[].entry_point"}
 
     entry_points = [
-        FakeEntryPoint(
-            "alpha", structural_plugin("alpha-a"), value="fixture_a:plugin"
-        ),
-        FakeEntryPoint(
-            "alpha", structural_plugin("alpha-b"), value="fixture_b:plugin"
-        ),
+        FakeEntryPoint("alpha", structural_plugin("alpha-a"), value="fixture_a:plugin"),
+        FakeEntryPoint("alpha", structural_plugin("alpha-b"), value="fixture_b:plugin"),
     ]
     distribution = make_distribution(
         tmp_path / "duplicate-entry-point",
@@ -747,12 +717,8 @@ def test_registry_rejects_duplicate_installed_entry_point_names_before_import(
     assert "missing records for alpha" in str(errors[0])
 
     entry_points = [
-        FakeEntryPoint(
-            "alpha", structural_plugin("alpha-a"), value="fixture_a:plugin"
-        ),
-        FakeEntryPoint(
-            "alpha", structural_plugin("alpha-b"), value="fixture_b:plugin"
-        ),
+        FakeEntryPoint("alpha", structural_plugin("alpha-a"), value="fixture_a:plugin"),
+        FakeEntryPoint("alpha", structural_plugin("alpha-b"), value="fixture_b:plugin"),
     ]
     distribution = make_distribution(
         tmp_path / "duplicate-installed-entry-point",
@@ -786,7 +752,9 @@ def test_registry_rejects_malformed_capability_and_target_arrays(
 
 
 @pytest.mark.parametrize("priority", [-(2**63), 0, 2**63 - 1])
-def test_registry_accepts_schema_unbounded_integer_priority_examples(priority: int) -> None:
+def test_registry_accepts_schema_unbounded_integer_priority_examples(
+    priority: int,
+) -> None:
     plugin = parse_manifest(good_manifest([good_plugin(priority=priority)])).plugins[0]
     assert plugin.priority == priority
 
@@ -806,11 +774,7 @@ def test_registry_accepts_all_schema_isolation_modes() -> None:
     # 1.0 disposition now makes the accepted operational set exactly one.
     for unsupported in ("subprocess", "native_in_process"):
         with pytest.raises(BackendPluginManifestError) as caught:
-            parse_manifest(
-                good_manifest(
-                    [good_plugin(isolation_mode=unsupported)]
-                )
-            )
+            parse_manifest(good_manifest([good_plugin(isolation_mode=unsupported)]))
         assert caught.value.field == "isolation_mode"
         assert caught.value.expected == "python_only"
         assert caught.value.actual == unsupported
@@ -848,9 +812,7 @@ def test_registry_rejects_illegal_isolation_combinations(
     with pytest.raises(BackendPluginManifestError) as caught:
         parse_manifest(good_manifest([good_plugin(**overrides)]))
     expected_field = (
-        "isolation_mode"
-        if overrides.get("isolation_mode") != "python_only"
-        else field
+        "isolation_mode" if overrides.get("isolation_mode") != "python_only" else field
     )
     assert caught.value.field == expected_field
 
@@ -859,12 +821,8 @@ def test_registry_discovery_query_and_validation_do_not_import_plugin(
     tmp_path: Path,
 ) -> None:
     marker = tmp_path / "import-side-effect"
-    entry_point = FakeEntryPoint(
-        "alpha", structural_plugin(), marker=marker
-    )
-    distribution = make_distribution(
-        tmp_path / "dist", entry_points=[entry_point]
-    )
+    entry_point = FakeEntryPoint("alpha", structural_plugin(), marker=marker)
+    distribution = make_distribution(tmp_path / "dist", entry_points=[entry_point])
     registry = registry_for([distribution])
 
     discovered = registry.discover()[0]
@@ -943,8 +901,7 @@ def _write_real_metadata_distribution(
     )
     (dist_info / "WHEEL").write_text(WHEEL_METADATA, encoding="utf-8")
     (dist_info / "entry_points.txt").write_text(
-        "[triton.backends]\n"
-        f"{entry_point_name} = {module_name}:plugin\n",
+        f"[triton.backends]\n{entry_point_name} = {module_name}:plugin\n",
         encoding="utf-8",
     )
     record_paths = [
@@ -997,7 +954,9 @@ def test_registry_real_importlib_metadata_discovery_of_two_distributions(
 
     records = registry.discover()
     assert len(records) == 2
-    assert all(type(record.distribution).__name__ == "PathDistribution" for record in records)
+    assert all(
+        type(record.distribution).__name__ == "PathDistribution" for record in records
+    )
     assert not alpha_marker.exists() and not beta_marker.exists()
     registry.validate(strict=True)
     assert not alpha_marker.exists() and not beta_marker.exists()
@@ -1196,7 +1155,10 @@ def test_registry_negotiates_core_minor_compatibility_range(
     )
     record_id = one_record(registry).record_id
     if compatible:
-        assert registry.validate(record_id).compatibility_status is PluginCompatibilityStatus.COMPATIBLE
+        assert (
+            registry.validate(record_id).compatibility_status
+            is PluginCompatibilityStatus.COMPATIBLE
+        )
     else:
         with pytest.raises(BackendPluginCompatibilityError) as caught:
             registry.validate(record_id)
@@ -1364,7 +1326,9 @@ def test_registry_capability_names_are_opaque_exact_identifiers(tmp_path: Path) 
     assert entry_point.load_calls == 1
 
 
-def test_registry_unknown_kernel_capability_rejected_before_loading(tmp_path: Path) -> None:
+def test_registry_unknown_kernel_capability_rejected_before_loading(
+    tmp_path: Path,
+) -> None:
     registry, entry_point = _validation_fixture(
         tmp_path,
         plugin_overrides={"capabilities": ["fixture.compile"]},
@@ -1396,9 +1360,7 @@ def test_registry_reports_every_simultaneous_compatibility_failure(
             },
         )
         record = registry.validate()[0]
-        return registry, entry_point, [
-            error.to_dict() for error in record.errors
-        ]
+        return registry, entry_point, [error.to_dict() for error in record.errors]
 
     registry, entry_point, diagnostics = validate_once(tmp_path / "first")
     _, second_entry_point, second_diagnostics = validate_once(tmp_path / "second")
@@ -1457,9 +1419,10 @@ def test_registry_aggregates_capability_after_version_failures(
         },
     )
     record = registry.validate()[0]
-    assert [
-        error.to_dict()["dimension"] or error.field for error in record.errors
-    ] == ["backend_protocol", "requires_capabilities"]
+    assert [error.to_dict()["dimension"] or error.field for error in record.errors] == [
+        "backend_protocol",
+        "requires_capabilities",
+    ]
     assert isinstance(record.errors[0], BackendPluginProtocolError)
     assert isinstance(record.errors[1], BackendPluginCapabilityError)
     assert record.capability_report is not None
@@ -1594,8 +1557,7 @@ def test_registry_reports_full_version_and_commit_matrix_in_total_order(
     record = registry.validate()[0]
     diagnostics = [error.to_dict() for error in record.errors]
     assert [
-        diagnostic["dimension"] or diagnostic["field"]
-        for diagnostic in diagnostics
+        diagnostic["dimension"] or diagnostic["field"] for diagnostic in diagnostics
     ] == [
         "backend_protocol",
         "triton-anchor Core version",
@@ -1629,21 +1591,14 @@ def test_registry_orders_provenance_before_inventory_and_versions(
     record = registry.validate()[0]
     diagnostics = [error.to_dict() for error in record.errors]
     assert [
-        diagnostic["dimension"] or diagnostic["field"]
-        for diagnostic in diagnostics
+        diagnostic["dimension"] or diagnostic["field"] for diagnostic in diagnostics
     ] == [
         "wheel platform metadata",
         "distribution.files",
         "backend_protocol",
     ]
-    assert all(
-        diagnostic["plugin_id"] == "vendor.alpha"
-        for diagnostic in diagnostics
-    )
-    assert all(
-        diagnostic["entry_point"] == "alpha"
-        for diagnostic in diagnostics
-    )
+    assert all(diagnostic["plugin_id"] == "vendor.alpha" for diagnostic in diagnostics)
+    assert all(diagnostic["entry_point"] == "alpha" for diagnostic in diagnostics)
     assert record.compatibility_status is PluginCompatibilityStatus.NOT_CHECKED
     assert entry_point.load_calls == 0
 
@@ -1744,9 +1699,10 @@ def test_registry_batch_diagnostics_are_sorted_by_registry_key(
         "vendor.zeta",
         "vendor.alpha",
     ]
-    assert [
-        plugin["registry_key"] for plugin in registry.diagnostics()["plugins"]
-    ] == ["vendor.alpha", "vendor.zeta"]
+    assert [plugin["registry_key"] for plugin in registry.diagnostics()["plugins"]] == [
+        "vendor.alpha",
+        "vendor.zeta",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1770,9 +1726,7 @@ def test_registry_reports_built_runtime_compatibility_dimensions(
     assert len(record.errors) == 1
     assert isinstance(record.error, BackendPluginCompatibilityError)
     assert record.error.dimension == dimension
-    assert registry.diagnostics(record.record_id)["errors"] == [
-        record.error.to_dict()
-    ]
+    assert registry.diagnostics(record.record_id)["errors"] == [record.error.to_dict()]
     assert entry_point.load_calls == 0
 
 
@@ -1805,8 +1759,7 @@ def test_registry_public_failure_routes_preserve_complete_diagnostics(
     record = registry.inspect(record_id)
     diagnostics = registry.diagnostics(record_id)
     assert [
-        error["dimension"] or error["field"]
-        for error in diagnostics["errors"]
+        error["dimension"] or error["field"] for error in diagnostics["errors"]
     ] == [
         "backend_protocol",
         "triton-anchor Core version",
@@ -1907,9 +1860,7 @@ def test_registry_minimal_structural_plugin_full_lifecycle(tmp_path: Path) -> No
 
     plugin = MinimalPlugin()
     entry_point = FakeEntryPoint("alpha", plugin)
-    distribution = make_distribution(
-        tmp_path, entry_points=[entry_point]
-    )
+    distribution = make_distribution(tmp_path, entry_points=[entry_point])
     registry = registry_for([distribution])
     discovered = one_record(registry)
     assert discovered.state is PluginLifecycleState.DISCOVERED
@@ -2149,9 +2100,7 @@ def test_registry_reports_invalid_shutdown_hook_contract(
 
     plugin = Plugin()
     plugin.shutdown = (
-        object()
-        if case == "noncallable"
-        else lambda: "unexpected shutdown payload"
+        object() if case == "noncallable" else lambda: "unexpected shutdown payload"
     )
     entry_point = FakeEntryPoint("alpha", plugin)
     distribution = make_distribution(tmp_path, entry_points=[entry_point])
@@ -2176,9 +2125,7 @@ def test_registry_reports_invalid_diagnostics_hook_contract(
 
     plugin = Plugin()
     plugin.diagnostics = (
-        object()
-        if case == "noncallable"
-        else lambda: "unexpected diagnostics payload"
+        object() if case == "noncallable" else lambda: "unexpected diagnostics payload"
     )
     entry_point = FakeEntryPoint("alpha", plugin)
     distribution = make_distribution(tmp_path, entry_points=[entry_point])
@@ -2279,9 +2226,7 @@ def test_registry_rejects_cross_plugin_register_wait_cycle(
         {"alpha": "register", "beta": "register"},
     )
 
-    assert {
-        record.entry_point_name: record.state for record in registry.list()
-    } == {
+    assert {record.entry_point_name: record.state for record in registry.list()} == {
         "alpha": PluginLifecycleState.REJECTED,
         "beta": PluginLifecycleState.REJECTED,
     }
@@ -2342,9 +2287,7 @@ def test_registry_rejects_cross_plugin_load_wait_cycle(tmp_path: Path) -> None:
     )
 
     futures = {
-        name: submit_daemon_future(
-            lambda name=name: registry.load(record_ids[name])
-        )
+        name: submit_daemon_future(lambda name=name: registry.load(record_ids[name]))
         for name in ("alpha", "beta")
     }
     assert_wait_cycle_results(
@@ -2353,9 +2296,7 @@ def test_registry_rejects_cross_plugin_load_wait_cycle(tmp_path: Path) -> None:
         {"alpha": "load", "beta": "load"},
     )
 
-    assert {
-        record.entry_point_name: record.state for record in registry.list()
-    } == {
+    assert {record.entry_point_name: record.state for record in registry.list()} == {
         "alpha": PluginLifecycleState.REJECTED,
         "beta": PluginLifecycleState.REJECTED,
     }
@@ -2423,12 +2364,8 @@ def test_registry_rejects_mixed_cross_plugin_wait_cycle(tmp_path: Path) -> None:
     )
 
     futures = {
-        "alpha": submit_daemon_future(
-            lambda: registry.load(record_ids["alpha"])
-        ),
-        "beta": submit_daemon_future(
-            lambda: registry.register(record_ids["beta"])
-        ),
+        "alpha": submit_daemon_future(lambda: registry.load(record_ids["alpha"])),
+        "beta": submit_daemon_future(lambda: registry.register(record_ids["beta"])),
     }
     assert_wait_cycle_results(
         futures,
@@ -2436,9 +2373,7 @@ def test_registry_rejects_mixed_cross_plugin_wait_cycle(tmp_path: Path) -> None:
         {"alpha": "load", "beta": "register"},
     )
 
-    assert {
-        record.entry_point_name: record.state for record in registry.list()
-    } == {
+    assert {record.entry_point_name: record.state for record in registry.list()} == {
         "alpha": PluginLifecycleState.REJECTED,
         "beta": PluginLifecycleState.REJECTED,
     }
@@ -2490,13 +2425,9 @@ def test_registry_allows_acyclic_cross_plugin_lifecycle_wait(
         entry_points.values(),
     )
 
-    beta_future = submit_daemon_future(
-        lambda: registry.register(record_ids["beta"])
-    )
+    beta_future = submit_daemon_future(lambda: registry.register(record_ids["beta"]))
     assert beta_started.wait(timeout=5)
-    alpha_future = submit_daemon_future(
-        lambda: registry.register(record_ids["alpha"])
-    )
+    alpha_future = submit_daemon_future(lambda: registry.register(record_ids["alpha"]))
     assert alpha_nested.wait(timeout=5)
     wait_for_lifecycle_wait_count(registry, 1)
     assert not alpha_future.done()
@@ -2590,11 +2521,7 @@ def test_registry_reset_at_publish_boundary_cleans_initialized_plugin_once(
 
         def __exit__(self, *args: Any) -> Any:
             result = self._condition.__exit__(*args)
-            if (
-                self._armed
-                and not self._fired
-                and self._owner == threading.get_ident()
-            ):
+            if self._armed and not self._fired and self._owner == threading.get_ident():
                 self._fired = True
                 publish_boundary.set()
                 if not allow_register_return.wait(timeout=10):
@@ -2621,9 +2548,7 @@ def test_registry_reset_at_publish_boundary_cleans_initialized_plugin_once(
 
     plugin = Plugin()
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     record_id = one_record(registry).record_id
     gate = GatedCondition(registry._condition)
     registry._condition = gate
@@ -2667,14 +2592,30 @@ def test_registry_reset_is_idempotent_and_allows_fresh_rediscovery(
     distribution = make_distribution(tmp_path, entry_points=[entry_point])
     registry = registry_for([distribution])
     registry.register(one_record(registry).record_id)
-    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (1, 1, 0)
+    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (
+        1,
+        1,
+        0,
+    )
     assert registry.reset() == ()
     assert registry.reset() == ()
-    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (1, 1, 1)
+    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (
+        1,
+        1,
+        1,
+    )
     registry.register(one_record(registry).record_id)
-    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (2, 2, 1)
+    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (
+        2,
+        2,
+        1,
+    )
     assert registry.reset() == ()
-    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (2, 2, 2)
+    assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (
+        2,
+        2,
+        2,
+    )
 
 
 def test_registry_reset_wakes_concurrent_register_waiters_as_stale(
@@ -2703,9 +2644,7 @@ def test_registry_reset_wakes_concurrent_register_waiters_as_stale(
 
     plugin = Plugin()
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     record_id = one_record(registry).record_id
 
     def register() -> Any:
@@ -2752,9 +2691,7 @@ def test_registry_initialize_context_is_fixed_read_only_snapshot(
         def initialize(self, context: Mapping[str, Any]) -> None:
             contexts.append(context)
 
-    plugin_data = good_plugin(
-        lifecycle_metadata={"nested": ["original"]}
-    )
+    plugin_data = good_plugin(lifecycle_metadata={"nested": ["original"]})
     entry_point = FakeEntryPoint("alpha", Plugin())
     distribution = make_distribution(
         tmp_path,
@@ -2771,12 +2708,10 @@ def test_registry_initialize_context_is_fixed_read_only_snapshot(
         context["extra"] = True  # type: ignore[index]
     with pytest.raises(TypeError):
         context["manifest"].extensions["extra"] = True
-    original.manifest.extensions["lifecycle_metadata"]["nested"].append(
-        "mutated"
+    original.manifest.extensions["lifecycle_metadata"]["nested"].append("mutated")
+    assert context["manifest"].extensions["lifecycle_metadata"]["nested"] == (
+        "original",
     )
-    assert context["manifest"].extensions["lifecycle_metadata"][
-        "nested"
-    ] == ("original",)
 
 
 @pytest.mark.parametrize("hook_name", ["initialize", "shutdown", "diagnostics"])
@@ -2808,9 +2743,7 @@ def test_registry_rejects_introspectable_incompatible_hook_signatures(
         diagnostic = errors[0].to_dict()
     else:
         registry.register(record_id)
-        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"][
-            "error"
-        ]
+        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"]["error"]
     assert diagnostic["field"] == hook_name
     assert "signature" in diagnostic["message"]
 
@@ -2833,9 +2766,7 @@ def test_registry_rejects_awaitable_initialize_and_cleans_up_once(
 
     plugin = Plugin()
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     with pytest.raises(BackendPluginLifecycleError) as caught:
         registry.register(one_record(registry).record_id)
     assert caught.value.field == "initialize"
@@ -2860,9 +2791,7 @@ def test_registry_rejects_awaitable_zero_argument_hooks(
 
     setattr(plugin, hook_name, async_hook)
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     record_id = one_record(registry).record_id
     registry.register(record_id)
     if hook_name == "shutdown":
@@ -2870,9 +2799,7 @@ def test_registry_rejects_awaitable_zero_argument_hooks(
         assert len(errors) == 1
         diagnostic = errors[0].to_dict()
     else:
-        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"][
-            "error"
-        ]
+        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"]["error"]
     assert diagnostic["field"] == hook_name
     assert "awaitable" in diagnostic["message"]
 
@@ -2921,18 +2848,14 @@ def test_registry_hooks_reenter_without_deadlock_or_repeat(
 
     plugin = Plugin()
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     record_id = one_record(registry).record_id
     selected = registry.select("alpha")
     assert selected.record.state is PluginLifecycleState.SELECTED
     assert plugin.initialize_reentry is not None
     assert plugin.initialize_reentry.field == "register"
 
-    assert registry.diagnostics(record_id)["plugin_diagnostics"] == {
-        "healthy": True
-    }
+    assert registry.diagnostics(record_id)["plugin_diagnostics"] == {"healthy": True}
     assert plugin.diagnostics_calls == 1
     assert plugin.diagnostics_reentry["error"]["field"] == "diagnostics"
 
@@ -2957,9 +2880,7 @@ def test_registry_diagnostics_returns_independent_top_level_snapshot(
 
     plugin = Plugin()
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     record_id = one_record(registry).record_id
     registry.register(record_id)
     snapshot = registry.diagnostics(record_id)["plugin_diagnostics"]
@@ -3036,9 +2957,7 @@ def test_registry_explicit_none_optional_hook_is_not_treated_as_missing(
     plugin = structural_plugin()
     setattr(plugin, hook_name, None)
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     record_id = one_record(registry).record_id
 
     if hook_name == "initialize":
@@ -3052,9 +2971,7 @@ def test_registry_explicit_none_optional_hook_is_not_treated_as_missing(
         diagnostic = errors[0].to_dict()
     else:
         registry.register(record_id)
-        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"][
-            "error"
-        ]
+        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"]["error"]
 
     assert diagnostic["field"] == hook_name
     assert "not callable" in diagnostic["message"]
@@ -3080,9 +2997,7 @@ def test_registry_initialize_and_cleanup_failures_are_recorded_exactly_once(
 
     plugin = Plugin()
     entry_point = FakeEntryPoint("alpha", plugin)
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     with pytest.raises(BackendPluginLifecycleError) as caught:
         registry.register(one_record(registry).record_id)
     assert caught.value.field == "initialize"
@@ -3126,9 +3041,7 @@ def test_registry_attempt_ledger_is_released_after_baseexception(
         plugin,
         load_error=KeyboardInterrupt() if operation == "load" else None,
     )
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     record_id = one_record(registry).record_id
 
     if operation == "load":
@@ -3144,9 +3057,7 @@ def test_registry_attempt_ledger_is_released_after_baseexception(
         registry.register(record_id)
         with pytest.raises(KeyboardInterrupt):
             registry.diagnostics(record_id)
-        assert registry.diagnostics(record_id)["plugin_diagnostics"] == {
-            "calls": 2
-        }
+        assert registry.diagnostics(record_id)["plugin_diagnostics"] == {"calls": 2}
 
     registry.reset()
 
@@ -3216,9 +3127,7 @@ def test_registry_hook_exception_text_is_stable_and_does_not_call_str(
             raise UnprintableError
 
     entry_point = FakeEntryPoint("alpha", Plugin())
-    registry = registry_for(
-        [make_distribution(tmp_path, entry_points=[entry_point])]
-    )
+    registry = registry_for([make_distribution(tmp_path, entry_points=[entry_point])])
     with pytest.raises(BackendPluginLifecycleError) as caught:
         registry.register(one_record(registry).record_id)
     diagnostic = caught.value.to_dict()
@@ -3271,10 +3180,7 @@ def test_registry_adapter_generation_does_not_invalidate_lifecycle_attempts(
         assert registry.select("beta").record.plugin_id == "vendor.beta"
         assert registry.generation == generation + 1
         allow_initialize.set()
-        assert (
-            alpha_future.result(timeout=10).state
-            is PluginLifecycleState.REGISTERED
-        )
+        assert alpha_future.result(timeout=10).state is PluginLifecycleState.REGISTERED
     assert registry.reset() == ()
 
 
@@ -3317,6 +3223,55 @@ def _selection_registry(
     return registry_for(distributions[index] for index in order), (alpha_ep, beta_ep)
 
 
+def test_registry_legacy_selection_lease_is_exact_one_shot_and_reset_bound() -> None:
+    entry_point = FakeEntryPoint(
+        "legacy",
+        SimpleNamespace(),
+        value="fixture_legacy",
+    )
+    distribution = FakeDistribution(
+        name="fixture-legacy",
+        entry_points=(entry_point,),
+        manifest_path=None,
+    )
+    registry = registry_for((distribution,))
+    registry.register_legacy_runtime_pair_materializer(
+        "acceptance.legacy-materializer",
+        lambda _context: LegacyRuntimePair(Compiler, Driver),
+    )
+    registry.register_runtime_pair_validator(
+        "acceptance.legacy-surface",
+        lambda _context: RuntimePairValidationResult(
+            contract_id="acceptance.legacy-surface",
+            required_surface=(),
+        ),
+    )
+    record = one_record(registry)
+
+    lease = registry.prepare_legacy_selection(record.record_id, "alpha")
+    copied = copy.copy(lease)
+    with pytest.raises(BackendPluginLifecycleError, match="exact Registry proposal"):
+        registry.commit_legacy_selection(copied)
+
+    decision = registry.commit_legacy_selection(lease)
+    assert decision.record_id == record.record_id
+    assert decision.target == "alpha"
+    with pytest.raises(BackendPluginLifecycleError, match="exact Registry proposal"):
+        registry.commit_legacy_selection(lease)
+
+    changed = registry.prepare_legacy_selection(record.record_id, "beta")
+    object.__setattr__(changed, "target", "changed")
+    with pytest.raises(BackendPluginLifecycleError, match="fields changed"):
+        registry.commit_legacy_selection(changed)
+    with pytest.raises(BackendPluginLifecycleError, match="exact Registry proposal"):
+        registry.commit_legacy_selection(changed)
+
+    stale = registry.prepare_legacy_selection(record.record_id, "beta")
+    assert registry.reset() == ()
+    with pytest.raises(BackendPluginLifecycleError, match="exact Registry proposal"):
+        registry.commit_legacy_selection(stale)
+
+
 def test_registry_duplicate_plugin_id_is_fatal_before_either_import(
     tmp_path: Path,
 ) -> None:
@@ -3333,7 +3288,11 @@ def test_registry_duplicate_plugin_id_is_fatal_before_either_import(
     registry = registry_for([second_dist, first_dist])
     registry.validate()
     report = registry.conflicts()
-    duplicate = [item for item in report.fatal_conflicts if item.kind.value == "duplicate_plugin_id"]
+    duplicate = [
+        item
+        for item in report.fatal_conflicts
+        if item.kind.value == "duplicate_plugin_id"
+    ]
     assert len(duplicate) == 1
     assert duplicate[0].to_error().to_dict()["plugin_id"] is None
     with pytest.raises(BackendPluginConflictError) as caught:
@@ -3424,9 +3383,7 @@ def test_registry_records_every_fatal_conflict_for_each_participant(
             plugins=[plugin],
             entry_points=[entry_point],
         )
-        for index, (plugin, entry_point) in enumerate(
-            zip(plugins, entry_points)
-        )
+        for index, (plugin, entry_point) in enumerate(zip(plugins, entry_points))
     ]
     registry = registry_for(reversed(distributions))
     records = registry.validate()
@@ -3441,8 +3398,7 @@ def test_registry_records_every_fatal_conflict_for_each_participant(
         ]
         assert all(item["plugin_id"] == record.plugin_id for item in diagnostics)
         assert all(
-            item["entry_point"] == record.entry_point_name
-            for item in diagnostics
+            item["entry_point"] == record.entry_point_name for item in diagnostics
         )
     with pytest.raises(BackendPluginConflictError):
         registry.load(records[0].record_id)
@@ -3473,15 +3429,11 @@ def test_registry_appends_conflict_to_previously_incompatible_record(
     ]
     registry = registry_for(distributions)
     records = registry.validate()
-    compatible = next(
-        record for record in records if record.entry_point_name == "beta"
-    )
+    compatible = next(record for record in records if record.entry_point_name == "beta")
     with pytest.raises(BackendPluginConflictError):
         registry.load(compatible.record_id)
 
-    refreshed = {
-        record.entry_point_name: record for record in registry.list()
-    }
+    refreshed = {record.entry_point_name: record for record in registry.list()}
     assert [error.code for error in refreshed["alpha"].errors] == [
         "backend_plugin_compatibility_error",
         "backend_plugin_conflict_error",
@@ -3489,9 +3441,7 @@ def test_registry_appends_conflict_to_previously_incompatible_record(
     assert [error.code for error in refreshed["beta"].errors] == [
         "backend_plugin_conflict_error"
     ]
-    assert isinstance(
-        refreshed["alpha"].error, BackendPluginCompatibilityError
-    )
+    assert isinstance(refreshed["alpha"].error, BackendPluginCompatibilityError)
     assert first_ep.load_calls == second_ep.load_calls == 0
 
 
@@ -3514,9 +3464,7 @@ def test_registry_shared_target_unique_priority_selects_only_winner(
 def test_registry_shared_target_equal_priority_is_explicit_ambiguity_without_import(
     tmp_path: Path,
 ) -> None:
-    registry, (alpha_ep, beta_ep) = _selection_registry(
-        tmp_path, priorities=(7, 7)
-    )
+    registry, (alpha_ep, beta_ep) = _selection_registry(tmp_path, priorities=(7, 7))
     with pytest.raises(BackendPluginSelectionError) as caught:
         registry.select("alpha")
     diagnostic = assert_structured_error(caught.value, field_contains="priority")
@@ -3574,9 +3522,7 @@ def test_registry_selection_and_conflicts_are_enumeration_order_independent(
     decisions = []
     conflict_views = []
     for index, order in enumerate(itertools.permutations((0, 1))):
-        registry, _ = _selection_registry(
-            tmp_path / str(index), order=order
-        )
+        registry, _ = _selection_registry(tmp_path / str(index), order=order)
         conflict_views.append(registry.conflicts().to_dict())
         records = registry.validate()
         decision = select_backend(records[::-1], target="alpha")
@@ -3609,8 +3555,16 @@ def test_registry_two_targets_can_be_selected_without_compiler_driver_split(
     beta = registry.select("beta")
     assert alpha.plugin_id == "vendor.alpha"
     assert beta.plugin_id == "vendor.beta"
-    assert alpha.record.compiler_cls.plugin_label == alpha.record.driver_cls.plugin_label == "alpha"
-    assert beta.record.compiler_cls.plugin_label == beta.record.driver_cls.plugin_label == "beta"
+    assert (
+        alpha.record.compiler_cls.plugin_label
+        == alpha.record.driver_cls.plugin_label
+        == "alpha"
+    )
+    assert (
+        beta.record.compiler_cls.plugin_label
+        == beta.record.driver_cls.plugin_label
+        == "beta"
+    )
 
 
 def test_registry_cannot_activate_two_plugins_without_reset(tmp_path: Path) -> None:

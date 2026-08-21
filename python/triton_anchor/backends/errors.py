@@ -78,9 +78,7 @@ class BackendPluginInterfaceError(BackendPluginError):
         self.missing_fields: Tuple[str, ...] = tuple(
             name for name in runtime_field_order if name in unique_missing_fields
         ) + tuple(
-            name
-            for name in unique_missing_fields
-            if name not in runtime_field_order
+            name for name in unique_missing_fields if name not in runtime_field_order
         )
         unique_invalid_fields = tuple(dict.fromkeys(invalid_fields))
         self.invalid_fields: Tuple[str, ...] = tuple(
@@ -111,16 +109,14 @@ class BackendPluginInterfaceError(BackendPluginError):
                         issue.member
                         for issue in self.interface_issues
                         if issue.field == field_name
-                        and issue.problem
-                        in {"missing", "abstract", "class_abstract"}
+                        and issue.problem in {"missing", "abstract", "class_abstract"}
                     }
                 )
             )
             for field_name in runtime_field_order
             if any(
                 issue.field == field_name
-                and issue.problem
-                in {"missing", "abstract", "class_abstract"}
+                and issue.problem in {"missing", "abstract", "class_abstract"}
                 for issue in self.interface_issues
             )
         }
@@ -155,15 +151,11 @@ class BackendPluginInterfaceError(BackendPluginError):
         affected_fields = set(self.missing_fields)
         affected_fields.update(self.invalid_fields)
         affected_fields.update(self.field_errors)
-        affected_fields.update(
-            issue.field for issue in self.interface_issues
-        )
+        affected_fields.update(issue.field for issue in self.interface_issues)
         ordered_affected_fields = tuple(
             name for name in runtime_field_order if name in affected_fields
         ) + tuple(
-            name
-            for name in sorted(affected_fields)
-            if name not in runtime_field_order
+            name for name in sorted(affected_fields) if name not in runtime_field_order
         )
         # Keep the historical defensive fallback for callers that construct
         # the error without details, while attributing every real validation
@@ -176,8 +168,7 @@ class BackendPluginInterfaceError(BackendPluginError):
             detail=detail,
             field=field,
             expected=(
-                "runtime classes satisfying registered abstract interface "
-                "contracts"
+                "runtime classes satisfying registered abstract interface contracts"
                 if self.interface_issues
                 else "class objects"
             ),
@@ -326,9 +317,7 @@ class BackendPluginCapabilityError(BackendPluginError):
     ) -> None:
         self.scope = scope
         self.missing_capabilities = tuple(sorted(set(missing_capabilities)))
-        self.available_capabilities = tuple(
-            sorted(set(available_capabilities))
-        )
+        self.available_capabilities = tuple(sorted(set(available_capabilities)))
         self.missing_plugin_capabilities = tuple(
             sorted(set(missing_plugin_capabilities))
         )
@@ -338,15 +327,11 @@ class BackendPluginCapabilityError(BackendPluginError):
         missing = ", ".join(self.missing_capabilities) or "<none>"
         available = ", ".join(self.available_capabilities) or "<none>"
         if scope == "plugin":
-            message = (
-                "Core is missing capabilities required by the plugin: "
-                + missing
-            )
+            message = "Core is missing capabilities required by the plugin: " + missing
             field = "requires_capabilities"
         elif scope == "kernel":
             message = (
-                "Backend is missing capabilities required by the kernel: "
-                + missing
+                "Backend is missing capabilities required by the kernel: " + missing
             )
             field = "kernel_required_capabilities"
         else:
@@ -354,9 +339,7 @@ class BackendPluginCapabilityError(BackendPluginError):
                 "Plugin and kernel capability requirements are not satisfied: "
                 + missing
             )
-            field = (
-                "requires_capabilities,kernel_required_capabilities"
-            )
+            field = "requires_capabilities,kernel_required_capabilities"
         super().__init__(
             message,
             plugin_id=plugin_id,
@@ -378,12 +361,8 @@ class BackendPluginCapabilityError(BackendPluginError):
                 "scope": self.scope,
                 "missing_capabilities": list(self.missing_capabilities),
                 "available_capabilities": list(self.available_capabilities),
-                "missing_plugin_capabilities": list(
-                    self.missing_plugin_capabilities
-                ),
-                "missing_kernel_capabilities": list(
-                    self.missing_kernel_capabilities
-                ),
+                "missing_plugin_capabilities": list(self.missing_plugin_capabilities),
+                "missing_kernel_capabilities": list(self.missing_kernel_capabilities),
             }
         )
         return result
@@ -433,6 +412,18 @@ class BackendPluginSelectionError(BackendPluginError):
     """No unique compatible plugin can be selected."""
 
     code = "backend_plugin_selection_error"
+
+
+class BackendPluginNoCandidateError(BackendPluginSelectionError):
+    """No applicable Manifest candidate exists for automatic selection.
+
+    Integration layers may catch this *specific* result to enter a governed
+    Legacy compatibility path.  Compatibility, capability, interface,
+    selector, and conflict failures intentionally use their existing error
+    types and must never be interpreted as permission to fall back.
+    """
+
+    code = "backend_plugin_no_candidate_error"
 
 
 class BackendPluginLifecycleError(BackendPluginError):
