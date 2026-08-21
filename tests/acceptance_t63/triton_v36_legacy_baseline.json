@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "upstream_commit": "9ceba3e222fd2c9af9cbaf6a440beb23911c197b",
+  "triton_version": "3.6.0",
+  "fixture": {
+    "distribution": "t63-v36-legacy-oracle",
+    "version": "1.0.0",
+    "entry_point_group": "triton.backends",
+    "entry_point_name": "baseline-legacy",
+    "entry_point_value": "t63_v36_legacy_oracle",
+    "has_manifest": false,
+    "wheel_sha256": "97402abf825cf56d800edf5f4cfa25a8513be585b2b067391d0766664d18a455"
+  },
+  "observed": {
+    "discovery_imports": [
+      "package_import",
+      "compiler_module_import",
+      "driver_module_import"
+    ],
+    "mapping_key": "baseline-legacy",
+    "compiler_class": "t63_v36_legacy_oracle.compiler.LegacyCompiler",
+    "driver_class": "t63_v36_legacy_oracle.driver.LegacyDriver",
+    "compiler_driver_same_package_root": true,
+    "make_backend_target_identity_preserved": true,
+    "runtime_active_is_default": true,
+    "reset_default_identity_preserved": true,
+    "reset_active_identity_preserved": true
+  },
+  "governed_port_delta": {
+    "discovery_must_import": false,
+    "first_compiler_or_runtime_consumption_may_import": true,
+    "f6_before_plugin_probe": true,
+    "legacy_compatibility_status": "legacy_unverified",
+    "reset_must_clear_and_rediscover": true
+  }
+}
