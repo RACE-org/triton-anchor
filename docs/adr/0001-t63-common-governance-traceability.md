@@ -21,16 +21,15 @@
 |---|---|---|---|---|---|
 | F3-01 | shipped Schema 与 `parse_manifest` 同域 | INV-01 | `manifest.py` 共享 lightweight predicates；semantic checks 分层，不引入 runtime jsonschema | `test_public_parser_rejects_value_forbidden_by_shipped_schema` | 1 FAIL |
 | F3-02 | 所有 `nonEmptyString` 引用一致 | INV-01 | required/optional/version strings、string tuples 共用首尾空白及 CR/LF 规则 | display/vendor、Protocol/Core/Triton/LLVM/MLIR versions、targets/capabilities/requires_capabilities 的空、空白、LF、CRLF、Unicode、合法值参数化双 oracle | 待新增 |
-| F3-02A | 所有 anchored patterns 拒绝 trailing CR/LF | INV-01 | Schema 显式排除 CR/LF，不依赖 `$` 行尾；parser 同 predicate | schema_version/plugin_id/entry_point/gitCommit/nonEmptyString/native path 的 trailing LF/CR/CRLF differential | 已知差异/待 D-02 |
+| F3-02A | 所有 anchored patterns 拒绝 trailing CR/LF | INV-01 | Schema 显式排除 CR/LF，不依赖 `$` 行尾；parser 同 predicate | schema_version/plugin_id/entry_point/gitCommit/nonEmptyString/native path 的 trailing LF/CR/CRLF differential | 已批准/待实现 |
 | F3-03 | native path predicate 一致 | INV-01、06 | parser 使用 Schema path predicate；containment/RECORD 留在 semantic/static 层 | `./x.so`、absolute、dot/dotdot、backslash、double separator、合法 path differential | 已知差异/待新增 |
 | F3-04 | JSON Schema integer 语义一致 | INV-01 | 接受 finite integral JSON numbers并 canonicalize `int`；boolean/非整数拒绝 | `1`、`1.0`、`1e0`、`1.5`、bool、极值 differential | 已知差异/待新增 |
 | F3-05 | structural string 不混入 PEP 440 semantic check | INV-01、02 | parser 按 Schema 接受 non-empty；pure semantic validator 在 import 前验证 SpecifierSet | `backend_protocol="banana"` Schema/parser ACCEPT + semantic REJECT；现有 malformed protocol node迁移但保留 | 已知差异/待新增 |
 | F3-06 | cross-record uniqueness 属 semantic 层 | INV-01、02 | duplicate plugin/entry point 从 parser 移入 import-free semantic validator | 现有 duplicate plugin_id/entry_point nodeid 保留，新增 Schema/parser ACCEPT assertion与 semantic REJECT | 已知差异/待新增 |
 | F3-07 | JSON text duplicate member 仍 fail-closed | INV-02、07 | `object_pairs_hook` 在 object 构造前拒绝；与 in-memory Schema domain 分开说明 | `test_registry_rejects_duplicate_json_member_names` | PASS |
 
-批准依赖：ADR D-01～D-04。若 D-01 为 published/unknown 且维护者不接受 wire
-erratum，本阶段完全停在协议门，F3 也不得开始。只有用户另行授权“F3-only partial
-remediation”时，才可仅把 parser 扩展到既有 Schema，且不得宣称本阶段完成。
+批准依赖已由 ADR D-01～D-04 满足。published/unknown 且不接受 wire erratum 是未采纳
+的备选分支；若未来推翻 D-01，须重新进入协议门，不能沿用本次实现授权。
 
 ## 2. F1：完整兼容诊断
 
@@ -40,10 +39,10 @@ remediation”时，才可仅把 parser 扩展到既有 Schema，且不得宣称
 | F1-02 | stable total order 与完整结构 | INV-03、07 | ADR §8 rank/field order；所有 stable keys 始终存在 | 待新增：恰好四项、重复运行同序、remediation/non-null identity、无随机 repr | coverage待补 |
 | F1-03 | 单错误 public behavior 兼容 | INV-03、07 | 需抛 API 仍抛排序第一项；record 保存 tuple | 现有 Protocol/Core/Triton/LLVM 单维测试、strict/identifier paths | PASS/回归 |
 | F1-04 | 所有独立检查 pre-load | INV-02、05、08 | distribution-dependent failure 不阻止 version checks；不捕获宽泛 Exception | simultaneous test `load_calls == 0`；新增 compile/init/public-state counters | 部分 PASS/待补 |
-| F1-05 | native/capability 不回归 | INV-02、03、06 | unsupported isolation 在 structural Schema/parser 阶段即停止，不进入 compatibility evaluator；capability 仍走 semantic 末位 | native rejection/capability pre-import tests | 待 ADR |
+| F1-05 | native/capability 不回归 | INV-02、03、06 | unsupported isolation 在 structural Schema/parser 阶段即停止，不进入 compatibility evaluator；capability 仍走 semantic 末位 | native rejection/capability pre-import tests | 已批准/待实现 |
 | F1-06 | multi-record conflict identity 稳定 | INV-05、07 | 每个受影响 record 一条自身 identity error；sorted `related_plugin_ids/record_ids`；root summary 才可 null | duplicate SONAME/symbol/plugin_id/entry-point tests新增 per-record identity与 canonical sort assertions | behavior缺口/待补 |
 
-批准依赖：ADR §6.2、§8（D-04、D-06），不依赖无关的 native init 顺序。
+批准依赖已由 ADR §6.2、§8（D-04、D-06）满足；不依赖无关的 native init 顺序。
 
 ## 3. F2：Python lifecycle contracts
 
@@ -56,7 +55,7 @@ remediation”时，才可仅把 parser 扩展到既有 Schema，且不得宣称
 | F2-05 | initialize once、reset race、hook re-entry | INV-05、09 | hook 在 lock 外；generation token；同 hook once | concurrent initialize/reset nodes PASS；新增 init/shutdown/diagnostics re-entry | PASS/coverage待补 |
 | F2-06 | state/public mapping publish gate | INV-05、08、09 | REGISTERED 仅在 successful None result 后；reject detach mapping/cache | initialize exception/non-None + integration mapping assertions | 部分 PASS/待补 |
 
-批准依赖：ADR §7（D-05、D-10）。Python lifecycle 不依赖未来 native loader 方案。
+批准依赖已由 ADR §7（D-05、D-10）满足。Python lifecycle 不依赖未来 native loader 方案。
 
 ## 4. Native/Protocol SPEC GAP closure
 
@@ -76,8 +75,8 @@ remediation”时，才可仅把 parser 扩展到既有 Schema，且不得宣称
 | ABI-09 | reader/writer window | INV-01、02、10 | rolling 1.x optional-only；required/narrow/removal 走 major或显式 erratum | 现有 5 个 protocol-field nodes 保留 nodeid，但不得继续把 requirement range 当 producer actual version；按 ADR §12.2 迁移 oracle | requirement gap / oracle待迁移 |
 | ABI-10 | diagnostics timeline | INV-04、07、10 | since 1.0、missing `{}`、无 replacement 不弃用 | 同一批 field-policy nodes 与 lifecycle diagnostics tests在 F2 提交重写/移除错误 1.1/1.2/2.0 policy | requirement gap / oracle待迁移 |
 
-批准依赖：ADR D-01～D-12。若选择 native implementation，ADR §11 明确仍不具备可
-实施 header/loader contract，必须返回协议门，不能开始代码。
+批准依赖已由 ADR D-01～D-12 满足。native implementation 是未采纳备选；ADR §11
+明确仍不具备可实施 header/loader contract，若未来选择该路径必须返回协议门。
 
 ## 5. Explicit rejection 的 oracle 迁移与状态门
 
@@ -146,11 +145,11 @@ $T63_PYTHON -m pytest -q \
 | 顺序 | 提交信息 | 允许内容 |
 |---|---|---|
 | 1 | `test: add Triton 3.3 T6.3 acceptance baseline` | **已完成**：仅 acceptance baseline |
-| 2 | `docs: freeze T6.3 protocol and native ABI rules` | 仅获批 ADR/矩阵；批准后独立创建 |
+| 2 | `docs: freeze T6.3 protocol and native ABI rules` | **已完成**：`b744944`，仅获批 ADR/矩阵 |
 | 3 | `fix: align backend manifest parser with schema` | F3 structural/semantic layering + differential tests |
 | 4 | `fix: aggregate backend compatibility diagnostics` | F1 evaluator/record + order/schema tests |
 | 5 | `fix: enforce backend plugin lifecycle contracts` | F2 hooks/state/concurrency tests |
 | 6 | `feat: enforce native backend ABI and load contract` | 推荐路径仅 explicit rejection/no-load contract；不加 ABI sketch |
 
-维护者已确认 1.0 未对外发布并批准推荐 bundle。先将两份 ignored 文档精确 force-add
-为第 2 个独立提交，再依次开始第 3～6 个生产提交。
+维护者已确认 1.0 未对外发布并批准推荐 bundle；第 2 个规范提交已经完成。当前停点在
+提交 2 与 3 之间，依次开始第 3～6 个生产提交。
