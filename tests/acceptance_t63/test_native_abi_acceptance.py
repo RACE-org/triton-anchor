@@ -10,12 +10,13 @@ from __future__ import annotations
 import base64
 import ctypes
 import hashlib
+import importlib
 import json
-import os
 import platform
 import subprocess
+import sys
 import sysconfig
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +27,7 @@ from packaging.tags import Tag
 from triton_anchor.backends import (
     BackendPluginCompatibilityError,
     BackendPluginManifestError,
+    BackendPluginRecord,
     BackendPluginRegistry,
     CompatibilityReport,
     CoreEnvironment,
@@ -33,11 +35,16 @@ from triton_anchor.backends import (
     PluginCompatibilityStatus,
     PluginIsolationMode,
     PluginLifecycleState,
+    PluginSource,
+    SelectionDecision,
+    SelectionMethod,
     detect_conflicts,
     inspect_native_artifacts,
     load_build_info,
     parse_manifest,
+    select_backend,
     validate_backend_plugin,
+    validate_triton_requirement,
 )
 
 
@@ -182,6 +189,211 @@ def _plugin_manifest(
     }
 
 
+def _native_plugin(
+    *,
+    entry_point: str = "native",
+    plugin_id: str = "vendor.native",
+    library: str = "fixture/libvendor_native.so",
+    fingerprint: str = FINGERPRINT,
+):
+    """Construct evidence-only native metadata from a legal 1.0 record.
+
+    The public parser must never accept this result.  ``dataclasses.replace``
+    deliberately models an in-process caller bypassing structural parsing so
+    low-level inspection and operational fail-closed guards can be tested.
+    """
+    document = _plugin_manifest(
+        entry_point=entry_point,
+        plugin_id=plugin_id,
+        library=library,
+        fingerprint=fingerprint,
+    )
+    wire_plugin = document["plugins"][0]
+    wire_plugin["isolation_mode"] = "python_only"
+    wire_plugin.pop("native_libraries")
+    wire_plugin.pop("abi_fingerprint")
+    parsed = parse_manifest(document).plugins[0]
+    return replace(
+        parsed,
+        isolation_mode=PluginIsolationMode.NATIVE_IN_PROCESS,
+        native_libraries=(library,),
+        abi_fingerprint=fingerprint,
+    )
+
+
+def _python_only_document(
+    *, entry_point: str = "native", plugin_id: str = "vendor.native"
+) -> dict[str, Any]:
+    document = _plugin_manifest(entry_point=entry_point, plugin_id=plugin_id)
+    wire_plugin = document["plugins"][0]
+    wire_plugin["isolation_mode"] = "python_only"
+    wire_plugin.pop("native_libraries")
+    wire_plugin.pop("abi_fingerprint")
+    return document
+
+
+class UntouchedDistribution:
+    """Sentinel proving unsupported modes do not inspect package metadata."""
+
+    def __init__(self) -> None:
+        self.accesses: list[str] = []
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in {"accesses", "__dict__", "__class__"}:
+            return object.__getattribute__(self, name)
+        object.__getattribute__(self, "accesses").append(name)
+        raise AssertionError(f"unsupported isolation touched distribution.{name}")
+
+
+def _crafted_native_registry(
+    state: PluginLifecycleState,
+    mode: PluginIsolationMode = PluginIsolationMode.NATIVE_IN_PROCESS,
+) -> tuple[
+    BackendPluginRegistry,
+    BackendPluginRecord,
+    FakeEntryPoint,
+    UntouchedDistribution,
+]:
+    plugin = replace(
+        _native_plugin(),
+        isolation_mode=mode,
+        native_libraries=(
+            ("fixture/libvendor_native.so",)
+            if mode is PluginIsolationMode.NATIVE_IN_PROCESS
+            else ()
+        ),
+        abi_fingerprint=(
+            FINGERPRINT
+            if mode is PluginIsolationMode.NATIVE_IN_PROCESS
+            else None
+        ),
+    )
+    class NativeCompiler:
+        supports_calls = 0
+        constructor_calls = 0
+
+        @classmethod
+        def supports_target(cls, _target: Any) -> bool:
+            cls.supports_calls += 1
+            return True
+
+        def __init__(self, _target: Any) -> None:
+            type(self).constructor_calls += 1
+
+    class NativeDriver:
+        active_probe_calls = 0
+        constructor_calls = 0
+
+        @classmethod
+        def is_active(cls) -> bool:
+            cls.active_probe_calls += 1
+            return True
+
+        def __init__(self) -> None:
+            type(self).constructor_calls += 1
+
+    class NativePlugin:
+        compiler_cls = NativeCompiler
+        driver_cls = NativeDriver
+
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    plugin_object = NativePlugin()
+    entry_point = FakeEntryPoint("native", plugin_object)
+    distribution = UntouchedDistribution()
+    selected_targets = (
+        ("native",)
+        if state in {PluginLifecycleState.SELECTED, PluginLifecycleState.ACTIVE}
+        else ()
+    )
+    record = BackendPluginRecord(
+        record_id="crafted-native:native",
+        entry_point_name="native",
+        entry_point_value="fixture_native:plugin",
+        distribution_name="crafted-native",
+        distribution_version="1.0.0",
+        source=PluginSource.MANIFEST,
+        state=state,
+        compatibility_status=PluginCompatibilityStatus.COMPATIBLE,
+        entry_point=entry_point,
+        distribution=distribution,
+        manifest=plugin,
+        compatibility_report=CompatibilityReport(
+            plugin_id=plugin.plugin_id,
+            entry_point=plugin.entry_point,
+            checks=(),
+            compatible=True,
+        ),
+        plugin_object=plugin_object,
+        compiler_cls=plugin_object.compiler_cls,
+        driver_cls=plugin_object.driver_cls,
+        initialized=state
+        in {
+            PluginLifecycleState.REGISTERED,
+            PluginLifecycleState.SELECTED,
+            PluginLifecycleState.ACTIVE,
+        },
+        selected_targets=selected_targets,
+    )
+    registry = BackendPluginRegistry(
+        distribution_provider=lambda: (),
+        environment_provider=lambda: (_ for _ in ()).throw(
+            AssertionError("unsupported isolation touched CoreEnvironment")
+        ),
+    )
+    registry._records = {record.record_id: record}
+    registry._discovered = True
+    if record.initialized:
+        registry._cleanup_stack.append(record)
+    if selected_targets:
+        registry._selections["native"] = SelectionDecision(
+            record_id=record.record_id,
+            registry_key=record.registry_key,
+            plugin_id=record.plugin_id,
+            entry_point_name=record.entry_point_name,
+            target="native",
+            method=SelectionMethod.SOLE_CANDIDATE,
+            selector=None,
+            priority=record.manifest.priority,
+            is_legacy=False,
+            candidate_record_ids=(record.record_id,),
+            capability_report=None,
+            record=record,
+        )
+    return registry, record, entry_point, distribution
+
+
+def _load_triton_backend_adapter(
+    registry: BackendPluginRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Load the checked-out adapter without importing Triton's native module."""
+    import triton_anchor.backends as backend_api
+
+    package_dir = (
+        Path(__file__).resolve().parents[2]
+        / "triton/python/triton/backends"
+    )
+    module_name = f"_t63_triton_backends_{id(registry)}"
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        package_dir / "__init__.py",
+        submodule_search_locations=[str(package_dir)],
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setattr(
+        backend_api, "get_backend_plugin_registry", lambda: registry
+    )
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _environment(*, fingerprint: str = FINGERPRINT) -> CoreEnvironment:
     return CoreEnvironment(
         core_version="0.2.0",
@@ -246,9 +458,34 @@ def _distribution(
     )
 
 
+def _python_distribution_with_native_file(
+    tmp_path: Path,
+    *,
+    relative: str,
+    payload: bytes,
+    plugin_object: Any = None,
+) -> tuple[FakeDistribution, FakeEntryPoint]:
+    output = tmp_path / relative
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_bytes(payload)
+    if plugin_object is None:
+        plugin_object = SimpleNamespace(
+            compiler_cls=type("PythonCompiler", (), {}),
+            driver_cls=type("PythonDriver", (), {}),
+        )
+    entry_point = FakeEntryPoint("native", plugin_object)
+    distribution = FakeDistribution(
+        tmp_path,
+        entry_point=entry_point,
+        manifest=_python_only_document(),
+        library_paths=(relative,),
+    )
+    return distribution, entry_point
+
+
 def test_native_valid_elf_record_hash_soname_and_public_symbol(tmp_path: Path) -> None:
     distribution = _distribution(tmp_path)
-    plugin = parse_manifest(_plugin_manifest()).plugins[0]
+    plugin = _native_plugin()
     report = inspect_native_artifacts(plugin, distribution)
     assert report.paths == ("fixture/libvendor_native.so",)
     artifact = report.artifacts[0]
@@ -257,15 +494,17 @@ def test_native_valid_elf_record_hash_soname_and_public_symbol(tmp_path: Path) -
     assert artifact.identity == "libvendor_native.so"
     assert "vendor_t63_entry" in artifact.exported_symbols
 
-    compatibility = validate_backend_plugin(
-        plugin,
-        _environment(),
-        distribution=distribution,
-        core_abi_fingerprint=FINGERPRINT,
-        supported_tags=(WHEEL_TAG,),
-    )
-    assert compatibility.compatible
-    assert compatibility.native_artifacts == report.artifacts
+    with pytest.raises(BackendPluginManifestError) as caught:
+        validate_backend_plugin(
+            plugin,
+            _environment(),
+            distribution=distribution,
+            core_abi_fingerprint=FINGERPRINT,
+            supported_tags=(WHEEL_TAG,),
+        )
+    assert caught.value.field == "isolation_mode"
+    assert caught.value.expected == "python_only"
+    assert caught.value.actual == "native_in_process"
 
 
 def test_native_record_tampering_is_rejected(tmp_path: Path) -> None:
@@ -275,7 +514,7 @@ def test_native_record_tampering_is_rejected(tmp_path: Path) -> None:
             "fixture/libvendor_native.so": "sha256=" + "A" * 43,
         },
     )
-    plugin = parse_manifest(_plugin_manifest()).plugins[0]
+    plugin = _native_plugin()
     with pytest.raises(BackendPluginManifestError) as caught:
         inspect_native_artifacts(plugin, distribution)
     assert caught.value.field == "RECORD"
@@ -293,7 +532,7 @@ def test_native_in_process_cannot_hide_undeclared_library(tmp_path: Path) -> Non
     digest = hashlib.sha256(hidden.read_bytes()).digest()
     encoded = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
     distribution._record += f"fixture/libhidden.so,sha256={encoded},\n"
-    plugin = parse_manifest(_plugin_manifest()).plugins[0]
+    plugin = _native_plugin()
     with pytest.raises(BackendPluginManifestError) as caught:
         inspect_native_artifacts(plugin, distribution)
     assert caught.value.field == "native_libraries"
@@ -302,10 +541,115 @@ def test_native_in_process_cannot_hide_undeclared_library(tmp_path: Path) -> Non
 
 def test_native_in_process_cannot_use_pure_python_wheel_tag(tmp_path: Path) -> None:
     distribution = _distribution(tmp_path, purelib=True)
-    plugin = parse_manifest(_plugin_manifest()).plugins[0]
+    plugin = _native_plugin()
     with pytest.raises(BackendPluginCompatibilityError) as caught:
         inspect_native_artifacts(plugin, distribution)
     assert caught.value.dimension == "native wheel layout"
+
+
+@pytest.mark.parametrize(
+    "relative,payload",
+    [
+        ("fixture/backend.so", b"not-even-elf"),
+        ("fixture/backend.dylib", b"not-even-macho"),
+        ("fixture/backend.dll", b"not-even-pe"),
+        ("fixture/backend.pyd", b"not-even-pe"),
+        ("fixture/libbackend.so.1", b"versioned-native-name"),
+        ("fixture/libbackend.dylib.1", b"versioned-native-name"),
+        ("fixture/disguised.data", b"\x7fELF" + b"\0" * 16),
+        ("fixture/disguised-macho.data", b"\xcf\xfa\xed\xfe" + b"\0" * 16),
+        ("fixture/disguised-pe.data", b"MZ" + b"\0" * 18),
+    ],
+    ids=[
+        "so",
+        "dylib",
+        "dll",
+        "pyd",
+        "versioned-so",
+        "versioned-dylib",
+        "elf-magic",
+        "macho-magic",
+        "pe-magic",
+    ],
+)
+def test_python_only_distribution_rejects_native_inventory(
+    tmp_path: Path,
+    relative: str,
+    payload: bytes,
+) -> None:
+    distribution, entry_point = _python_distribution_with_native_file(
+        tmp_path,
+        relative=relative,
+        payload=payload,
+    )
+    plugin = parse_manifest(_python_only_document()).plugins[0]
+
+    with pytest.raises(BackendPluginCompatibilityError) as caught:
+        validate_backend_plugin(
+            plugin,
+            _environment(),
+            distribution=distribution,
+            supported_tags=(WHEEL_TAG,),
+        )
+    assert caught.value.dimension == "python_only wheel contents"
+    assert relative in caught.value.actual
+    assert "native_in_process" not in (caught.value.remediation or "")
+    assert entry_point.load_calls == 0
+
+
+def test_python_only_native_inventory_blocks_registry_profiles_and_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Plugin:
+        compiler_cls = type("PythonCompiler", (), {})
+        driver_cls = type("PythonDriver", (), {})
+
+        def __init__(self) -> None:
+            self.initialize_calls = 0
+
+        def initialize(self, _context: Any) -> None:
+            self.initialize_calls += 1
+
+    plugin_object = Plugin()
+    distribution, entry_point = _python_distribution_with_native_file(
+        tmp_path,
+        relative="fixture/hidden.so.1",
+        payload=b"native-by-name",
+        plugin_object=plugin_object,
+    )
+
+    for profile in ("full", "triton_version"):
+        registry = BackendPluginRegistry(
+            distribution_provider=lambda: (distribution,),
+            environment_provider=_environment,
+            supported_tags=(WHEEL_TAG,),
+            preflight_profile=profile,
+        )
+        record = registry.validate()[0]
+        assert record.state is PluginLifecycleState.REJECTED
+        assert record.compatibility_status is PluginCompatibilityStatus.INCOMPATIBLE
+        assert isinstance(record.error, BackendPluginCompatibilityError)
+        assert record.error.dimension == "python_only wheel contents"
+        for callback in (
+            lambda: registry.load(record.record_id),
+            lambda: registry.register(record.record_id),
+            lambda: registry.select(
+                "native", explicit_selector=record.record_id
+            ),
+        ):
+            with pytest.raises(BackendPluginCompatibilityError) as caught:
+                callback()
+            assert caught.value.dimension == "python_only wheel contents"
+        assert registry.get_selection("native") is None
+
+    triton_backends = _load_triton_backend_adapter(registry, monkeypatch)
+    with pytest.raises(BackendPluginCompatibilityError) as caught:
+        triton_backends.get_backend("native")
+    assert caught.value.dimension == "python_only wheel contents"
+    assert "native" not in triton_backends.backends
+    assert entry_point.load_calls == 0
+    assert plugin_object.initialize_calls == 0
 
 
 def test_native_fingerprint_mismatch_rejected_before_import_or_initialize(
@@ -324,9 +668,16 @@ def test_native_fingerprint_mismatch_rejected_before_import_or_initialize(
     plugin_object = Plugin()
     entry_point = FakeEntryPoint("native", plugin_object)
     distribution = _distribution(tmp_path, entry_point=entry_point)
+    environment_calls = 0
+
+    def environment_provider() -> CoreEnvironment:
+        nonlocal environment_calls
+        environment_calls += 1
+        return _environment()
+
     registry = BackendPluginRegistry(
         distribution_provider=lambda: (distribution,),
-        environment_provider=_environment,
+        environment_provider=environment_provider,
         core_abi_fingerprint="sha256:" + "c" * 64,
         supported_tags=(WHEEL_TAG,),
     )
@@ -334,14 +685,258 @@ def test_native_fingerprint_mismatch_rejected_before_import_or_initialize(
     assert len(records) == 1
     record = records[0]
     assert record.state is PluginLifecycleState.REJECTED
-    assert record.compatibility_status is PluginCompatibilityStatus.INCOMPATIBLE
-    assert isinstance(record.error, BackendPluginCompatibilityError)
-    assert record.error.dimension == "Core ABI fingerprint"
+    assert record.compatibility_status is PluginCompatibilityStatus.NOT_CHECKED
+    assert isinstance(record.error, BackendPluginManifestError)
+    assert record.error.field == "isolation_mode"
     assert record.error.plugin_id == "vendor.native"
-    assert record.error.expected == FINGERPRINT
-    assert record.error.actual == "sha256:" + "c" * 64
+    assert record.error.expected == "python_only"
+    assert record.error.actual == "native_in_process"
+    assert environment_calls == 0
     assert entry_point.load_calls == 0
     assert plugin_object.initialize_calls == 0
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        PluginIsolationMode.NATIVE_IN_PROCESS,
+        PluginIsolationMode.SUBPROCESS,
+    ],
+    ids=["native-in-process", "subprocess"],
+)
+def test_unsupported_isolation_public_validators_fail_before_metadata(
+    mode: PluginIsolationMode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plugin = replace(
+        _native_plugin(),
+        isolation_mode=mode,
+        native_libraries=("fixture/libvendor_native.so",) if mode
+        is PluginIsolationMode.NATIVE_IN_PROCESS else (),
+        abi_fingerprint=FINGERPRINT if mode
+        is PluginIsolationMode.NATIVE_IN_PROCESS else None,
+    )
+    distribution = UntouchedDistribution()
+
+    def forbidden_inspector(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("unsupported isolation reached native inspector")
+
+    monkeypatch.setattr(
+        "triton_anchor.backends.compatibility.inspect_native_artifacts",
+        forbidden_inspector,
+    )
+    for validator in (
+        lambda: validate_backend_plugin(
+            plugin,
+            object(),  # type: ignore[arg-type]
+            distribution=distribution,
+        ),
+        lambda: validate_triton_requirement(
+            plugin,
+            object(),  # type: ignore[arg-type]
+        ),
+    ):
+        with pytest.raises(BackendPluginManifestError) as caught:
+            validator()
+        assert caught.value.to_dict() == {
+            "code": "backend_plugin_manifest_error",
+            "message": str(caught.value),
+            "plugin_id": "vendor.native",
+            "entry_point": "native",
+            "field": "isolation_mode",
+            "dimension": None,
+            "expected": "python_only",
+            "actual": mode.value,
+            "remediation": caught.value.remediation,
+            "detail": None,
+        }
+        assert caught.value.remediation
+    assert distribution.accesses == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        PluginLifecycleState.DISCOVERED,
+        PluginLifecycleState.VALIDATED,
+        PluginLifecycleState.LOADED,
+        PluginLifecycleState.REGISTERED,
+        PluginLifecycleState.SELECTED,
+        PluginLifecycleState.ACTIVE,
+    ],
+    ids=lambda state: state.value,
+)
+@pytest.mark.parametrize(
+    "mode",
+    [
+        PluginIsolationMode.NATIVE_IN_PROCESS,
+        PluginIsolationMode.SUBPROCESS,
+    ],
+    ids=lambda mode: mode.value,
+)
+def test_unsupported_isolation_is_rejected_from_every_manifest_state(
+    state: PluginLifecycleState,
+    mode: PluginIsolationMode,
+) -> None:
+    registry, record, entry_point, distribution = _crafted_native_registry(
+        state, mode
+    )
+    had_selection = registry.get_selection("native") is not None
+
+    with pytest.raises(BackendPluginManifestError) as caught:
+        registry.validate(record.record_id)
+    assert caught.value.field == "isolation_mode"
+    assert caught.value.expected == "python_only"
+    assert caught.value.actual == mode.value
+
+    rejected = registry.inspect(record.record_id)
+    assert rejected.state is PluginLifecycleState.REJECTED
+    assert rejected.compatibility_status is PluginCompatibilityStatus.NOT_CHECKED
+    assert rejected.error is caught.value
+    assert rejected.plugin_object is None
+    assert rejected.compiler_cls is None
+    assert rejected.driver_cls is None
+    assert not rejected.initialized
+    assert rejected.selected_targets == ()
+    assert registry.get_selection("native") is None
+    assert registry.generation == (1 if had_selection else 0)
+    assert registry.reset() == ()
+    assert record.plugin_object.shutdown_calls == 0
+    assert entry_point.load_calls == 0
+    assert distribution.accesses == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["validate", "load", "register", "select", "activate"],
+)
+@pytest.mark.parametrize(
+    "mode",
+    [
+        PluginIsolationMode.NATIVE_IN_PROCESS,
+        PluginIsolationMode.SUBPROCESS,
+    ],
+    ids=lambda mode: mode.value,
+)
+def test_registry_operational_apis_reject_crafted_native_active_record(
+    operation: str,
+    mode: PluginIsolationMode,
+) -> None:
+    registry, record, entry_point, distribution = _crafted_native_registry(
+        PluginLifecycleState.ACTIVE, mode
+    )
+    callbacks = {
+        "validate": lambda: registry.validate(record.record_id),
+        "load": lambda: registry.load(record.record_id),
+        "register": lambda: registry.register(record.record_id),
+        "select": lambda: registry.select(
+            "native", explicit_selector=record.record_id
+        ),
+        "activate": lambda: registry.activate(record.record_id),
+    }
+
+    with pytest.raises(BackendPluginManifestError) as caught:
+        callbacks[operation]()
+    assert caught.value.field == "isolation_mode"
+    assert registry.inspect(record.record_id).state is PluginLifecycleState.REJECTED
+    assert registry.get_selection("native") is None
+    assert entry_point.load_calls == 0
+    assert distribution.accesses == []
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        PluginIsolationMode.NATIVE_IN_PROCESS,
+        PluginIsolationMode.SUBPROCESS,
+    ],
+    ids=lambda mode: mode.value,
+)
+def test_exported_selection_rejects_crafted_native_compatible_record(
+    mode: PluginIsolationMode,
+) -> None:
+    registry, record, entry_point, distribution = _crafted_native_registry(
+        PluginLifecycleState.VALIDATED, mode
+    )
+    del registry
+    with pytest.raises(BackendPluginManifestError) as caught:
+        select_backend(
+            (record,),
+            target="native",
+            explicit_selector=record.record_id,
+        )
+    assert caught.value.field == "isolation_mode"
+    assert entry_point.load_calls == 0
+    assert distribution.accesses == []
+
+
+def test_registry_isolation_guard_does_not_trust_forged_source_metadata() -> None:
+    registry, record, entry_point, distribution = _crafted_native_registry(
+        PluginLifecycleState.VALIDATED
+    )
+    forged = replace(record, source=None)
+    registry._records[record.record_id] = forged
+
+    with pytest.raises(BackendPluginManifestError) as caught:
+        registry.load(record.record_id)
+    assert caught.value.field == "isolation_mode"
+    assert registry.inspect(record.record_id).state is PluginLifecycleState.REJECTED
+    assert entry_point.load_calls == 0
+    assert distribution.accesses == []
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["get_backend", "make_backend", "get_driver_backends", "activate_backend"],
+)
+@pytest.mark.parametrize(
+    "mode",
+    [
+        PluginIsolationMode.NATIVE_IN_PROCESS,
+        PluginIsolationMode.SUBPROCESS,
+    ],
+    ids=lambda mode: mode.value,
+)
+def test_triton_cached_decision_revalidates_and_prunes_crafted_native(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    mode: PluginIsolationMode,
+) -> None:
+    registry, record, entry_point, distribution = _crafted_native_registry(
+        PluginLifecycleState.ACTIVE, mode
+    )
+    triton_backends = _load_triton_backend_adapter(registry, monkeypatch)
+    decision = registry.get_selection("native")
+    assert decision is not None
+    stale = triton_backends.Backend(
+        compiler=record.compiler_cls,
+        driver=record.driver_cls,
+        record_id=record.record_id,
+        plugin_id=record.plugin_id,
+        entry_point_name=record.entry_point_name,
+    )
+    monkeypatch.setattr(triton_backends, "_registry", lambda: registry)
+    monkeypatch.delenv("TRITON_ANCHOR_BACKEND", raising=False)
+    triton_backends.backends[record.entry_point_name] = stale
+
+    callbacks = {
+        "get_backend": lambda: triton_backends.get_backend("native"),
+        "make_backend": lambda: triton_backends.make_backend("native"),
+        "get_driver_backends": triton_backends.get_driver_backends,
+        "activate_backend": lambda: triton_backends.activate_backend(stale),
+    }
+    with pytest.raises(BackendPluginManifestError) as caught:
+        callbacks[operation]()
+    assert caught.value.field == "isolation_mode"
+    assert record.entry_point_name not in triton_backends.backends
+    assert registry.get_selection("native") is None
+    assert registry.inspect(record.record_id).state is PluginLifecycleState.REJECTED
+    assert record.compiler_cls.supports_calls == 0
+    assert record.compiler_cls.constructor_calls == 0
+    assert record.driver_cls.active_probe_calls == 0
+    assert record.driver_cls.constructor_calls == 0
+    assert entry_point.load_calls == 0
+    assert distribution.accesses == []
 
 
 @dataclass(frozen=True)
@@ -548,30 +1143,28 @@ def test_generated_build_info_detects_compiler_abi_material_tampering(
 def test_native_required_symbol_name_is_not_defined_by_manifest_1_0(
     tmp_path: Path,
 ) -> None:
-    """Evidence for a SPEC GAP, not a PASS for a required-symbol contract.
-
-    Manifest 1.0 has no field or normative name for an initialization symbol.
-    The public inspector therefore accepts an arbitrary vendor-qualified export.
-    The acceptance report classifies missing/wrong required-symbol cases as
-    SPEC GAP rather than inventing a symbol name here.
-    """
+    """No invented symbol can turn unsupported native metadata loadable."""
 
     distribution = _distribution(tmp_path, symbol="arbitrary_vendor_export")
-    plugin = parse_manifest(_plugin_manifest()).plugins[0]
+    plugin = _native_plugin()
     artifact = inspect_native_artifacts(plugin, distribution).artifacts[0]
     assert artifact.exported_symbols == ("arbitrary_vendor_export",)
+    with pytest.raises(BackendPluginManifestError) as caught:
+        validate_backend_plugin(
+            plugin,
+            _environment(),
+            distribution=distribution,
+            core_abi_fingerprint=FINGERPRINT,
+            supported_tags=(WHEEL_TAG,),
+        )
+    assert caught.value.field == "isolation_mode"
+    assert caught.value.expected == "python_only"
 
 
 def test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0(
     tmp_path: Path,
 ) -> None:
-    """Evidence for the compiler/C++ ABI attestation SPEC GAP.
-
-    Two binaries built with opposite libstdc++ ABI switches can repeat the same
-    self-asserted Core fingerprint.  Manifest 1.0 carries no independently
-    verifiable plugin compiler or ``_GLIBCXX_USE_CXX11_ABI`` fact, so both pass
-    the current public static validator.
-    """
+    """Self-asserted Core fingerprints never authorize native Protocol 1.0."""
 
     artifacts = []
     for abi in ("0", "1"):
@@ -608,8 +1201,7 @@ def test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0(
         assert completed.returncode == 0, completed.stdout
         entry_point = FakeEntryPoint(f"native-{abi}", object())
         manifest = _plugin_manifest(
-            entry_point=f"native-{abi}",
-            plugin_id=f"vendor.native.{abi}",
+            entry_point=f"native-{abi}", plugin_id=f"vendor.native.{abi}"
         )
         distribution = FakeDistribution(
             root,
@@ -617,15 +1209,19 @@ def test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0(
             manifest=manifest,
             library_paths=(relative,),
         )
-        plugin = parse_manifest(manifest).plugins[0]
-        report = validate_backend_plugin(
-            plugin,
-            _environment(),
-            distribution=distribution,
-            core_abi_fingerprint=FINGERPRINT,
-            supported_tags=(WHEEL_TAG,),
+        plugin = _native_plugin(
+            entry_point=f"native-{abi}", plugin_id=f"vendor.native.{abi}"
         )
-        artifacts.append(report.native_artifacts[0])
+        artifacts.append(inspect_native_artifacts(plugin, distribution).artifacts[0])
+        with pytest.raises(BackendPluginManifestError) as caught:
+            validate_backend_plugin(
+                plugin,
+                _environment(),
+                distribution=distribution,
+                core_abi_fingerprint=FINGERPRINT,
+                supported_tags=(WHEEL_TAG,),
+            )
+        assert caught.value.field == "isolation_mode"
 
     assert all("vendor_cxx_string_size" in item.exported_symbols for item in artifacts)
     assert artifacts[0].sha256 != artifacts[1].sha256
@@ -633,8 +1229,9 @@ def test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0(
 
 def test_native_static_inspection_does_not_prove_dlopen_success(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Evidence for the undefined native load/initialization policy gap."""
+    """Static evidence is non-operational and the host loader stays untouched."""
 
     relative = "fixture/libvendor_native.so"
     output = tmp_path / relative
@@ -673,8 +1270,23 @@ def test_native_static_inspection_does_not_prove_dlopen_success(
         manifest=manifest,
         library_paths=(relative,),
     )
-    plugin = parse_manifest(manifest).plugins[0]
+    plugin = _native_plugin()
     artifact = inspect_native_artifacts(plugin, distribution).artifacts[0]
     assert "vendor_t63_entry" in artifact.exported_symbols
-    with pytest.raises(OSError, match="t63_symbol_that_does_not_exist"):
-        ctypes.CDLL(str(output), mode=os.RTLD_NOW)
+    dlopen_calls = []
+
+    def forbidden_dlopen(*args: Any, **kwargs: Any) -> None:
+        dlopen_calls.append((args, kwargs))
+        raise AssertionError("operational rejection must not call ctypes.CDLL")
+
+    monkeypatch.setattr(ctypes, "CDLL", forbidden_dlopen)
+    with pytest.raises(BackendPluginManifestError) as caught:
+        validate_backend_plugin(
+            plugin,
+            _environment(),
+            distribution=distribution,
+            core_abi_fingerprint=FINGERPRINT,
+            supported_tags=(WHEEL_TAG,),
+        )
+    assert caught.value.field == "isolation_mode"
+    assert dlopen_calls == []

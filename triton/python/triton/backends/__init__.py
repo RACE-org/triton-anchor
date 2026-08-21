@@ -58,6 +58,13 @@ def _prune_registry_backends(registry) -> None:
             backends.pop(name, None)
 
 
+def _drop_cached_record(record_id) -> None:
+    """Remove one Registry-owned public mapping after operational rejection."""
+    for name, backend in tuple(backends.items()):
+        if getattr(backend, "record_id", None) == record_id:
+            backends.pop(name, None)
+
+
 def _cache_decision(decision) -> Backend:
     registry = _registry()
     generation = registry.generation
@@ -76,6 +83,14 @@ def _cache_decision(decision) -> Backend:
                 "reset or selection change completes."
             ),
         ) from exc
+    try:
+        # Cached decisions are operational inputs too.  Registry validation
+        # rechecks even selected/active records, rejects hand-crafted isolation,
+        # and removes the stale selection before any runtime class is exposed.
+        record = registry.validate(record.record_id)
+    except Exception:
+        _drop_cached_record(decision.record_id)
+        raise
     if (
         not _is_selected_record(record)
         or decision.target not in record.selected_targets
@@ -293,7 +308,12 @@ def get_driver_backends() -> Tuple[Backend, ...]:
     """
     api = _registry_api()
     registry = _registry()
-    records = registry.validate()
+    try:
+        records = registry.validate()
+    except Exception:
+        _prune_registry_backends(registry)
+        raise
+    _prune_registry_backends(registry)
     environment = dict(os.environ)
     selector = environment.get(api.BACKEND_SELECTOR_ENV)
     if selector == "":
@@ -521,7 +541,11 @@ def activate_backend(backend: Backend, *, target=None):
                     "Manifest plugin for compiler and runtime."
                 ),
             )
-    return _registry().activate(record_id)
+    try:
+        return _registry().activate(record_id)
+    except Exception:
+        _drop_cached_record(record_id)
+        raise
 
 
 _registry().register_reset_hook(_reset_backend_cache)

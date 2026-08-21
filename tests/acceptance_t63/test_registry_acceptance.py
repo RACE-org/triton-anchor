@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 import pytest
+from jsonschema import Draft202012Validator
 from packaging.tags import Tag
 
 from triton_anchor.backends import (
@@ -727,32 +728,51 @@ def test_registry_rejects_non_integer_priority(priority: Any) -> None:
 
 def test_registry_accepts_all_schema_isolation_modes() -> None:
     python_only = parse_manifest(good_manifest()).plugins[0]
-    subprocess = parse_manifest(
-        good_manifest(
-            [
-                good_plugin(
-                    isolation_mode="subprocess",
-                    native_libraries=["vendor/worker.so"],
-                )
-            ]
+    assert python_only.isolation_mode is PluginIsolationMode.PYTHON_ONLY
+
+    # Preserve the historical nodeid while freezing the 1.0 acceptance oracle:
+    # the enum recognizes reserved future names, but Schema/parser reject them.
+    assert PluginIsolationMode("subprocess") is PluginIsolationMode.SUBPROCESS
+    assert (
+        PluginIsolationMode("native_in_process")
+        is PluginIsolationMode.NATIVE_IN_PROCESS
+    )
+    for mode in ("subprocess", "native_in_process"):
+        document = good_manifest([good_plugin(isolation_mode=mode)])
+        assert list(
+            Draft202012Validator(MANIFEST_SCHEMA).iter_errors(document)
         )
-    ).plugins[0]
-    native = parse_manifest(
-        good_manifest(
-            [
-                good_plugin(
-                    isolation_mode="native_in_process",
-                    native_libraries=["vendor/libbackend.so"],
-                    abi_fingerprint=ABI_FINGERPRINT,
-                )
-            ]
-        )
-    ).plugins[0]
-    assert {python_only.isolation_mode, subprocess.isolation_mode, native.isolation_mode} == {
-        PluginIsolationMode.PYTHON_ONLY,
-        PluginIsolationMode.SUBPROCESS,
-        PluginIsolationMode.NATIVE_IN_PROCESS,
-    }
+        with pytest.raises(BackendPluginManifestError) as caught:
+            parse_manifest(document)
+        assert caught.value.field == "isolation_mode"
+        assert caught.value.expected == "python_only"
+        assert caught.value.actual == mode
+        assert caught.value.plugin_id == "vendor.alpha"
+        assert caught.value.entry_point == "alpha"
+
+
+@pytest.mark.parametrize("mode", ["native_in_process", "subprocess"])
+def test_registry_selection_replays_wire_isolation_rejection(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    entry_point = FakeEntryPoint("alpha", structural_plugin())
+    distribution = make_distribution(
+        tmp_path / mode,
+        plugins=[good_plugin(isolation_mode=mode)],
+        entry_points=[entry_point],
+    )
+    registry = registry_for([distribution])
+
+    with pytest.raises(BackendPluginManifestError) as caught:
+        registry.select("alpha")
+    assert caught.value.field == "isolation_mode"
+    assert caught.value.expected == "python_only"
+    assert caught.value.actual == mode
+    assert caught.value.plugin_id == "vendor.alpha"
+    assert caught.value.entry_point == "alpha"
+    assert one_record(registry).state is PluginLifecycleState.REJECTED
+    assert entry_point.load_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -769,16 +789,24 @@ def test_registry_accepts_all_schema_isolation_modes() -> None:
         ),
         (
             {"isolation_mode": "native_in_process", "native_libraries": ["x.so"]},
-            "abi_fingerprint",
+            "isolation_mode",
         ),
         (
             {"isolation_mode": "native_in_process", "abi_fingerprint": ABI_FINGERPRINT},
-            "native_libraries",
+            "isolation_mode",
         ),
         (
             {"isolation_mode": "subprocess", "abi_fingerprint": ABI_FINGERPRINT},
-            "abi_fingerprint",
+            "isolation_mode",
         ),
+    ],
+    ids=[
+        "overrides0-isolation_mode",
+        "overrides1-native_libraries",
+        "overrides2-abi_fingerprint",
+        "overrides3-abi_fingerprint",
+        "overrides4-native_libraries",
+        "overrides5-abi_fingerprint",
     ],
 )
 def test_registry_rejects_illegal_isolation_combinations(

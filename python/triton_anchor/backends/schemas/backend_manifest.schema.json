@@ -128,7 +128,7 @@
           "$ref": "#/$defs/uniqueStrings"
         },
         "isolation_mode": {
-          "enum": ["python_only", "subprocess", "native_in_process"]
+          "const": "python_only"
         },
         "native_libraries": {
           "$ref": "#/$defs/nativeLibraryPaths"
@@ -160,39 +160,6 @@
                   "required": ["abi_fingerprint"]
                 }
               ]
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "isolation_mode": {
-                "const": "subprocess"
-              }
-            },
-            "required": ["isolation_mode"]
-          },
-          "then": {
-            "not": {
-              "required": ["abi_fingerprint"]
-            }
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "isolation_mode": {
-                "const": "native_in_process"
-              }
-            },
-            "required": ["isolation_mode"]
-          },
-          "then": {
-            "required": ["native_libraries", "abi_fingerprint"],
-            "properties": {
-              "native_libraries": {
-                "minItems": 1
-              }
             }
           }
         }

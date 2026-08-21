@@ -51,6 +51,7 @@ _NATIVE_LIBRARY_PATH_PATTERN = re.compile(
     r"(?![\s\S]*[\r\n])\S(?:[\s\S]*\S)?"
 )
 _TRITON_REQUIREMENT_FIELDS = {"version", "commit"}
+_SUPPORTED_ISOLATION_MODE = PluginIsolationMode.PYTHON_ONLY
 
 _SEMANTIC_FIELD_ORDER = {
     "backend_protocol": 40,
@@ -168,6 +169,52 @@ class BackendManifestDocument:
                 plugin.with_distribution(name, version) for plugin in self.plugins
             ),
         )
+
+
+def _isolation_mode_value(value: Any) -> str:
+    """Render a recognized or hand-crafted isolation value deterministically."""
+    raw = getattr(value, "value", value)
+    return raw if isinstance(raw, str) else type(raw).__name__
+
+
+def unsupported_isolation_error(
+    isolation_mode: Any,
+    *,
+    plugin_id: Optional[str] = None,
+    entry_point: Optional[str] = None,
+) -> BackendPluginManifestError:
+    """Build the canonical Protocol/Manifest 1.0 isolation rejection."""
+    actual = _isolation_mode_value(isolation_mode)
+    return BackendPluginManifestError(
+        f"Manifest isolation_mode '{actual}' is not supported by Backend "
+        "Plugin Protocol/Manifest Schema 1.0",
+        plugin_id=plugin_id,
+        entry_point=entry_point,
+        field="isolation_mode",
+        expected=_SUPPORTED_ISOLATION_MODE.value,
+        actual=actual,
+        remediation=(
+            "Use python_only, or wait for a release with a separately "
+            "versioned native ABI or subprocess IPC/IR contract."
+        ),
+    )
+
+
+def validate_plugin_isolation(
+    plugin: BackendPluginManifest,
+) -> BackendPluginManifest:
+    """Reject hand-crafted records outside the Protocol 1.0 load domain."""
+    isolation_mode = getattr(plugin, "isolation_mode", None)
+    if (
+        isolation_mode is _SUPPORTED_ISOLATION_MODE
+        or isolation_mode == _SUPPORTED_ISOLATION_MODE.value
+    ):
+        return plugin
+    raise unsupported_isolation_error(
+        isolation_mode,
+        plugin_id=getattr(plugin, "plugin_id", None),
+        entry_point=getattr(plugin, "entry_point", None),
+    )
 
 
 def _is_non_empty_string(value: Any) -> bool:
@@ -432,16 +479,18 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
     )
     try:
         isolation_mode = PluginIsolationMode(isolation_value)
-    except ValueError as exc:
-        allowed = ", ".join(mode.value for mode in PluginIsolationMode)
-        raise BackendPluginManifestError(
-            f"Unknown isolation_mode '{isolation_value}'; expected one of: {allowed}",
+    except ValueError:
+        raise unsupported_isolation_error(
+            isolation_value,
             plugin_id=plugin_id,
-            field="isolation_mode",
-            expected=allowed,
-            actual=isolation_value,
-            remediation="Choose one of the supported isolation_mode values.",
-        ) from exc
+            entry_point=entry_point,
+        ) from None
+    if isolation_mode is not _SUPPORTED_ISOLATION_MODE:
+        raise unsupported_isolation_error(
+            isolation_mode,
+            plugin_id=plugin_id,
+            entry_point=entry_point,
+        )
 
     native_libraries = _string_tuple(
         data, "native_libraries", required=False, plugin_id=plugin_id
@@ -468,38 +517,6 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
         data, plugin_id=plugin_id
     )
     if (
-        isolation_mode is PluginIsolationMode.NATIVE_IN_PROCESS
-        and not native_libraries
-    ):
-        raise BackendPluginManifestError(
-            "native_in_process plugins must declare at least one "
-            "'native_libraries' path",
-            plugin_id=plugin_id,
-            field="native_libraries",
-            expected="a non-empty array of installed native library paths",
-            actual=_manifest_actual(data, "native_libraries"),
-            remediation=(
-                "List every in-process native library using its exact relative "
-                "path from the wheel RECORD, or choose a non-native isolation "
-                "mode."
-            ),
-        )
-    if (
-        isolation_mode is PluginIsolationMode.NATIVE_IN_PROCESS
-        and abi_fingerprint is None
-    ):
-        raise BackendPluginManifestError(
-            "native_in_process plugins must declare 'abi_fingerprint'",
-            plugin_id=plugin_id,
-            field="abi_fingerprint",
-            expected="the exact Core ABI fingerprint",
-            actual="<missing>",
-            remediation=(
-                "Declare the exact Core ABI fingerprint, or use a non-native "
-                "isolation mode."
-            ),
-        )
-    if (
         isolation_mode is PluginIsolationMode.PYTHON_ONLY
         and "native_libraries" in data
     ):
@@ -510,8 +527,8 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
             expected="an omitted field for python_only",
             actual=_manifest_actual(data, "native_libraries"),
             remediation=(
-                "Remove native_libraries or choose the appropriate native "
-                "isolation mode."
+                "Remove native_libraries; Protocol/Manifest Schema 1.0 only "
+                "supports python_only plugins."
             ),
         )
     if (
@@ -527,22 +544,6 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
             remediation=(
                 "Remove abi_fingerprint; Python-only plugins do not share the "
                 "Core C++ ABI."
-            ),
-        )
-    if (
-        isolation_mode is PluginIsolationMode.SUBPROCESS
-        and "abi_fingerprint" in data
-    ):
-        raise BackendPluginManifestError(
-            "subprocess plugins cannot declare abi_fingerprint",
-            plugin_id=plugin_id,
-            field="abi_fingerprint",
-            expected="an omitted field for subprocess isolation",
-            actual=_manifest_actual(data, "abi_fingerprint"),
-            remediation=(
-                "Remove abi_fingerprint; subprocess compatibility must be "
-                "governed by a versioned process/IR contract instead of the "
-                "Core in-process C++ ABI."
             ),
         )
 

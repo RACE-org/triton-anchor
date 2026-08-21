@@ -44,7 +44,13 @@ class PluginSource(str, Enum):
 
 
 class PluginIsolationMode(str, Enum):
-    """Boundary between a plugin and the triton-anchor process."""
+    """Recognized isolation names for backend protocol governance.
+
+    Protocol/Manifest Schema 1.0 operationally supports only
+    :attr:`PYTHON_ONLY`.  The other values remain recognizable so static
+    evidence tooling and future, separately versioned contracts can describe
+    them; recognizing a name does not authorize loading it.
+    """
 
     PYTHON_ONLY = "python_only"
     SUBPROCESS = "subprocess"

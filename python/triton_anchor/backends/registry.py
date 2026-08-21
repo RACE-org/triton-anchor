@@ -51,10 +51,11 @@ from .manifest import (
     MANIFEST_FILENAME,
     BackendPluginManifest,
     load_distribution_manifest,
+    validate_plugin_isolation,
 )
+from .native import inspect_native_artifacts
 from .protocol import (
     PluginCompatibilityStatus,
-    PluginIsolationMode,
     PluginLifecycleState,
     PluginSource,
     can_transition,
@@ -937,6 +938,47 @@ class BackendPluginRegistry:
     def _validate_record(
         self, record: BackendPluginRecord
     ) -> BackendPluginRecord:
+        if record.manifest is not None:
+            try:
+                validate_plugin_isolation(record.manifest)
+            except BackendPluginManifestError as error:
+                remaining = tuple(
+                    existing
+                    for existing in record.errors
+                    if _error_identity(existing) != _error_identity(error)
+                )
+                rejected = self._replace(
+                    replace(
+                        record,
+                        state=PluginLifecycleState.REJECTED,
+                        compatibility_status=(
+                            PluginCompatibilityStatus.NOT_CHECKED
+                        ),
+                        errors=(error,) + remaining,
+                        plugin_object=None,
+                        compiler_cls=None,
+                        driver_cls=None,
+                        initialized=False,
+                        selected_targets=(),
+                        compatibility_report=None,
+                        capability_report=None,
+                    )
+                )
+                invalidated = tuple(
+                    target
+                    for target, decision in self._selections.items()
+                    if decision.record_id == record.record_id
+                )
+                for target in invalidated:
+                    del self._selections[target]
+                self._cleanup_stack[:] = [
+                    cleanup_record
+                    for cleanup_record in self._cleanup_stack
+                    if cleanup_record.record_id != record.record_id
+                ]
+                if invalidated:
+                    self._generation += 1
+                return rejected
         if record.state is PluginLifecycleState.REJECTED:
             return record
         if record.source is PluginSource.LEGACY:
@@ -970,25 +1012,13 @@ class BackendPluginRegistry:
         errors = []
         report = None
         if self._preflight_profile == "triton_version":
-            if (
-                record.manifest.isolation_mode
-                is not PluginIsolationMode.PYTHON_ONLY
-            ):
-                errors.append(
-                    BackendPluginCompatibilityError(
-                        "isolation mode for triton_version profile",
-                        PluginIsolationMode.PYTHON_ONLY.value,
-                        record.manifest.isolation_mode.value,
-                        plugin_id=record.plugin_id,
-                        entry_point=record.entry_point_name,
-                        remediation=(
-                            "The staged W6-W8 profile only admits python_only "
-                            "plugins. Keep native_in_process and subprocess "
-                            "plugins disabled until their ABI or IR-contract "
-                            "validation is enabled."
-                        ),
-                    )
+            try:
+                inspect_native_artifacts(
+                    record.manifest,
+                    record.distribution,
                 )
+            except BackendPluginError as error:
+                errors.append(error)
             try:
                 report = validate_triton_version_requirement(
                     record.manifest,
@@ -1086,34 +1116,18 @@ class BackendPluginRegistry:
         record: BackendPluginRecord,
     ) -> BackendPluginRecord:
         """Reject fatal static conflicts involving one record before import."""
-        if record.source is not PluginSource.MANIFEST or record.state in {
+        record = self._validate_record(record)
+        if record.state is PluginLifecycleState.REJECTED:
+            return record
+        if record.source is not PluginSource.MANIFEST:
+            return record
+        if record.state in {
             PluginLifecycleState.LOADED,
             PluginLifecycleState.REGISTERED,
             PluginLifecycleState.SELECTED,
             PluginLifecycleState.ACTIVE,
         }:
             return record
-
-        if record.state is not PluginLifecycleState.REJECTED:
-            record = self._validate_record(record)
-
-        if (
-            record.state is not PluginLifecycleState.REJECTED
-            and record.manifest is not None
-            and record.manifest.isolation_mode
-            is PluginIsolationMode.NATIVE_IN_PROCESS
-        ):
-            for candidate in tuple(self._records.values()):
-                if (
-                    candidate.record_id == record.record_id
-                    or candidate.source is not PluginSource.MANIFEST
-                    or candidate.state is not PluginLifecycleState.DISCOVERED
-                    or candidate.manifest is None
-                    or candidate.manifest.isolation_mode
-                    is not PluginIsolationMode.NATIVE_IN_PROCESS
-                ):
-                    continue
-                self._validate_record(candidate)
 
         for conflict in detect_conflicts(self._records.values()).fatal_conflicts:
             if record.record_id in conflict.record_ids:
@@ -2172,6 +2186,19 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("activate")
             self.discover()
             record = self._resolve(identifier, reject_conflicts=True)
+            record = self._validate_record(record)
+            if record.state is PluginLifecycleState.REJECTED:
+                if record.error is not None:
+                    raise record.error
+                raise BackendPluginLifecycleError(
+                    "Rejected backend plugin cannot be activated",
+                    plugin_id=record.plugin_id,
+                    entry_point=record.entry_point_name,
+                    field="state",
+                    expected=PluginLifecycleState.SELECTED.value,
+                    actual=record.state.value,
+                    remediation="Resolve the recorded validation failure first.",
+                )
             other_active = tuple(
                 candidate
                 for candidate in self._records.values()

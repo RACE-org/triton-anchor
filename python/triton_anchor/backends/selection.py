@@ -18,6 +18,7 @@ from .capabilities import (
 )
 from .conflicts import detect_static_conflicts
 from .errors import BackendPluginError, BackendPluginSelectionError
+from .manifest import validate_plugin_isolation
 
 
 BACKEND_SELECTOR_ENV = "TRITON_ANCHOR_BACKEND"
@@ -186,6 +187,8 @@ def _project_record(record: Any) -> _RecordView:
         ) from exc
 
     is_legacy = manifest is None and source == "legacy"
+    if manifest is not None:
+        validate_plugin_isolation(manifest)
     plugin_id = (
         getattr(manifest, "plugin_id", None)
         if manifest is not None
@@ -526,6 +529,13 @@ def select_backend(
             remediation="Pass Registry list/validate results to selection.",
         ) from exc
 
+    # Project first so a hand-crafted unsupported isolation mode cannot reach
+    # conflict/capability policy or be selected from a forged compatible state.
+    views = tuple(
+        sorted((_project_record(record) for record in record_tuple),
+               key=lambda view: view.sort_key)
+    )
+
     # Identity conflicts are fatal regardless of selector or enumeration
     # order.  Target overlap deliberately remains for this function to resolve.
     try:
@@ -539,10 +549,6 @@ def select_backend(
             remediation="Repair or rediscover backend records before selection.",
         ) from exc
 
-    views = tuple(
-        sorted((_project_record(record) for record in record_tuple),
-               key=lambda view: view.sort_key)
-    )
     target_name = _target_name(target)
     core_provided = _capability_names(
         core_provided_capabilities, "core_provided_capabilities"
@@ -645,18 +651,30 @@ def select_backend(
             )
             raise AssertionError("incompatible capability report did not raise")
         rejected = []
+        unreadable_rejected = []
         for view in views:
-            if view.state != "rejected" or view.manifest is None:
+            if view.state != "rejected":
+                continue
+            error = getattr(view.record, "error", None)
+            if not isinstance(error, BackendPluginError):
+                continue
+            if view.manifest is None:
+                # Structural discovery failures have no parsed targets.  An
+                # entry point whose exact name is requested is still related;
+                # replay its authoritative Manifest error instead of masking
+                # it with a generic no-candidate result.
+                if view.entry_point_name == target_name:
+                    unreadable_rejected.append((view.record_id, error))
                 continue
             targets = tuple(getattr(view.manifest, "targets", ()) or ())
-            error = getattr(view.record, "error", None)
-            if (
-                target_name in targets
-                and isinstance(error, BackendPluginError)
-            ):
+            if target_name in targets:
                 rejected.append((view.record_id, error))
         if rejected:
             raise sorted(rejected, key=lambda item: item[0])[0][1]
+        if unreadable_rejected:
+            raise sorted(
+                unreadable_rejected, key=lambda item: item[0]
+            )[0][1]
         legacy_ids = tuple(
             view.record_id
             for view in views

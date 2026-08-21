@@ -14,6 +14,10 @@ from triton_anchor.backends import (
     evaluate_manifest_semantics,
     parse_manifest,
 )
+from triton_anchor.backends.manifest import (
+    _ABI_FINGERPRINT_PATTERN,
+    _NATIVE_LIBRARY_PATH_PATTERN,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -153,9 +157,18 @@ def test_manifest_anchored_pattern_schema_parser_domain(
     elif location == "requires_triton.commit":
         plugin["requires_triton"]["commit"] = base_value + suffix
     elif location == "abi_fingerprint":
-        plugin["isolation_mode"] = "native_in_process"
-        plugin["native_libraries"] = ["lib/backend.so"]
-        plugin[location] = base_value + suffix
+        # Native isolation is structurally unsupported in 1.0.  Exercise the
+        # retained low-level field definition directly so that rejection of
+        # isolation_mode cannot mask the fingerprint's own structural domain.
+        value = base_value + suffix
+        fingerprint_schema = {
+            "$schema": schema["$schema"],
+            "$defs": schema["$defs"],
+            "$ref": "#/$defs/abiFingerprint",
+        }
+        assert Draft202012Validator(fingerprint_schema).is_valid(value) is False
+        assert _ABI_FINGERPRINT_PATTERN.fullmatch(value) is None
+        return
     else:
         plugin[location] = base_value + suffix
 
@@ -200,13 +213,18 @@ def test_manifest_native_library_path_schema_parser_domain(
     path: str, expected: bool
 ) -> None:
     schema, example = _documents()
-    candidate = deepcopy(example)
-    plugin = candidate["plugins"][0]
-    plugin["isolation_mode"] = "subprocess"
-    plugin["native_libraries"] = [path]
+    del example  # The operational plugin document can only be python_only.
+    path_schema = {
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        "$ref": "#/$defs/nativeLibraryPath",
+    }
 
-    assert _schema_accepts(schema, candidate) is expected
-    assert _parser_accepts(candidate) is expected
+    # Keep the evidence-only native path definition and lightweight parser
+    # predicate aligned without allowing unsupported isolation through the
+    # public Manifest parser.
+    assert Draft202012Validator(path_schema).is_valid(path) is expected
+    assert (_NATIVE_LIBRARY_PATH_PATTERN.fullmatch(path) is not None) is expected
 
 
 @pytest.mark.parametrize(

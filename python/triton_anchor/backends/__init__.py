@@ -62,6 +62,7 @@ from .manifest import (
     load_manifest,
     load_manifest_for_entry_point,
     parse_manifest,
+    validate_plugin_isolation,
     validate_manifest_semantics,
 )
 from .protocol import (
@@ -162,6 +163,7 @@ __all__ = [
     "select_backend_plugin",
     "validate_backend_plugin",
     "validate_manifest_semantics",
+    "validate_plugin_isolation",
     "validate_capabilities",
     "validate_plugin_capabilities",
     "validate_triton_requirement",

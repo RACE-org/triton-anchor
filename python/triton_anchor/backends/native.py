@@ -1,10 +1,9 @@
-"""Import-free inspection of native files shipped by backend wheels.
+"""Import-free evidence inspection of native files shipped by backend wheels.
 
-The inspector is intentionally conservative.  A ``native_in_process`` plugin
-is allowed to reach ``entry_point.load()`` only when every native file is
-declared, covered by the wheel RECORD, verified by SHA-256, and understood by
-the host binary inspector.  The current implementation supports Linux ELF;
-other formats fail closed until their parsers and CI coverage exist.
+Protocol/Manifest Schema 1.0 does not authorize native plugin loading.  This
+module remains a low-level, evidence-only tool for validating package facts and
+future ABI work; a successful report is never operational compatibility or
+permission to import, initialize, compile, or ``dlopen`` a plugin.
 """
 
 from __future__ import annotations
@@ -269,8 +268,9 @@ def _validate_native_wheel_layout(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Build native_in_process plugins as platform wheels; do not "
-                "publish native binaries in a py3-none-any/purelib wheel."
+                "Protocol/Manifest Schema 1.0 does not load native plugins. "
+                "Keep this artifact only as evidence for a future, separately "
+                "versioned ABI contract."
             ),
         )
 
@@ -594,11 +594,12 @@ def inspect_native_artifacts(
     plugin: BackendPluginManifest,
     distribution: Any,
 ) -> NativeInspectionReport:
-    """Inspect all native files before any backend Python import.
+    """Return static package evidence without authorizing plugin loading.
 
     ``python_only`` wheels are required to contain no native binaries.
-    ``native_in_process`` wheels must declare every native binary and each
-    declaration must be verifiable from RECORD.
+    Hand-crafted ``native_in_process`` records may be supplied directly to this
+    evidence-only API; every binary must then be declared and verifiable from
+    RECORD.  All operational public APIs reject that mode first.
     """
     file_map = _distribution_file_map(distribution)
     discovered_native = _discover_native_paths(distribution, file_map)
@@ -613,8 +614,9 @@ def inspect_native_artifacts(
                 plugin_id=plugin.plugin_id,
                 entry_point=plugin.entry_point,
                 remediation=(
-                    "Declare native_in_process with an exact Core ABI "
-                    "fingerprint, or publish a genuinely pure-Python wheel."
+                    "Remove native artifacts from the owning distribution and "
+                    "publish a genuinely pure-Python backend wheel. Protocol/"
+                    "Manifest Schema 1.0 does not support native plugins."
                 ),
             )
         return NativeInspectionReport()
@@ -656,9 +658,9 @@ def inspect_native_artifacts(
         )
 
     if plugin.isolation_mode is PluginIsolationMode.SUBPROCESS:
-        # The versioned subprocess IR contract is validated by compatibility.py.
-        # Child binaries are not loaded into the host process, so host ELF/ABI
-        # conflict inspection is intentionally deferred with that contract.
+        # Protocol 1.0 has no subprocess IPC/IR contract.  This evidence-only
+        # helper records no host ELF facts for a prospective child binary; all
+        # operational APIs reject the mode before reaching this function.
         return NativeInspectionReport()
 
     _validate_native_wheel_layout(plugin, distribution)
