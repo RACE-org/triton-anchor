@@ -436,6 +436,18 @@ class BackendPluginSelectionError(BackendPluginError):
     code = "backend_plugin_selection_error"
 
 
+class BackendPluginNoCandidateError(BackendPluginSelectionError):
+    """Automatic selection found no applicable Manifest candidate.
+
+    This is intentionally narrower than :class:`BackendPluginSelectionError`.
+    Integration adapters may use it to enter a separately governed
+    compatibility path without treating ambiguity, an explicit-selector
+    failure, or a rejected Manifest as permission to downgrade.
+    """
+
+    code = "backend_plugin_no_candidate_error"
+
+
 class BackendPluginLifecycleError(BackendPluginError):
     """A plugin attempted an invalid lifecycle transition."""
 

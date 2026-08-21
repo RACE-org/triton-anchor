@@ -46,6 +46,7 @@ from .errors import (
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
+    BackendPluginNoCandidateError,
     BackendPluginSelectionError,
 )
 from .manifest import (
@@ -61,7 +62,13 @@ from .protocol import (
     PluginSource,
     can_transition,
 )
-from .selection import SelectionDecision, select_backend
+from .selection import (
+    SelectionDecision,
+    SelectionMethod,
+    _capability_names,
+    _target_name,
+    select_backend,
+)
 
 
 _BACKEND_ENTRY_POINT_GROUP = "triton.backends"
@@ -69,6 +76,7 @@ _PREFLIGHT_PROFILES = {"triton_version", "full"}
 _UNSET = object()
 _MISSING = object()
 _TYPE_MRO_DESCRIPTOR = type.__dict__["__mro__"]
+_LEGACY_LEASE_FACTORY = object()
 
 
 def _is_class_object(value: Any) -> bool:
@@ -285,7 +293,7 @@ class BackendPluginRecord:
                 "isolation_mode": self.manifest.isolation_mode.value,
                 "priority": self.manifest.priority,
             }
-        return {
+        result = {
             "record_id": self.record_id,
             "registry_key": self.registry_key,
             "plugin_id": self.plugin_id,
@@ -323,6 +331,86 @@ class BackendPluginRecord:
             "shutdown_called": self.shutdown_called,
             "selected_targets": list(self.selected_targets),
         }
+        if self.source is PluginSource.LEGACY:
+            result["legacy_compatibility"] = {
+                "static_compatibility_proven": False,
+                "missing_static_proofs": [
+                    "protocol",
+                    "core",
+                    "triton",
+                    "llvm",
+                    "capabilities",
+                    "native_abi",
+                    "priority",
+                    "targets",
+                ],
+                "remediation": (
+                    "Migrate this backend to Backend Plugin Manifest Schema "
+                    "1.0 so compatibility can be proven before import."
+                ),
+            }
+        return result
+
+
+class LegacyRecordLease:
+    """Opaque authority for conditionally publishing one Legacy runtime pair.
+
+    A lease is issued only after the exact Legacy record has loaded,
+    registered, and passed every current runtime-pair validator.  The Registry
+    keeps ownership of its mutable record snapshot; callers may inspect the
+    snapshot but cannot transfer a lease between Registry instances or reset
+    epochs.
+    """
+
+    __slots__ = (
+        "_record",
+        "_registry_identity",
+        "_lifecycle_epoch",
+        "_token",
+        "_plugin_object",
+        "_compiler_cls",
+        "_driver_cls",
+    )
+
+    def __init__(
+        self,
+        record: BackendPluginRecord,
+        *,
+        registry_identity: object,
+        lifecycle_epoch: int,
+        token: object,
+        factory: object,
+    ) -> None:
+        if factory is not _LEGACY_LEASE_FACTORY:
+            raise TypeError(
+                "LegacyRecordLease values are issued by BackendPluginRegistry"
+            )
+        object.__setattr__(self, "_record", record)
+        object.__setattr__(self, "_registry_identity", registry_identity)
+        object.__setattr__(self, "_lifecycle_epoch", lifecycle_epoch)
+        object.__setattr__(self, "_token", token)
+        object.__setattr__(self, "_plugin_object", record.plugin_object)
+        object.__setattr__(self, "_compiler_cls", record.compiler_cls)
+        object.__setattr__(self, "_driver_cls", record.driver_cls)
+
+    @property
+    def record(self) -> BackendPluginRecord:
+        """Return the current immutable record snapshot for this lease."""
+        return self._record
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("LegacyRecordLease is immutable")
+
+    def _refresh(
+        self,
+        record: BackendPluginRecord,
+        *,
+        factory: object,
+    ) -> None:
+        """Advance the snapshot after an atomic Registry-owned replacement."""
+        if factory is not _LEGACY_LEASE_FACTORY:
+            raise TypeError("LegacyRecordLease snapshots are Registry-owned")
+        object.__setattr__(self, "_record", record)
 
 
 def _qualified_name(value: Any) -> Optional[str]:
@@ -482,6 +570,11 @@ class BackendPluginRegistry:
         self._cleanup_stack: list[BackendPluginRecord] = []
         self._reset_operation_errors: list[BackendPluginError] = []
         self._selections: Dict[str, SelectionDecision] = {}
+        self._legacy_lease_identity = object()
+        self._legacy_leases: Dict[str, LegacyRecordLease] = {}
+        self._legacy_lease_tokens: Dict[str, object] = {}
+        self._legacy_publication_owner: Optional[int] = None
+        self._reset_invalidation_hooks: list = []
         self._reset_hooks: list = []
         self._runtime_pair_validators: Dict[str, RuntimePairValidator] = {}
         self._resetting = False
@@ -511,6 +604,26 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("register_reset_hook")
             if callback not in self._reset_hooks:
                 self._reset_hooks.append(callback)
+
+    def register_reset_invalidation_hook(
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        """Register a trusted cache invalidator for the reset commit point.
+
+        Unlike ordinary shutdown/reset hooks, invalidators run while the
+        Registry condition is held, after the lifecycle epoch advances and
+        before records and selections are cleared.  They must perform only a
+        bounded in-memory cache mutation and must never call Registry or
+        plugin code.  This ordering prevents a stale adapter mapping from
+        becoming observable after its owning Registry record is gone.
+        """
+        if not callable(callback):
+            raise TypeError("reset invalidation hook must be callable")
+        with self._condition:
+            self._ensure_not_resetting("register_reset_invalidation_hook")
+            if callback not in self._reset_invalidation_hooks:
+                self._reset_invalidation_hooks.append(callback)
 
     def register_runtime_pair_validator(
         self,
@@ -946,6 +1059,22 @@ class BackendPluginRegistry:
     def list_plugins(self) -> Tuple[BackendPluginRecord, ...]:
         return self.list()
 
+    def list_legacy_records(self) -> Tuple[BackendPluginRecord, ...]:
+        """Return deterministic Legacy metadata without importing plugins."""
+        with self._lock:
+            self._ensure_not_resetting("list_legacy_records")
+            self.discover()
+            return tuple(
+                sorted(
+                    (
+                        record
+                        for record in self._records.values()
+                        if record.source is PluginSource.LEGACY
+                    ),
+                    key=lambda record: record.record_id,
+                )
+            )
+
     def _resolve(
         self,
         identifier: str,
@@ -1012,6 +1141,9 @@ class BackendPluginRegistry:
 
     def _replace(self, record: BackendPluginRecord) -> BackendPluginRecord:
         self._records[record.record_id] = record
+        lease = self._legacy_leases.get(record.record_id)
+        if lease is not None:
+            lease._refresh(record, factory=_LEGACY_LEASE_FACTORY)
         for target, decision in tuple(self._selections.items()):
             if decision.record_id == record.record_id:
                 self._selections[target] = replace(
@@ -1317,8 +1449,6 @@ class BackendPluginRegistry:
         """Reject fatal static conflicts involving one record before import."""
         record = self._validate_record(record)
         if record.state is PluginLifecycleState.REJECTED:
-            return record
-        if record.source is not PluginSource.MANIFEST:
             return record
         if record.state in {
             PluginLifecycleState.LOADED,
@@ -2422,6 +2552,811 @@ class BackendPluginRegistry:
                                 token,
                             )
 
+    @staticmethod
+    def _legacy_target_name(target: Any) -> str:
+        # This may execute a target object's ``backend`` property.  Every
+        # caller must invoke it before acquiring the Registry lock; the
+        # returned exact ``str`` is inert inside selection dictionaries.
+        return _target_name(target)
+
+    @staticmethod
+    def _legacy_capability_names(values: Iterable[str]) -> Tuple[str, ...]:
+        # Iterable materialization can execute caller code.  Like target
+        # normalization, keep it outside the Registry lock and retain only
+        # exact built-in strings for the locked selection phase.
+        return _capability_names(values, "kernel_required_capabilities")
+
+    def _validate_legacy_lease(
+        self,
+        lease: LegacyRecordLease,
+        operation: str,
+    ) -> BackendPluginRecord:
+        """Validate Registry, reset-epoch, record, and runtime-pair identity."""
+        if type(lease) is not LegacyRecordLease:
+            raise BackendPluginLifecycleError(
+                f"Backend plugin {operation} requires a Registry-issued "
+                "Legacy record lease",
+                field="legacy_lease",
+                expected="LegacyRecordLease from this Registry",
+                actual=_stable_type_name(lease),
+                remediation=(
+                    "Call materialize_legacy() for an exact record in the "
+                    "current Registry generation."
+                ),
+            )
+
+        record = lease.record
+        if lease._registry_identity is not self._legacy_lease_identity:
+            raise BackendPluginLifecycleError(
+                f"Backend plugin {operation} received a lease from another "
+                "Registry",
+                plugin_id=record.plugin_id,
+                entry_point=record.entry_point_name,
+                field="legacy_lease.registry",
+                expected="the current BackendPluginRegistry",
+                actual="a different BackendPluginRegistry",
+                remediation="Materialize the Legacy record in this Registry.",
+            )
+        if lease._lifecycle_epoch != self._lifecycle_epoch:
+            raise BackendPluginLifecycleError(
+                f"Backend plugin {operation} lease belongs to a stale "
+                "Registry lifecycle epoch",
+                plugin_id=record.plugin_id,
+                entry_point=record.entry_point_name,
+                field="registry lifecycle_epoch",
+                expected=str(lease._lifecycle_epoch),
+                actual=str(self._lifecycle_epoch),
+                remediation=(
+                    f"Retry {operation} after Registry reset has completed; "
+                    "stale Legacy runtime pairs are never published."
+                ),
+            )
+
+        current = self._records.get(record.record_id)
+        canonical = self._legacy_leases.get(record.record_id)
+        if (
+            canonical is not lease
+            or self._legacy_lease_tokens.get(record.record_id) is not lease._token
+            or current is None
+            or current is not record
+        ):
+            raise BackendPluginLifecycleError(
+                f"Backend plugin {operation} received a stale or replaced "
+                "Legacy record lease",
+                plugin_id=record.plugin_id,
+                entry_point=record.entry_point_name,
+                field="legacy_lease.record",
+                expected="the current Registry record identity",
+                actual="missing or replaced record identity",
+                remediation=(
+                    "Discard the lease and materialize the current Legacy "
+                    "record again."
+                ),
+            )
+        if (
+            current.source is not PluginSource.LEGACY
+            or current.compatibility_status
+            is not PluginCompatibilityStatus.LEGACY_UNVERIFIED
+        ):
+            raise BackendPluginLifecycleError(
+                f"Backend plugin {operation} lease no longer identifies an "
+                "unverified Legacy record",
+                plugin_id=current.plugin_id,
+                entry_point=current.entry_point_name,
+                field="legacy_lease.source",
+                expected="source=legacy; compatibility=legacy_unverified",
+                actual=(
+                    f"source={getattr(current.source, 'value', None)}; "
+                    "compatibility="
+                    f"{current.compatibility_status.value}"
+                ),
+                remediation="Rediscover and materialize an exact Legacy record.",
+            )
+        if (
+            current.plugin_object is not lease._plugin_object
+            or current.compiler_cls is not lease._compiler_cls
+            or current.driver_cls is not lease._driver_cls
+        ):
+            raise BackendPluginLifecycleError(
+                f"Backend plugin {operation} runtime pair differs from its "
+                "materialized Legacy lease",
+                entry_point=current.entry_point_name,
+                field="legacy_lease.runtime_pair",
+                expected="the exact materialized plugin/compiler/driver identities",
+                actual="one or more runtime identities changed",
+                remediation=(
+                    "Reject mutable Legacy runtime-pair publication and retry "
+                    "after Registry reset."
+                ),
+            )
+        if current.state is PluginLifecycleState.REJECTED:
+            if current.error is not None:
+                raise current.error
+            raise BackendPluginLifecycleError(
+                f"Rejected Legacy backend cannot perform {operation}",
+                entry_point=current.entry_point_name,
+                field="state",
+                expected="registered, selected, or active",
+                actual=current.state.value,
+                remediation="Resolve the recorded Legacy failure first.",
+            )
+        if current.state not in {
+            PluginLifecycleState.REGISTERED,
+            PluginLifecycleState.SELECTED,
+            PluginLifecycleState.ACTIVE,
+        }:
+            raise BackendPluginLifecycleError(
+                f"Legacy backend must be registered before {operation}",
+                entry_point=current.entry_point_name,
+                field="state",
+                expected="registered, selected, or active",
+                actual=current.state.value,
+                remediation="Materialize the exact Legacy record first.",
+            )
+        return current
+
+    def materialize_legacy(self, identifier: str) -> LegacyRecordLease:
+        """Load/register one exact Legacy record and issue an epoch lease.
+
+        ``identifier`` accepts only a record ID or a unique Registry key.  In
+        particular, an entry-point name is not an implicit Legacy selector.
+        Plugin import, runtime-pair inspection, and F6 validators occur in
+        :meth:`register`; none of them run while this method holds the lock.
+        """
+        if not isinstance(identifier, str) or not identifier:
+            raise BackendPluginSelectionError(
+                "Legacy materialization identifier must be a non-empty string",
+                field="registry_key",
+                expected="an exact record_id or unique registry_key",
+                actual=repr(identifier),
+                remediation="Use a key returned by list_legacy_records().",
+            )
+        with self._condition:
+            self._ensure_not_resetting("materialize_legacy")
+            self.discover()
+            record = self._resolve(identifier, reject_conflicts=True)
+            if record.source is not PluginSource.LEGACY:
+                raise BackendPluginSelectionError(
+                    f"Backend record '{identifier}' is not a Legacy record",
+                    plugin_id=record.plugin_id,
+                    entry_point=record.entry_point_name,
+                    field="source",
+                    expected=PluginSource.LEGACY.value,
+                    actual=(
+                        record.source.value
+                        if record.source is not None
+                        else "<unknown>"
+                    ),
+                    remediation=(
+                        "Use Registry.select() for Manifest plugins or choose "
+                        "an exact key returned by list_legacy_records()."
+                    ),
+                )
+            materialization_epoch = self._lifecycle_epoch
+            expected_record = record
+
+        materialized = self.register(
+            record.record_id,
+            _expected_epoch=materialization_epoch,
+            _expected_record=expected_record,
+        )
+
+        with self._condition:
+            self._check_expected_epoch(
+                materialization_epoch,
+                expected_record,
+                "materialize_legacy",
+            )
+            self._ensure_not_resetting("materialize_legacy")
+            current = self._records.get(materialized.record_id)
+            if current is None:
+                raise self._stale_operation_error(
+                    expected_record,
+                    "materialize_legacy",
+                    materialization_epoch,
+                    self._lifecycle_epoch,
+                )
+            if (
+                current.source is not PluginSource.LEGACY
+                or current.compatibility_status
+                is not PluginCompatibilityStatus.LEGACY_UNVERIFIED
+            ):
+                raise BackendPluginLifecycleError(
+                    "Materialized record no longer has Legacy compatibility state",
+                    plugin_id=current.plugin_id,
+                    entry_point=current.entry_point_name,
+                    field="source,compatibility_status",
+                    expected="legacy,legacy_unverified",
+                    actual=(
+                        f"{getattr(current.source, 'value', None)},"
+                        f"{current.compatibility_status.value}"
+                    ),
+                    remediation="Reset and rediscover the exact Legacy record.",
+                )
+            lease = self._legacy_leases.get(current.record_id)
+            if lease is None:
+                token = object()
+                lease = LegacyRecordLease(
+                    current,
+                    registry_identity=self._legacy_lease_identity,
+                    lifecycle_epoch=materialization_epoch,
+                    token=token,
+                    factory=_LEGACY_LEASE_FACTORY,
+                )
+                self._legacy_leases[current.record_id] = lease
+                self._legacy_lease_tokens[current.record_id] = token
+            else:
+                lease._refresh(current, factory=_LEGACY_LEASE_FACTORY)
+            self._validate_legacy_lease(lease, "materialize_legacy")
+            return lease
+
+    def select_materialized_legacy(
+        self,
+        target: Any,
+        *,
+        lease: LegacyRecordLease,
+        kernel_required_capabilities: Iterable[str] = (),
+    ) -> SelectionDecision:
+        """Conditionally publish one already materialized Legacy record.
+
+        A different record already selected for the target is never replaced.
+        Repeating the same record/target decision is idempotent and does not
+        advance the public generation.
+        """
+        target_name = self._legacy_target_name(target)
+        required = self._legacy_capability_names(
+            kernel_required_capabilities
+        )
+        with self._condition:
+            self._ensure_not_resetting("select_materialized_legacy")
+            current = self._validate_legacy_lease(
+                lease, "select_materialized_legacy"
+            )
+            # Reuse W8's target/capability input validation.  The exact
+            # selector keeps Legacy out of automatic Manifest ranking.
+            decision = select_backend(
+                (current,),
+                target=target_name,
+                kernel_required_capabilities=required,
+                core_provided_capabilities=self._core_capabilities,
+                explicit_selector=current.record_id,
+                environment={},
+            )
+            decision = replace(
+                decision,
+                method=SelectionMethod.LEGACY_FALLBACK,
+                selector=None,
+                candidate_record_ids=(current.record_id,),
+                record=current,
+            )
+            target_name = decision.target
+            previous = self._selections.get(target_name)
+            if previous is not None:
+                if previous.record_id == current.record_id:
+                    if target_name not in current.selected_targets:
+                        raise BackendPluginLifecycleError(
+                            "Legacy selection cache and record targets disagree",
+                            entry_point=current.entry_point_name,
+                            field="selected_targets",
+                            expected=target_name,
+                            actual=", ".join(current.selected_targets) or "<empty>",
+                            remediation="Reset the Registry before retrying selection.",
+                        )
+                    return previous
+                raise BackendPluginConflictError(
+                    f"Target '{target_name}' is already bound to backend "
+                    f"'{previous.record_id}', not Legacy record "
+                    f"'{current.record_id}'",
+                    entry_point=current.entry_point_name,
+                    conflict_kind="selected_target",
+                    claim=target_name,
+                    related_plugin_ids=(
+                        tuple(
+                            plugin_id
+                            for plugin_id in (previous.plugin_id, current.plugin_id)
+                            if plugin_id is not None
+                        )
+                    ),
+                    related_record_ids=(previous.record_id, current.record_id),
+                    field="targets",
+                    expected=previous.record_id,
+                    actual=current.record_id,
+                    remediation=(
+                        "Keep the current target binding or reset it before "
+                        "selecting another backend record."
+                    ),
+                )
+
+            selected_state = current.state
+            if selected_state is PluginLifecycleState.REGISTERED:
+                self._transition(current, PluginLifecycleState.SELECTED)
+                selected_state = PluginLifecycleState.SELECTED
+            selected_targets = tuple(
+                sorted(set(current.selected_targets).union({target_name}))
+            )
+            selected = self._replace(
+                replace(
+                    current,
+                    state=selected_state,
+                    selected_targets=selected_targets,
+                )
+            )
+            decision = replace(decision, record=selected)
+            self._selections[target_name] = decision
+            self._generation += 1
+            return decision
+
+    def commit_materialized_legacy(
+        self,
+        target: Any,
+        *,
+        lease: LegacyRecordLease,
+        publisher: Callable[[SelectionDecision, BackendPluginRecord], Any],
+        activate: bool = False,
+        kernel_required_capabilities: Iterable[str] = (),
+    ) -> Tuple[SelectionDecision, BackendPluginRecord, Any]:
+        """Atomically select and publish one leased Legacy runtime pair.
+
+        ``publisher`` is a trusted integration callback that may only mutate
+        an adapter-owned in-memory cache.  It runs under the Registry
+        condition after the provisional Core state is installed, so reset
+        cannot clear Core ownership between selection and public publication.
+        If publication fails, the exact prior record and selection snapshots
+        are restored before the error escapes.  With ``activate=True`` the
+        global ACTIVE conflict check and transition are part of the same
+        transaction.
+        """
+        if not callable(publisher):
+            raise TypeError("Legacy publisher must be callable")
+        target_name = self._legacy_target_name(target)
+        required = self._legacy_capability_names(
+            kernel_required_capabilities
+        )
+
+        with self._condition:
+            self._ensure_not_resetting("commit_materialized_legacy")
+            current = self._validate_legacy_lease(
+                lease, "commit_materialized_legacy"
+            )
+            candidate = select_backend(
+                (current,),
+                target=target_name,
+                kernel_required_capabilities=required,
+                core_provided_capabilities=self._core_capabilities,
+                explicit_selector=current.record_id,
+                environment={},
+            )
+            candidate = replace(
+                candidate,
+                method=SelectionMethod.LEGACY_FALLBACK,
+                selector=None,
+                candidate_record_ids=(current.record_id,),
+                record=current,
+            )
+
+            previous_decision = self._selections.get(target_name)
+            if (
+                previous_decision is not None
+                and previous_decision.record_id != current.record_id
+            ):
+                raise BackendPluginConflictError(
+                    f"Target '{target_name}' is already bound to backend "
+                    f"'{previous_decision.record_id}', not Legacy record "
+                    f"'{current.record_id}'",
+                    entry_point=current.entry_point_name,
+                    conflict_kind="selected_target",
+                    claim=target_name,
+                    related_plugin_ids=tuple(
+                        plugin_id
+                        for plugin_id in (
+                            previous_decision.plugin_id,
+                            current.plugin_id,
+                        )
+                        if plugin_id is not None
+                    ),
+                    related_record_ids=(
+                        previous_decision.record_id,
+                        current.record_id,
+                    ),
+                    field="targets",
+                    expected=previous_decision.record_id,
+                    actual=current.record_id,
+                    remediation=(
+                        "Keep the current target binding or reset it before "
+                        "selecting another backend record."
+                    ),
+                )
+
+            if activate:
+                other_active = tuple(
+                    record
+                    for record in self._records.values()
+                    if (
+                        record.record_id != current.record_id
+                        and record.state is PluginLifecycleState.ACTIVE
+                    )
+                )
+                if other_active:
+                    active_ids = tuple(
+                        sorted(record.record_id for record in other_active)
+                    )
+                    raise BackendPluginConflictError(
+                        "Cannot activate more than one backend plugin: "
+                        + ", ".join(active_ids + (current.record_id,)),
+                        entry_point=current.entry_point_name,
+                        field="active",
+                        expected="one ACTIVE backend plugin",
+                        actual=", ".join(active_ids + (current.record_id,)),
+                        related_record_ids=active_ids + (current.record_id,),
+                        remediation=(
+                            "Keep the current active driver or reset runtime "
+                            "state before activating another backend."
+                        ),
+                    )
+
+            previous_record = current
+            previous_record_decisions = {
+                name: decision
+                for name, decision in self._selections.items()
+                if decision.record_id == current.record_id
+            }
+            selected_targets = tuple(
+                sorted(set(current.selected_targets).union({target_name}))
+            )
+            state = current.state
+            if activate:
+                if state is PluginLifecycleState.REGISTERED:
+                    self._transition(current, PluginLifecycleState.SELECTED)
+                    intermediate = replace(
+                        current,
+                        state=PluginLifecycleState.SELECTED,
+                    )
+                    self._transition(intermediate, PluginLifecycleState.ACTIVE)
+                elif state is PluginLifecycleState.SELECTED:
+                    self._transition(current, PluginLifecycleState.ACTIVE)
+                state = PluginLifecycleState.ACTIVE
+            elif state is PluginLifecycleState.REGISTERED:
+                self._transition(current, PluginLifecycleState.SELECTED)
+                state = PluginLifecycleState.SELECTED
+            if (
+                state is current.state
+                and selected_targets == current.selected_targets
+            ):
+                selected = current
+            else:
+                selected = self._replace(
+                    replace(
+                        current,
+                        state=state,
+                        selected_targets=selected_targets,
+                    )
+                )
+            if previous_decision is None:
+                decision = replace(candidate, record=selected)
+                self._selections[target_name] = decision
+            else:
+                decision = self._selections[target_name]
+
+            publication_epoch = self._lifecycle_epoch
+            self._legacy_publication_owner = threading.get_ident()
+            try:
+                publication = publisher(decision, selected)
+                if (
+                    publication_epoch != self._lifecycle_epoch
+                    or self._records.get(selected.record_id) is not selected
+                    or self._selections.get(target_name) is not decision
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Legacy publication changed Registry ownership re-entrantly",
+                        plugin_id=selected.plugin_id,
+                        entry_point=selected.entry_point_name,
+                        field="legacy publication",
+                        expected="the exact provisional record and selection",
+                        actual="reset or lifecycle mutation during publication",
+                        remediation=(
+                            "Publisher callbacks must only mutate their bounded "
+                            "adapter cache and must not re-enter Registry."
+                        ),
+                    )
+            except BaseException:
+                # Restore exact identities as well as values.  Conditional
+                # cleanup APIs use object identity to reject ABA operations.
+                if (
+                    publication_epoch == self._lifecycle_epoch
+                    and self._records.get(selected.record_id) is selected
+                    and self._selections.get(target_name) is decision
+                ):
+                    self._records[previous_record.record_id] = previous_record
+                    lease._refresh(
+                        previous_record,
+                        factory=_LEGACY_LEASE_FACTORY,
+                    )
+                    for name, stored in tuple(self._selections.items()):
+                        if stored.record_id == previous_record.record_id:
+                            self._selections.pop(name, None)
+                    self._selections.update(previous_record_decisions)
+                raise
+            finally:
+                self._legacy_publication_owner = None
+
+            if previous_decision is None:
+                self._generation += 1
+            return decision, selected, publication
+
+    def select_and_activate_materialized_legacy(
+        self,
+        target: Any,
+        *,
+        lease: LegacyRecordLease,
+        publisher: Optional[
+            Callable[[SelectionDecision, BackendPluginRecord], Any]
+        ] = None,
+    ) -> BackendPluginRecord:
+        """Atomically bind and activate one leased Legacy pair.
+
+        The optional publisher is reserved for a trusted integration cache;
+        normal Core callers can omit it and observe only Registry state.
+        """
+        callback = publisher or (lambda _decision, _record: None)
+        _decision, record, _publication = self.commit_materialized_legacy(
+            target,
+            lease=lease,
+            publisher=callback,
+            activate=True,
+        )
+        return record
+
+    def reject_materialized_legacy(
+        self,
+        lease: LegacyRecordLease,
+        error: BackendPluginError,
+        *,
+        unpublisher: Optional[
+            Callable[[BackendPluginRecord], Any]
+        ] = None,
+    ) -> BackendPluginRecord:
+        """Reject one probed Legacy pair and atomically remove its selections."""
+        if not isinstance(error, BackendPluginError):
+            raise TypeError("Legacy rejection requires a BackendPluginError")
+        if unpublisher is not None and not callable(unpublisher):
+            raise TypeError("Legacy unpublisher must be callable")
+        with self._condition:
+            self._ensure_not_resetting("reject_materialized_legacy")
+            current = self._validate_legacy_lease(
+                lease, "reject_materialized_legacy"
+            )
+            # Adapter publication follows the Registry -> adapter lock order
+            # also used by reset and commit_materialized_legacy().  Removing
+            # the bounded public cache first prevents a concurrently visible
+            # mapping from outliving the record that owns it; the Registry
+            # condition prevents another governed publisher from racing this
+            # rejection.
+            if unpublisher is not None:
+                self._legacy_publication_owner = threading.get_ident()
+                try:
+                    unpublisher(current)
+                finally:
+                    self._legacy_publication_owner = None
+            invalidated = tuple(
+                target
+                for target, decision in self._selections.items()
+                if decision.record_id == current.record_id
+            )
+            for target in invalidated:
+                del self._selections[target]
+            current = self._replace(replace(current, selected_targets=()))
+            rejected = self._reject(
+                current,
+                error,
+                PluginCompatibilityStatus.LEGACY_UNVERIFIED,
+            )
+            if invalidated:
+                self._generation += 1
+            return rejected
+
+    def commit_selection_if_current(
+        self,
+        decision: SelectionDecision,
+        *,
+        publisher: Callable[[SelectionDecision, BackendPluginRecord], Any],
+        activate: bool = False,
+    ) -> Tuple[SelectionDecision, BackendPluginRecord, Any]:
+        """Publish one exact existing selection at a bounded adapter boundary.
+
+        Plugin probes and constructors run before this method.  The callback
+        may only mutate an adapter-owned in-memory cache.  Exact decision and
+        record identities close reset/reselection ABA windows, while optional
+        activation and publication share the Registry critical section.
+        """
+        if type(decision) is not SelectionDecision:
+            raise TypeError("selection commit requires a SelectionDecision")
+        if not callable(publisher):
+            raise TypeError("selection publisher must be callable")
+        for field_name, value in (
+            ("selection.target", decision.target),
+            ("selection.record_id", decision.record_id),
+        ):
+            if type(value) is not str or not value:
+                raise BackendPluginLifecycleError(
+                    "Selection commit identity is not an inert string",
+                    field=field_name,
+                    expected="an exact non-empty built-in string",
+                    actual=_stable_type_name(value),
+                    remediation="Use an unmodified Registry-issued decision.",
+                )
+
+        with self._condition:
+            self._ensure_not_resetting("commit_selection_if_current")
+            stored = self._selections.get(decision.target)
+            if (
+                stored is None
+                or stored.ownership_token is not decision.ownership_token
+            ):
+                raise BackendPluginLifecycleError(
+                    "Backend selection changed before adapter publication",
+                    plugin_id=decision.plugin_id,
+                    entry_point=decision.entry_point_name,
+                    field="selection",
+                    expected=(
+                        f"current decision {decision.target} -> "
+                        f"{decision.record_id}"
+                    ),
+                    actual=(
+                        "<missing>"
+                        if stored is None
+                        else f"current decision {stored.target} -> {stored.record_id}"
+                    ),
+                    remediation=(
+                        "Retry consumption using the current Registry selection."
+                    ),
+                )
+            current = self._records.get(decision.record_id)
+            if current is None or stored.record is not current:
+                raise BackendPluginLifecycleError(
+                    "Backend selection record changed before adapter publication",
+                    plugin_id=decision.plugin_id,
+                    entry_point=decision.entry_point_name,
+                    field="selection.record",
+                    expected="the exact current Registry record",
+                    actual="missing or replaced record identity",
+                    remediation=(
+                        "Retry consumption after the concurrent lifecycle change."
+                    ),
+                )
+            if decision.target not in current.selected_targets:
+                raise BackendPluginLifecycleError(
+                    "Backend record no longer owns the selected target",
+                    plugin_id=current.plugin_id,
+                    entry_point=current.entry_point_name,
+                    field="selected_targets",
+                    expected=decision.target,
+                    actual=", ".join(current.selected_targets) or "<none>",
+                    remediation="Retry from the current Registry selection.",
+                )
+
+            previous_record = current
+            previous_decisions = {
+                target: item
+                for target, item in self._selections.items()
+                if item.record_id == current.record_id
+            }
+            if activate and current.state is not PluginLifecycleState.ACTIVE:
+                other_active = tuple(
+                    record
+                    for record in self._records.values()
+                    if (
+                        record.record_id != current.record_id
+                        and record.state is PluginLifecycleState.ACTIVE
+                    )
+                )
+                if other_active:
+                    active_ids = tuple(
+                        sorted(record.record_id for record in other_active)
+                    )
+                    raise BackendPluginConflictError(
+                        "Cannot activate more than one backend plugin: "
+                        + ", ".join(active_ids + (current.record_id,)),
+                        plugin_id=current.plugin_id,
+                        entry_point=current.entry_point_name,
+                        field="active",
+                        expected="one ACTIVE backend plugin",
+                        actual=", ".join(active_ids + (current.record_id,)),
+                        related_record_ids=active_ids + (current.record_id,),
+                        remediation=(
+                            "Reset runtime state before activating another backend."
+                        ),
+                    )
+                if current.state is PluginLifecycleState.SELECTED:
+                    self._transition(current, PluginLifecycleState.ACTIVE)
+                    current = self._replace(
+                        replace(current, state=PluginLifecycleState.ACTIVE)
+                    )
+                    stored = self._selections[decision.target]
+                elif current.state is not PluginLifecycleState.ACTIVE:
+                    raise BackendPluginLifecycleError(
+                        "Backend selection is not ready for activation",
+                        plugin_id=current.plugin_id,
+                        entry_point=current.entry_point_name,
+                        field="state",
+                        expected="selected or active",
+                        actual=current.state.value,
+                        remediation="Select the backend before runtime activation.",
+                    )
+
+            publication_epoch = self._lifecycle_epoch
+            self._legacy_publication_owner = threading.get_ident()
+            try:
+                publication = publisher(stored, current)
+                if (
+                    publication_epoch != self._lifecycle_epoch
+                    or self._records.get(current.record_id) is not current
+                    or self._selections.get(stored.target) is not stored
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Backend publication changed Registry ownership re-entrantly",
+                        plugin_id=current.plugin_id,
+                        entry_point=current.entry_point_name,
+                        field="backend publication",
+                        expected="the exact current record and selection",
+                        actual="reset or lifecycle mutation during publication",
+                        remediation=(
+                            "Publisher callbacks must only mutate their bounded "
+                            "adapter cache."
+                        ),
+                    )
+            except BaseException:
+                if (
+                    publication_epoch == self._lifecycle_epoch
+                    and self._records.get(current.record_id) is current
+                    and self._selections.get(stored.target) is stored
+                ):
+                    self._records[previous_record.record_id] = previous_record
+                    lease = self._legacy_leases.get(previous_record.record_id)
+                    if lease is not None:
+                        lease._refresh(
+                            previous_record,
+                            factory=_LEGACY_LEASE_FACTORY,
+                        )
+                    for target, item in tuple(self._selections.items()):
+                        if item.record_id == previous_record.record_id:
+                            self._selections.pop(target, None)
+                    self._selections.update(previous_decisions)
+                raise
+            finally:
+                self._legacy_publication_owner = None
+            return stored, current, publication
+
+    def activate_materialized_legacy(
+        self,
+        lease: LegacyRecordLease,
+        target: Any,
+    ) -> BackendPluginRecord:
+        """Activate the leased pair only for its exact current target binding."""
+        target_name = self._legacy_target_name(target)
+        with self._condition:
+            self._ensure_not_resetting("activate_materialized_legacy")
+            current = self._validate_legacy_lease(
+                lease, "activate_materialized_legacy"
+            )
+            decision = self._selections.get(target_name)
+            if decision is None or decision.record_id != current.record_id:
+                raise BackendPluginLifecycleError(
+                    "Legacy backend must own the target selection before activation",
+                    entry_point=current.entry_point_name,
+                    field="selection",
+                    expected=f"{target_name} -> {current.record_id}",
+                    actual=(
+                        "<missing>"
+                        if decision is None
+                        else f"{target_name} -> {decision.record_id}"
+                    ),
+                    remediation=(
+                        "Call select_materialized_legacy() with the same lease "
+                        "and target before activation."
+                    ),
+                )
+            return self.activate(current.record_id)
+
     def select(
         self,
         target: Any,
@@ -2435,6 +3370,11 @@ class BackendPluginRegistry:
         Selection itself is static and import-free.  Only the winning record
         reaches ``register()``; losing candidates are never loaded.
         """
+        target_name = _target_name(target)
+        required = _capability_names(
+            kernel_required_capabilities,
+            "kernel_required_capabilities",
+        )
         with self._lock:
             self._ensure_not_resetting("select")
             records = self.validate()
@@ -2443,18 +3383,25 @@ class BackendPluginRegistry:
             # changed); this also covers compiler/runtime entry paths that
             # resolve through select().
             self._reject_all_fatal_conflicts(records)
-            decision = select_backend(
-                records,
-                target=target,
-                kernel_required_capabilities=(
-                    kernel_required_capabilities
-                ),
-                core_provided_capabilities=self._core_capabilities,
-                explicit_selector=explicit_selector,
-                environment=(
-                    os.environ if environment is None else environment
-                ),
-            )
+            try:
+                decision = select_backend(
+                    records,
+                    target=target_name,
+                    kernel_required_capabilities=required,
+                    core_provided_capabilities=self._core_capabilities,
+                    explicit_selector=explicit_selector,
+                    environment=(
+                        os.environ if environment is None else environment
+                    ),
+                )
+            except BackendPluginNoCandidateError:
+                # NoCandidate is an authority to enter the weaker Legacy
+                # bridge.  It is only safe when discovery itself was complete;
+                # a distribution-level metadata failure has no record/targets
+                # with which the pure selector could prove irrelevance.
+                if self._registry_errors:
+                    raise self._registry_errors[0]
+                raise
 
             target_name = decision.target
             previous_decision = self._selections.get(target_name)
@@ -2603,8 +3550,167 @@ class BackendPluginRegistry:
 
     def get_selection(self, target: str) -> Optional[SelectionDecision]:
         """Return the cached selection for one target without loading."""
+        if type(target) is not str or not target:
+            raise BackendPluginSelectionError(
+                "Selection lookup target must be an inert string",
+                field="target",
+                expected="an exact non-empty built-in string",
+                actual=_stable_type_name(target),
+                remediation="Normalize the target before Registry lookup.",
+            )
         with self._lock:
             return self._selections.get(target)
+
+    def release_selections_if_current(
+        self,
+        decisions: Iterable[SelectionDecision],
+    ) -> Tuple[BackendPluginRecord, ...]:
+        """Atomically release an exact batch of conditional selections.
+
+        Every stored decision and record identity is validated before any
+        mutation.  Consequently a reset, activation, or newer selection makes
+        the entire release fail closed instead of partially removing state.
+        Records selected for multiple targets are replaced only once.
+        """
+        try:
+            decision_tuple = tuple(decisions)
+        except TypeError as exc:
+            raise TypeError("selection release decisions must be iterable") from exc
+        if any(type(decision) is not SelectionDecision for decision in decision_tuple):
+            raise TypeError("selection release requires SelectionDecision values")
+        for decision in decision_tuple:
+            for field_name, value in (
+                ("selection.target", decision.target),
+                ("selection.record_id", decision.record_id),
+            ):
+                if type(value) is not str or not value:
+                    raise BackendPluginLifecycleError(
+                        "Selection release identity is not an inert string",
+                        field=field_name,
+                        expected="an exact non-empty built-in string",
+                        actual=_stable_type_name(value),
+                        remediation="Use an unmodified Registry-issued decision.",
+                    )
+        targets = tuple(decision.target for decision in decision_tuple)
+        if len(targets) != len(set(targets)):
+            raise ValueError("selection release targets must be unique")
+        if not decision_tuple:
+            return ()
+
+        with self._condition:
+            self._ensure_not_resetting("release_selections_if_current")
+            records: Dict[str, BackendPluginRecord] = {}
+            released_targets: Dict[str, set[str]] = {}
+            for decision in decision_tuple:
+                current_decision = self._selections.get(decision.target)
+                if (
+                    current_decision is None
+                    or current_decision.ownership_token
+                    is not decision.ownership_token
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Conditional backend selection is stale or has been replaced",
+                        plugin_id=decision.plugin_id,
+                        entry_point=decision.entry_point_name,
+                        field="selection",
+                        expected=(
+                            f"current decision {decision.target} -> "
+                            f"{decision.record_id}"
+                        ),
+                        actual=(
+                            "<missing>"
+                            if current_decision is None
+                            else (
+                                f"current decision {current_decision.target} -> "
+                                f"{current_decision.record_id}"
+                            )
+                        ),
+                        remediation=(
+                            "Do not release decisions after reset or replacement; "
+                            "leave newer selections untouched."
+                        ),
+                    )
+                record = self._records.get(decision.record_id)
+                if record is None or current_decision.record is not record:
+                    raise BackendPluginLifecycleError(
+                        "Conditional backend selection record is stale",
+                        plugin_id=decision.plugin_id,
+                        entry_point=decision.entry_point_name,
+                        field="selection.record",
+                        expected="the exact current Registry record",
+                        actual="missing or replaced record identity",
+                        remediation=(
+                            "Do not release an old decision after another "
+                            "lifecycle operation replaced its record snapshot."
+                        ),
+                    )
+                if record.state is PluginLifecycleState.ACTIVE:
+                    raise BackendPluginLifecycleError(
+                        "An ACTIVE backend selection cannot be conditionally released",
+                        plugin_id=record.plugin_id,
+                        entry_point=record.entry_point_name,
+                        field="state",
+                        expected=PluginLifecycleState.SELECTED.value,
+                        actual=record.state.value,
+                        remediation="Reset the active runtime driver before release.",
+                    )
+                if record.state not in {
+                    PluginLifecycleState.SELECTED,
+                    PluginLifecycleState.REGISTERED,
+                }:
+                    raise BackendPluginLifecycleError(
+                        "Conditional selection record is not releasable",
+                        plugin_id=record.plugin_id,
+                        entry_point=record.entry_point_name,
+                        field="state",
+                        expected="selected or registered",
+                        actual=record.state.value,
+                        remediation="Retry from a fresh Registry selection.",
+                    )
+                records[record.record_id] = record
+                released_targets.setdefault(record.record_id, set()).add(
+                    decision.target
+                )
+
+            # All authority checks succeeded.  Remove the batch before record
+            # replacement so _replace() updates only selections that remain.
+            for decision in decision_tuple:
+                del self._selections[decision.target]
+
+            released_records = []
+            for record_id in sorted(records):
+                record = records[record_id]
+                removed = released_targets[record_id]
+                remaining_targets = tuple(
+                    target
+                    for target in record.selected_targets
+                    if target not in removed
+                )
+                state = record.state
+                if (
+                    state is PluginLifecycleState.SELECTED
+                    and not remaining_targets
+                ):
+                    self._transition(record, PluginLifecycleState.REGISTERED)
+                    state = PluginLifecycleState.REGISTERED
+                released_records.append(
+                    self._replace(
+                        replace(
+                            record,
+                            state=state,
+                            selected_targets=remaining_targets,
+                        )
+                    )
+                )
+            self._generation += 1
+            return tuple(released_records)
+
+    def release_selection_if_current(
+        self,
+        decision: SelectionDecision,
+    ) -> BackendPluginRecord:
+        """Singular convenience wrapper for conditional selection release."""
+        return self.release_selections_if_current((decision,))[0]
 
     def activate(self, identifier: str) -> BackendPluginRecord:
         """Mark one selected runtime pair active without reloading it.
@@ -2875,6 +3981,7 @@ class BackendPluginRegistry:
         reset_hooks: Tuple[Callable[[], None], ...] = ()
         shutdown_records: Tuple[BackendPluginRecord, ...] = ()
         reset_started = False
+        fatal_reset_error: Optional[BaseException] = None
         try:
             with self._condition:
                 self._ensure_not_resetting("reset")
@@ -2896,11 +4003,58 @@ class BackendPluginRegistry:
                             "Return from the plugin hook before resetting the Registry."
                         ),
                     )
+                if self._legacy_publication_owner == thread_id:
+                    raise BackendPluginLifecycleError(
+                        "Cannot reset the Registry re-entrantly from a Legacy "
+                        "publication callback",
+                        field="reset",
+                        expected="reset outside adapter publication",
+                        actual="current thread owns Legacy publication",
+                        remediation=(
+                            "Return from the bounded publication callback before "
+                            "resetting the Registry."
+                        ),
+                    )
                 reset_started = True
                 self._resetting = True
                 self._lifecycle_epoch += 1
                 self._generation += 1
                 self._reset_operation_errors = []
+
+                # Adapter-owned publication caches are invalidated at the
+                # same commit boundary as the lifecycle epoch.  These trusted
+                # callbacks are deliberately constrained to bounded memory
+                # mutation and run before Core ownership is cleared, so a
+                # stale public mapping is never observable with no owning
+                # Registry record.
+                for callback in tuple(self._reset_invalidation_hooks):
+                    try:
+                        callback()
+                    except BackendPluginError as exc:
+                        cleanup_errors.append((0, exc))
+                    except Exception as exc:
+                        cleanup_errors.append(
+                            (
+                                0,
+                                BackendPluginLifecycleError(
+                                    f"Backend reset invalidation hook failed: {exc}",
+                                    field="reset_invalidation_hook",
+                                    expected="successful in-memory cache invalidation",
+                                    actual=f"<error: {exc}>",
+                                    remediation=(
+                                        "Fix the adapter invalidation hook so it "
+                                        "does not call plugin or Registry code."
+                                    ),
+                                ),
+                            )
+                        )
+                    except BaseException as exc:
+                        # SystemExit/KeyboardInterrupt must not strand a half
+                        # reset Registry after the lifecycle epoch advanced.
+                        # Preserve the first fatal signal, finish the atomic
+                        # Core/cache invalidation and cleanup, then re-raise it.
+                        if fatal_reset_error is None:
+                            fatal_reset_error = exc
 
                 # Invalidate public state first. Owners complete against the
                 # advanced epoch and can therefore never publish stale results.
@@ -2910,6 +4064,8 @@ class BackendPluginRegistry:
                 self._environment_error = None
                 self._discovered = False
                 self._selections.clear()
+                self._legacy_leases.clear()
+                self._legacy_lease_tokens.clear()
                 self._condition.notify_all()
 
                 while self._loading or self._registering or self._diagnosing:
@@ -2948,16 +4104,24 @@ class BackendPluginRegistry:
                             ),
                         )
                     )
+                except BaseException as exc:
+                    if fatal_reset_error is None:
+                        fatal_reset_error = exc
 
             # User shutdown hooks may acquire plugin-owned locks or attempt
             # Registry re-entry.  They also run outside the Registry lock;
             # _resetting makes any lifecycle re-entry fail immediately.
             for record in shutdown_records:
-                _called, error = self._call_shutdown(record)
+                try:
+                    _called, error = self._call_shutdown(record)
+                except BaseException as exc:
+                    if fatal_reset_error is None:
+                        fatal_reset_error = exc
+                    continue
                 if error is not None:
                     cleanup_errors.append((1, error))
 
-            return tuple(
+            result = tuple(
                 error
                 for _rank, error in sorted(
                     cleanup_errors,
@@ -2971,6 +4135,9 @@ class BackendPluginRegistry:
                     ),
                 )
             )
+            if fatal_reset_error is not None:
+                raise fatal_reset_error
+            return result
         finally:
             if reset_started:
                 with self._condition:

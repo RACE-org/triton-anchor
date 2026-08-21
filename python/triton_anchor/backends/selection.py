@@ -17,7 +17,12 @@ from .capabilities import (
     validate_plugin_capabilities,
 )
 from .conflicts import detect_static_conflicts
-from .errors import BackendPluginError, BackendPluginSelectionError
+from .errors import (
+    BackendPluginCapabilityError,
+    BackendPluginError,
+    BackendPluginNoCandidateError,
+    BackendPluginSelectionError,
+)
 from .manifest import validate_plugin_isolation
 
 
@@ -38,6 +43,7 @@ class SelectionMethod(str, Enum):
     ENVIRONMENT = "environment"
     SOLE_CANDIDATE = "sole_candidate"
     MANIFEST_PRIORITY = "manifest_priority"
+    LEGACY_FALLBACK = "legacy_fallback"
 
 
 @dataclass(frozen=True)
@@ -56,6 +62,14 @@ class SelectionDecision:
     candidate_record_ids: Tuple[str, ...]
     capability_report: Optional[CapabilityReport]
     record: Any = field(repr=False, compare=False)
+    # Opaque per-target ownership survives immutable record snapshot refreshes
+    # but changes on reset or a new selection.  Conditional commit/release can
+    # therefore reject ABA without depending on dataclass object identity.
+    ownership_token: Any = field(
+        default_factory=object,
+        repr=False,
+        compare=False,
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a deterministic, JSON-compatible diagnostic view."""
@@ -116,7 +130,7 @@ def _enum_value(value: Any) -> Optional[str]:
 
 
 def _non_empty_string(value: Any, field_name: str) -> str:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise BackendPluginSelectionError(
             f"Selection input '{field_name}' must be a non-empty string",
             field=field_name,
@@ -279,7 +293,7 @@ def _capability_names(
             remediation=f"Pass {field_name} as a list, tuple, or set.",
         ) from exc
     if any(
-        not isinstance(value, str)
+        type(value) is not str
         or not value
         or value != value.strip()
         for value in result
@@ -415,18 +429,12 @@ def _selected_view(
                 remediation="Rediscover the Legacy backend or select a valid record.",
             )
         if kernel_required:
-            missing = ", ".join(kernel_required)
-            raise BackendPluginSelectionError(
-                "Legacy backend cannot satisfy declared kernel capabilities: "
-                + missing,
+            raise BackendPluginCapabilityError(
+                kernel_required,
+                scope="kernel",
+                available_capabilities=(),
+                missing_kernel_capabilities=kernel_required,
                 entry_point=view.entry_point_name,
-                field="kernel_required_capabilities",
-                expected="no capability requirements for an unverified Legacy backend",
-                actual=missing,
-                remediation=(
-                    "Migrate the backend to a Manifest with static capabilities, "
-                    "then select it again."
-                ),
             )
         return None
 
@@ -660,11 +668,12 @@ def select_backend(
                 continue
             if view.manifest is None:
                 # Structural discovery failures have no parsed targets.  An
-                # entry point whose exact name is requested is still related;
-                # replay its authoritative Manifest error instead of masking
-                # it with a generic no-candidate result.
-                if view.entry_point_name == target_name:
-                    unreadable_rejected.append((view.record_id, error))
+                # automatic selector cannot prove that such a distribution is
+                # unrelated to this target.  Replay its authoritative error
+                # instead of emitting NoCandidate, because NoCandidate is the
+                # only authority an integration adapter may use to enter a
+                # weaker Legacy compatibility path.
+                unreadable_rejected.append((view.record_id, error))
                 continue
             targets = tuple(getattr(view.manifest, "targets", ()) or ())
             if target_name in targets:
@@ -686,7 +695,7 @@ def select_backend(
             if legacy_ids
             else ""
         )
-        raise BackendPluginSelectionError(
+        raise BackendPluginNoCandidateError(
             f"No compatible Manifest backend declares target '{target_name}'."
             + detail,
             field="targets",

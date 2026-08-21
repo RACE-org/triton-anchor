@@ -16,6 +16,7 @@ from .errors import (
     BackendPluginLifecycleError,
     BackendPluginLoadError,
     BackendPluginManifestError,
+    BackendPluginNoCandidateError,
     BackendPluginProtocolError,
     BackendPluginSelectionError,
 )
@@ -93,6 +94,7 @@ from .selection import (
 from .registry import (
     BackendPluginRecord,
     BackendPluginRegistry,
+    LegacyRecordLease,
     RuntimePairValidationContext,
     RuntimePairValidator,
     backend_plugin_registry,
@@ -117,6 +119,7 @@ __all__ = [
     "BackendPluginLifecycleError",
     "BackendPluginLoadError",
     "BackendPluginManifestError",
+    "BackendPluginNoCandidateError",
     "BackendPluginProtocolError",
     "BackendPluginSelectionError",
     "BackendPluginManifest",
@@ -132,6 +135,7 @@ __all__ = [
     "CORE_ABI_FINGERPRINT_SCHEMA",
     "CoreEnvironment",
     "LegacyBackendPluginShim",
+    "LegacyRecordLease",
     "NativeArtifact",
     "NativeInspectionReport",
     "PluginCompatibilityStatus",
