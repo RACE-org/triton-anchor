@@ -14,6 +14,7 @@ import itertools
 import json
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from packaging.tags import Tag
 
 from triton_anchor.backends import (
     BACKEND_SELECTOR_ENV,
+    DIAGNOSTICS_FIELD_POLICY,
     BackendPluginBase,
     BackendPluginCapabilityError,
     BackendPluginCompatibilityError,
@@ -292,6 +294,19 @@ def one_record(registry: BackendPluginRegistry):
     records = registry.list()
     assert len(records) == 1
     return records[0]
+
+
+def wait_for_generation_change(
+    registry: BackendPluginRegistry,
+    generation: int,
+    *,
+    timeout: float = 10,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while registry.generation == generation:
+        if time.monotonic() >= deadline:
+            pytest.fail("Registry generation did not change before timeout")
+        time.sleep(0.001)
 
 
 def assert_structured_error(
@@ -1669,6 +1684,9 @@ def test_registry_public_failure_routes_preserve_complete_diagnostics(
 
 
 def test_registry_protocol_optional_field_old_producer_gets_default() -> None:
+    assert DIAGNOSTICS_FIELD_POLICY.introduced_in == "1.0"
+    assert DIAGNOSTICS_FIELD_POLICY.deprecated_in is None
+    assert DIAGNOSTICS_FIELD_POLICY.removed_in is None
     result = consume_protocol_field(
         object(), producer_protocol_version="1.0", consumer_protocol_version="1.1"
     )
@@ -1678,17 +1696,20 @@ def test_registry_protocol_optional_field_old_producer_gets_default() -> None:
 
 
 def test_registry_protocol_unknown_field_is_ignored_by_old_consumer() -> None:
+    """The retained node now freezes diagnostics as known since Protocol 1.0."""
     producer = SimpleNamespace(diagnostics={"new": True})
     result = consume_protocol_field(
         producer,
         producer_protocol_version="1.1",
         consumer_protocol_version="1.0",
     )
-    assert result.status is ProtocolFieldStatus.COMPATIBLE_IGNORED
-    assert result.value is None
+    assert result.status is ProtocolFieldStatus.COMPATIBLE_PRESERVED
+    assert result.value == {"new": True}
+    assert result.diagnostics == ()
 
 
 def test_registry_protocol_field_preserved_then_warned_during_deprecation() -> None:
+    """No replacement is approved, so neither 1.1 nor 1.2 deprecates it."""
     producer = SimpleNamespace(diagnostics=lambda: {"healthy": True})
     preserved = consume_protocol_field(
         producer,
@@ -1702,10 +1723,9 @@ def test_registry_protocol_field_preserved_then_warned_during_deprecation() -> N
     )
     assert preserved.status is ProtocolFieldStatus.COMPATIBLE_PRESERVED
     assert preserved.value == {"healthy": True}
-    assert deprecated.status is ProtocolFieldStatus.ACCEPTED_WITH_DEPRECATION_DIAGNOSTIC
+    assert deprecated.status is ProtocolFieldStatus.COMPATIBLE_PRESERVED
     assert deprecated.value == {"healthy": True}
-    assert deprecated.diagnostics[0].severity == "warning"
-    assert deprecated.diagnostics[0].field == "diagnostics"
+    assert deprecated.diagnostics == ()
 
 
 def test_registry_protocol_cross_major_field_access_fails_explicitly() -> None:
@@ -1724,7 +1744,9 @@ def test_registry_protocol_field_removal_requires_major_boundary() -> None:
     removed = evaluate_protocol_field_removal("2.0")
     assert forbidden.status is ProtocolFieldStatus.FORBIDDEN
     assert forbidden.diagnostics[0].severity == "error"
-    assert removed.status is ProtocolFieldStatus.COMPATIBLE
+    assert removed.status is ProtocolFieldStatus.FORBIDDEN
+    assert removed.diagnostics[0].deprecated_in is None
+    assert removed.diagnostics[0].removed_in is None
 
 
 # ---------------------------------------------------------------------------
@@ -1805,7 +1827,7 @@ def test_registry_optional_lifecycle_hooks_may_be_absent(tmp_path: Path) -> None
     registered = registry.register(one_record(registry).record_id)
     assert registered.state is PluginLifecycleState.REGISTERED
     assert not registered.initialized
-    assert registry.diagnostics(registered.record_id)["plugin_diagnostics"] is None
+    assert registry.diagnostics(registered.record_id)["plugin_diagnostics"] == {}
     assert registry.reset() == ()
 
 
@@ -1858,7 +1880,7 @@ def test_registry_reports_unreadable_runtime_member(tmp_path: Path) -> None:
         registry.register(one_record(registry).record_id)
     diagnostic = caught.value.to_dict()
     assert diagnostic["field_errors"] == {
-        "compiler_cls": "compiler metadata exploded"
+        "compiler_cls": "<error: builtins.RuntimeError>"
     }
 
 
@@ -1880,6 +1902,7 @@ def test_registry_rejects_entry_point_import_failure_with_identity(
         caught.value, plugin_id="vendor.alpha", field_contains="entry_point.load"
     )
     assert diagnostic["entry_point"] == "alpha"
+    assert diagnostic["actual"] == "<error: builtins.ModuleNotFoundError>"
     assert marker.exists()
     assert entry_point.load_calls == 1
 
@@ -1922,7 +1945,7 @@ def test_registry_initialize_failure_attempts_cleanup_and_rejects(
     diagnostic = assert_structured_error(
         caught.value, plugin_id="vendor.alpha", field_contains="initialize"
     )
-    assert "partial initialization" in diagnostic["actual"]
+    assert diagnostic["actual"] == "<error: builtins.RuntimeError>"
     assert plugin.initialize_calls == 1
     assert plugin.shutdown_calls == 1
     record = one_record(registry)
@@ -2074,7 +2097,6 @@ def test_registry_reset_racing_initialize_cannot_publish_stale_instance(
 ) -> None:
     initialize_started = threading.Event()
     allow_initialize = threading.Event()
-    reset_attempted = threading.Event()
 
     class BlockingPlugin:
         compiler_cls = Compiler
@@ -2097,18 +2119,17 @@ def test_registry_reset_racing_initialize_cannot_publish_stale_instance(
     registry = registry_for([distribution])
     record_id = one_record(registry).record_id
 
-    def reset() -> Any:
-        reset_attempted.set()
-        return registry.reset()
-
     with ThreadPoolExecutor(max_workers=2) as executor:
         register_future = executor.submit(registry.register, record_id)
         assert initialize_started.wait(timeout=10)
-        reset_future = executor.submit(reset)
-        assert reset_attempted.wait(timeout=10)
+        generation = registry.generation
+        reset_future = executor.submit(registry.reset)
+        wait_for_generation_change(registry, generation)
         assert not reset_future.done()
         allow_initialize.set()
-        assert register_future.result(timeout=10).state is PluginLifecycleState.REGISTERED
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            register_future.result(timeout=10)
+        assert_structured_error(caught.value, field_contains="generation")
         assert reset_future.result(timeout=10) == ()
 
     assert plugin.shutdown_calls == 1
@@ -2116,6 +2137,82 @@ def test_registry_reset_racing_initialize_cannot_publish_stale_instance(
     rediscovered = one_record(registry)
     assert rediscovered.state is PluginLifecycleState.DISCOVERED
     assert rediscovered.plugin_object is None
+
+
+def test_registry_reset_at_publish_boundary_cleans_initialized_plugin_once(
+    tmp_path: Path,
+) -> None:
+    publish_boundary = threading.Event()
+    allow_register_return = threading.Event()
+
+    class GatedCondition:
+        def __init__(self, condition: Any) -> None:
+            self._condition = condition
+            self._armed = False
+            self._owner: Optional[int] = None
+            self._fired = False
+
+        def arm(self) -> None:
+            self._armed = True
+            self._owner = threading.get_ident()
+
+        def __enter__(self) -> Any:
+            return self._condition.__enter__()
+
+        def __exit__(self, *args: Any) -> Any:
+            result = self._condition.__exit__(*args)
+            if (
+                self._armed
+                and not self._fired
+                and self._owner == threading.get_ident()
+            ):
+                self._fired = True
+                publish_boundary.set()
+                if not allow_register_return.wait(timeout=10):
+                    raise RuntimeError("test did not release register")
+            return result
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._condition, name)
+
+    gate: GatedCondition
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            gate.arm()
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    plugin = Plugin()
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    record_id = one_record(registry).record_id
+    gate = GatedCondition(registry._condition)
+    registry._condition = gate
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        register_future = executor.submit(registry.register, record_id)
+        assert publish_boundary.wait(timeout=10)
+        generation = registry.generation
+        reset_future = executor.submit(registry.reset)
+        wait_for_generation_change(registry, generation)
+        allow_register_return.set()
+        registered = register_future.result(timeout=10)
+        assert registered.state is PluginLifecycleState.REGISTERED
+        assert reset_future.result(timeout=10) == ()
+
+    assert plugin.shutdown_calls == 1
+    assert registry.reset() == ()
+    assert plugin.shutdown_calls == 1
 
 
 def test_registry_reset_is_idempotent_and_allows_fresh_rediscovery(
@@ -2149,6 +2246,607 @@ def test_registry_reset_is_idempotent_and_allows_fresh_rediscovery(
     assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (2, 2, 1)
     assert registry.reset() == ()
     assert (FreshPlugin.instances, FreshPlugin.initializes, FreshPlugin.shutdowns) == (2, 2, 2)
+
+
+def test_registry_reset_wakes_concurrent_register_waiters_as_stale(
+    tmp_path: Path,
+) -> None:
+    initialize_started = threading.Event()
+    allow_initialize = threading.Event()
+    start = threading.Barrier(6)
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.initialize_calls = 0
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            self.initialize_calls += 1
+            initialize_started.set()
+            if not allow_initialize.wait(timeout=10):
+                raise RuntimeError("test did not release initialize")
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    plugin = Plugin()
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    record_id = one_record(registry).record_id
+
+    def register() -> Any:
+        start.wait(timeout=10)
+        return registry.register(record_id)
+
+    with ThreadPoolExecutor(max_workers=7) as executor:
+        register_futures = [executor.submit(register) for _index in range(6)]
+        assert initialize_started.wait(timeout=10)
+        generation = registry.generation
+        reset_future = executor.submit(registry.reset)
+        wait_for_generation_change(registry, generation)
+        allow_initialize.set()
+        errors = []
+        for future in register_futures:
+            with pytest.raises(BackendPluginLifecycleError) as caught:
+                future.result(timeout=10)
+            errors.append(caught.value)
+        assert reset_future.result(timeout=10) == ()
+
+    assert {error.field for error in errors} <= {
+        "generation",
+        "load",
+        "register",
+    }
+    assert any(error.field == "generation" for error in errors)
+    assert entry_point.load_calls == 1
+    assert plugin.initialize_calls == 1
+    assert plugin.shutdown_calls == 1
+    rediscovered = one_record(registry)
+    assert rediscovered.state is PluginLifecycleState.DISCOVERED
+    assert rediscovered.plugin_object is None
+
+
+def test_registry_initialize_context_is_fixed_read_only_snapshot(
+    tmp_path: Path,
+) -> None:
+    contexts: list[Mapping[str, Any]] = []
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def initialize(self, context: Mapping[str, Any]) -> None:
+            contexts.append(context)
+
+    plugin_data = good_plugin(
+        lifecycle_metadata={"nested": ["original"]}
+    )
+    entry_point = FakeEntryPoint("alpha", Plugin())
+    distribution = make_distribution(
+        tmp_path,
+        plugins=[plugin_data],
+        entry_points=[entry_point],
+    )
+    registry = registry_for([distribution])
+    original = one_record(registry)
+    registry.register(original.record_id)
+
+    context = contexts[0]
+    assert tuple(context) == ("environment", "manifest", "record_id")
+    with pytest.raises(TypeError):
+        context["extra"] = True  # type: ignore[index]
+    with pytest.raises(TypeError):
+        context["manifest"].extensions["extra"] = True
+    original.manifest.extensions["lifecycle_metadata"]["nested"].append(
+        "mutated"
+    )
+    assert context["manifest"].extensions["lifecycle_metadata"][
+        "nested"
+    ] == ("original",)
+
+
+@pytest.mark.parametrize("hook_name", ["initialize", "shutdown", "diagnostics"])
+def test_registry_rejects_introspectable_incompatible_hook_signatures(
+    tmp_path: Path, hook_name: str
+) -> None:
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+    plugin = Plugin()
+    if hook_name == "initialize":
+        plugin.initialize = lambda _context, _required: None
+    else:
+        setattr(plugin, hook_name, lambda _required: None)
+    entry_point = FakeEntryPoint("alpha", plugin)
+    distribution = make_distribution(tmp_path, entry_points=[entry_point])
+    registry = registry_for([distribution])
+    record_id = one_record(registry).record_id
+
+    if hook_name == "initialize":
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            registry.register(record_id)
+        diagnostic = caught.value.to_dict()
+    elif hook_name == "shutdown":
+        registry.register(record_id)
+        errors = registry.reset()
+        assert len(errors) == 1
+        diagnostic = errors[0].to_dict()
+    else:
+        registry.register(record_id)
+        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"][
+            "error"
+        ]
+    assert diagnostic["field"] == hook_name
+    assert "signature" in diagnostic["message"]
+
+
+def test_registry_rejects_awaitable_initialize_and_cleans_up_once(
+    tmp_path: Path,
+) -> None:
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        async def initialize(self, _context: Mapping[str, Any]) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+
+    plugin = Plugin()
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    with pytest.raises(BackendPluginLifecycleError) as caught:
+        registry.register(one_record(registry).record_id)
+    assert caught.value.field == "initialize"
+    assert "synchronous" in caught.value.expected
+    assert plugin.shutdown_calls == 1
+    assert registry.reset() == ()
+    assert plugin.shutdown_calls == 1
+
+
+@pytest.mark.parametrize("hook_name", ["shutdown", "diagnostics"])
+def test_registry_rejects_awaitable_zero_argument_hooks(
+    tmp_path: Path, hook_name: str
+) -> None:
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+    plugin = Plugin()
+
+    async def async_hook() -> Any:
+        return {} if hook_name == "diagnostics" else None
+
+    setattr(plugin, hook_name, async_hook)
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    record_id = one_record(registry).record_id
+    registry.register(record_id)
+    if hook_name == "shutdown":
+        errors = registry.reset()
+        assert len(errors) == 1
+        diagnostic = errors[0].to_dict()
+    else:
+        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"][
+            "error"
+        ]
+    assert diagnostic["field"] == hook_name
+    assert "awaitable" in diagnostic["message"]
+
+
+def test_registry_hooks_reenter_without_deadlock_or_repeat(
+    tmp_path: Path,
+) -> None:
+    registry: BackendPluginRegistry
+    record_id = ""
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.initialize_reentry: Optional[BackendPluginLifecycleError] = None
+            self.diagnostics_reentry: Optional[dict[str, Any]] = None
+            self.shutdown_reentry: Optional[BackendPluginLifecycleError] = None
+            self.diagnostics_calls = 0
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            try:
+                registry.register(record_id)
+            except BackendPluginLifecycleError as exc:
+                self.initialize_reentry = exc
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                inspected = executor.submit(registry.inspect, record_id).result(
+                    timeout=10
+                )
+            assert inspected.record_id == record_id
+
+        def diagnostics(self) -> Mapping[str, Any]:
+            self.diagnostics_calls += 1
+            self.diagnostics_reentry = registry.diagnostics(record_id)[
+                "plugin_diagnostics"
+            ]
+            return {"healthy": True}
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            try:
+                registry.reset()
+            except BackendPluginLifecycleError as exc:
+                self.shutdown_reentry = exc
+
+    plugin = Plugin()
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    record_id = one_record(registry).record_id
+    selected = registry.select("alpha")
+    assert selected.record.state is PluginLifecycleState.SELECTED
+    assert plugin.initialize_reentry is not None
+    assert plugin.initialize_reentry.field == "register"
+
+    assert registry.diagnostics(record_id)["plugin_diagnostics"] == {
+        "healthy": True
+    }
+    assert plugin.diagnostics_calls == 1
+    assert plugin.diagnostics_reentry["error"]["field"] == "diagnostics"
+
+    assert registry.reset() == ()
+    assert plugin.shutdown_calls == 1
+    assert plugin.shutdown_reentry is not None
+    assert plugin.shutdown_reentry.field == "reset"
+
+
+def test_registry_diagnostics_returns_independent_top_level_snapshot(
+    tmp_path: Path,
+) -> None:
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.payload = {"healthy": True}
+
+        def diagnostics(self) -> Mapping[str, Any]:
+            return self.payload
+
+    plugin = Plugin()
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    record_id = one_record(registry).record_id
+    registry.register(record_id)
+    snapshot = registry.diagnostics(record_id)["plugin_diagnostics"]
+    plugin.payload["healthy"] = False
+    plugin.payload["new"] = True
+    assert snapshot == {"healthy": True}
+
+
+def test_registry_reset_runs_reverse_cleanup_and_returns_stably_sorted_errors(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self, plugin_id: str, behavior: str) -> None:
+            self.plugin_id = plugin_id
+            self.behavior = behavior
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            return None
+
+        def shutdown(self) -> Any:
+            events.append(self.plugin_id)
+            if self.behavior == "raise":
+                raise RuntimeError("cleanup failed")
+            if self.behavior == "return":
+                return "unexpected"
+            return None
+
+    distributions = []
+    for name, behavior in (
+        ("alpha", "return"),
+        ("beta", "raise"),
+        ("gamma", "ok"),
+    ):
+        plugin_id = f"vendor.{name}"
+        entry_point = FakeEntryPoint(name, Plugin(plugin_id, behavior))
+        distributions.append(
+            make_distribution(
+                tmp_path / name,
+                name=f"fixture-{name}",
+                plugins=[
+                    good_plugin(
+                        plugin_id=plugin_id,
+                        entry_point=name,
+                        targets=[name],
+                    )
+                ],
+                entry_points=[entry_point],
+            )
+        )
+
+    registry = registry_for(distributions)
+    for plugin_id in ("vendor.alpha", "vendor.beta", "vendor.gamma"):
+        registry.register(plugin_id)
+    errors = registry.reset()
+    assert events == ["vendor.gamma", "vendor.beta", "vendor.alpha"]
+    assert [error.plugin_id for error in errors] == [
+        "vendor.alpha",
+        "vendor.beta",
+    ]
+    assert all(error.field == "shutdown" for error in errors)
+    assert registry.reset() == ()
+    assert events == ["vendor.gamma", "vendor.beta", "vendor.alpha"]
+
+
+@pytest.mark.parametrize("hook_name", ["initialize", "shutdown", "diagnostics"])
+def test_registry_explicit_none_optional_hook_is_not_treated_as_missing(
+    tmp_path: Path, hook_name: str
+) -> None:
+    plugin = structural_plugin()
+    setattr(plugin, hook_name, None)
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    record_id = one_record(registry).record_id
+
+    if hook_name == "initialize":
+        with pytest.raises(BackendPluginLifecycleError) as caught:
+            registry.register(record_id)
+        diagnostic = caught.value.to_dict()
+    elif hook_name == "shutdown":
+        registry.register(record_id)
+        errors = registry.reset()
+        assert len(errors) == 1
+        diagnostic = errors[0].to_dict()
+    else:
+        registry.register(record_id)
+        diagnostic = registry.diagnostics(record_id)["plugin_diagnostics"][
+            "error"
+        ]
+
+    assert diagnostic["field"] == hook_name
+    assert "not callable" in diagnostic["message"]
+    assert diagnostic["actual"] == "builtins.NoneType"
+
+
+def test_registry_initialize_and_cleanup_failures_are_recorded_exactly_once(
+    tmp_path: Path,
+) -> None:
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            raise RuntimeError("partial initialization")
+
+        def shutdown(self) -> None:
+            self.shutdown_calls += 1
+            raise ValueError("cleanup failed")
+
+    plugin = Plugin()
+    entry_point = FakeEntryPoint("alpha", plugin)
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    with pytest.raises(BackendPluginLifecycleError) as caught:
+        registry.register(one_record(registry).record_id)
+    assert caught.value.field == "initialize"
+
+    record = one_record(registry)
+    assert [error.field for error in record.errors] == [
+        "initialize",
+        "shutdown",
+    ]
+    assert plugin.shutdown_calls == 1
+    assert registry.reset() == ()
+    assert plugin.shutdown_calls == 1
+
+
+@pytest.mark.parametrize("operation", ["load", "initialize", "diagnostics"])
+def test_registry_attempt_ledger_is_released_after_baseexception(
+    tmp_path: Path, operation: str
+) -> None:
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self) -> None:
+            self.initialize_calls = 0
+            self.diagnostics_calls = 0
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            self.initialize_calls += 1
+            if operation == "initialize" and self.initialize_calls == 1:
+                raise KeyboardInterrupt
+
+        def diagnostics(self) -> Mapping[str, Any]:
+            self.diagnostics_calls += 1
+            if operation == "diagnostics" and self.diagnostics_calls == 1:
+                raise KeyboardInterrupt
+            return {"calls": self.diagnostics_calls}
+
+    plugin = Plugin()
+    entry_point = FakeEntryPoint(
+        "alpha",
+        plugin,
+        load_error=KeyboardInterrupt() if operation == "load" else None,
+    )
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    record_id = one_record(registry).record_id
+
+    if operation == "load":
+        with pytest.raises(KeyboardInterrupt):
+            registry.load(record_id)
+        entry_point.load_error = None
+        assert registry.load(record_id).state is PluginLifecycleState.LOADED
+    elif operation == "initialize":
+        with pytest.raises(KeyboardInterrupt):
+            registry.register(record_id)
+        assert registry.register(record_id).state is PluginLifecycleState.REGISTERED
+    else:
+        registry.register(record_id)
+        with pytest.raises(KeyboardInterrupt):
+            registry.diagnostics(record_id)
+        assert registry.diagnostics(record_id)["plugin_diagnostics"] == {
+            "calls": 2
+        }
+
+    registry.reset()
+
+
+def test_registry_batch_diagnostics_releases_unvisited_attempts(
+    tmp_path: Path,
+) -> None:
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def __init__(self, plugin_id: str, interrupt: bool) -> None:
+            self.plugin_id = plugin_id
+            self.interrupt = interrupt
+            self.diagnostics_calls = 0
+
+        def diagnostics(self) -> Mapping[str, Any]:
+            self.diagnostics_calls += 1
+            if self.interrupt:
+                raise KeyboardInterrupt
+            return {"plugin_id": self.plugin_id}
+
+    plugins = {
+        "alpha": Plugin("vendor.alpha", True),
+        "beta": Plugin("vendor.beta", False),
+    }
+    distributions = [
+        make_distribution(
+            tmp_path / name,
+            name=f"fixture-{name}",
+            plugins=[
+                good_plugin(
+                    plugin_id=f"vendor.{name}",
+                    entry_point=name,
+                    targets=[name],
+                )
+            ],
+            entry_points=[FakeEntryPoint(name, plugins[name])],
+        )
+        for name in ("alpha", "beta")
+    ]
+    registry = registry_for(distributions)
+    registry.register("vendor.alpha")
+    registry.register("vendor.beta")
+
+    with pytest.raises(KeyboardInterrupt):
+        registry.diagnostics()
+    assert plugins["beta"].diagnostics_calls == 0
+    assert registry.diagnostics("vendor.beta")["plugin_diagnostics"] == {
+        "plugin_id": "vendor.beta"
+    }
+    assert registry.reset() == ()
+
+
+def test_registry_hook_exception_text_is_stable_and_does_not_call_str(
+    tmp_path: Path,
+) -> None:
+    class UnprintableError(RuntimeError):
+        def __str__(self) -> str:
+            raise AssertionError("exception text must not be rendered")
+
+    class Plugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            raise UnprintableError
+
+    entry_point = FakeEntryPoint("alpha", Plugin())
+    registry = registry_for(
+        [make_distribution(tmp_path, entry_points=[entry_point])]
+    )
+    with pytest.raises(BackendPluginLifecycleError) as caught:
+        registry.register(one_record(registry).record_id)
+    diagnostic = caught.value.to_dict()
+    assert diagnostic["message"] == "Backend plugin initialize() failed"
+    assert diagnostic["actual"].endswith(".UnprintableError>")
+    assert "0x" not in diagnostic["actual"]
+    assert registry.reset() == ()
+
+
+def test_registry_adapter_generation_does_not_invalidate_lifecycle_attempts(
+    tmp_path: Path,
+) -> None:
+    initialize_started = threading.Event()
+    allow_initialize = threading.Event()
+
+    class AlphaPlugin:
+        compiler_cls = Compiler
+        driver_cls = Driver
+
+        def initialize(self, _context: Mapping[str, Any]) -> None:
+            initialize_started.set()
+            if not allow_initialize.wait(timeout=10):
+                raise RuntimeError("test did not release initialize")
+
+    distributions = []
+    for name, plugin in (
+        ("alpha", AlphaPlugin()),
+        ("beta", structural_plugin("beta")),
+    ):
+        distributions.append(
+            make_distribution(
+                tmp_path / name,
+                name=f"fixture-{name}",
+                plugins=[
+                    good_plugin(
+                        plugin_id=f"vendor.{name}",
+                        entry_point=name,
+                        targets=[name],
+                    )
+                ],
+                entry_points=[FakeEntryPoint(name, plugin)],
+            )
+        )
+
+    registry = registry_for(distributions)
+    generation = registry.generation
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        alpha_future = executor.submit(registry.register, "vendor.alpha")
+        assert initialize_started.wait(timeout=10)
+        assert registry.select("beta").record.plugin_id == "vendor.beta"
+        assert registry.generation == generation + 1
+        allow_initialize.set()
+        assert (
+            alpha_future.result(timeout=10).state
+            is PluginLifecycleState.REGISTERED
+        )
+    assert registry.reset() == ()
 
 
 def _selection_registry(

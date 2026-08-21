@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import importlib.metadata
+import inspect
 import os
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
+from types import MappingProxyType
 from typing import (
     Any,
     Callable,
@@ -14,7 +16,6 @@ from typing import (
     Iterable,
     Mapping,
     Optional,
-    Set,
     Tuple,
 )
 
@@ -64,11 +65,71 @@ from .selection import SelectionDecision, select_backend
 _BACKEND_ENTRY_POINT_GROUP = "triton.backends"
 _PREFLIGHT_PROFILES = {"triton_version", "full"}
 _UNSET = object()
+_MISSING = object()
 
 
 def _stable_exception_name(error: BaseException) -> str:
     error_type = type(error)
-    return f"{error_type.__module__}.{error_type.__qualname__}"
+    try:
+        module = getattr(error_type, "__module__", None)
+        qualname = getattr(error_type, "__qualname__", error_type.__name__)
+    except BaseException:
+        return "builtins.BaseException"
+    return f"{module}.{qualname}" if module else qualname
+
+
+def _stable_exception_actual(error: BaseException) -> str:
+    return f"<error: {_stable_exception_name(error)}>"
+
+
+def _stable_type_name(value: Any) -> str:
+    """Return a deterministic runtime type name without calling ``repr``."""
+    value_type = type(value)
+    try:
+        module = getattr(value_type, "__module__", None)
+        qualname = getattr(value_type, "__qualname__", value_type.__name__)
+    except BaseException:
+        return "<unreadable runtime type>"
+    return f"{module}.{qualname}" if module else qualname
+
+
+def _close_unawaited(value: Any) -> None:
+    """Best-effort close a native coroutine without running or awaiting it."""
+    if inspect.iscoroutine(value):
+        try:
+            value.close()
+        except BaseException:
+            # The synchronous contract error remains primary. A plugin-owned
+            # coroutine must not strand a Registry attempt or stop reset.
+            pass
+
+
+def _freeze_json_value(value: Any) -> Any:
+    """Freeze JSON-like extension values in an initialize context snapshot."""
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _manifest_snapshot(
+    manifest: Optional[BackendPluginManifest],
+) -> Optional[BackendPluginManifest]:
+    if manifest is None:
+        return None
+    return replace(
+        manifest,
+        requires_triton=replace(
+            manifest.requires_triton,
+            extensions=_freeze_json_value(manifest.requires_triton.extensions),
+        ),
+        extensions=_freeze_json_value(manifest.extensions),
+    )
 
 
 def _error_identity(error: BackendPluginError) -> Tuple[Any, ...]:
@@ -336,13 +397,21 @@ class BackendPluginRegistry:
         self._environment: Optional[CoreEnvironment] = None
         self._environment_error: Optional[BackendPluginError] = None
         self._discovered = False
-        self._loading: Set[str] = set()
-        self._registering: Set[str] = set()
+        # In-flight values are ``(lifecycle_epoch, owner_thread, token)``.
+        # The identity token prevents an old completion from removing a newer
+        # attempt for the same deterministic record ID.
+        self._loading: Dict[str, Tuple[int, int, object]] = {}
+        self._registering: Dict[str, Tuple[int, int, object]] = {}
+        self._diagnosing: Dict[str, Tuple[int, int, object]] = {}
+        self._cleanup_stack: list[BackendPluginRecord] = []
+        self._reset_operation_errors: list[BackendPluginError] = []
         self._selections: Dict[str, SelectionDecision] = {}
         self._reset_hooks: list = []
         self._resetting = False
+        self._lifecycle_epoch = 0
         self._generation = 0
         self._lock = threading.RLock()
+        self._condition = threading.Condition(self._lock)
 
     def _ensure_not_resetting(self, operation: str) -> None:
         if self._resetting:
@@ -1096,107 +1165,360 @@ class BackendPluginRegistry:
                 ),
             )
 
+    @staticmethod
+    def _operation_owned_by(
+        operations: Mapping[str, Tuple[int, int, object]],
+        thread_id: int,
+    ) -> bool:
+        return any(
+            owner == thread_id
+            for _epoch, owner, _token in operations.values()
+        )
+
+    def _finish_operation(
+        self,
+        operations: Dict[str, Tuple[int, int, object]],
+        record_id: str,
+        token: object,
+    ) -> None:
+        operation = operations.get(record_id)
+        if operation is not None and operation[2] is token:
+            del operations[record_id]
+        self._condition.notify_all()
+
+    @staticmethod
+    def _stale_operation_error(
+        record: BackendPluginRecord,
+        operation: str,
+        expected_epoch: int,
+        actual_epoch: int,
+    ) -> BackendPluginLifecycleError:
+        return BackendPluginLifecycleError(
+            f"Backend plugin {operation} result belongs to a stale Registry generation",
+            plugin_id=record.plugin_id,
+            entry_point=record.entry_point_name,
+            field="generation",
+            expected=str(expected_epoch),
+            actual=str(actual_epoch),
+            remediation=(
+                f"Retry {operation} after Registry reset has completed; stale "
+                "plugin instances are never published."
+            ),
+        )
+
+    @staticmethod
+    def _hook_error(
+        record: BackendPluginRecord,
+        hook_name: str,
+        message: str,
+        *,
+        expected: str,
+        actual: str,
+        remediation: str,
+    ) -> BackendPluginLifecycleError:
+        return BackendPluginLifecycleError(
+            message,
+            plugin_id=record.plugin_id,
+            entry_point=record.entry_point_name,
+            field=hook_name,
+            expected=expected,
+            actual=actual,
+            remediation=remediation,
+        )
+
+    def _read_hook(
+        self,
+        record: BackendPluginRecord,
+        hook_name: str,
+    ) -> Tuple[Any, Optional[BackendPluginLifecycleError]]:
+        try:
+            statically_present = (
+                inspect.getattr_static(
+                    record.plugin_object, hook_name, _MISSING
+                )
+                is not _MISSING
+            )
+        except Exception as exc:
+            return _MISSING, self._hook_error(
+                record,
+                hook_name,
+                f"Unable to inspect backend {hook_name} hook",
+                expected="a callable hook or no hook",
+                actual=_stable_exception_actual(exc),
+                remediation=(
+                    f"Fix the {hook_name} attribute so it is safely readable."
+                ),
+            )
+        try:
+            hook = (
+                getattr(record.plugin_object, hook_name)
+                if statically_present
+                else getattr(record.plugin_object, hook_name, _MISSING)
+            )
+        except Exception as exc:
+            return _MISSING, self._hook_error(
+                record,
+                hook_name,
+                f"Unable to inspect backend {hook_name} hook",
+                expected="a callable hook or no hook",
+                actual=_stable_exception_actual(exc),
+                remediation=(
+                    f"Fix the {hook_name} attribute so it is safely readable."
+                ),
+            )
+        if hook is _MISSING:
+            return _MISSING, None
+        if not callable(hook):
+            return hook, self._hook_error(
+                record,
+                hook_name,
+                f"Backend plugin {hook_name} hook is not callable",
+                expected="a callable hook or no hook",
+                actual=_stable_type_name(hook),
+                remediation=(
+                    f"Expose {hook_name} as a callable or remove the optional hook."
+                ),
+            )
+        return hook, None
+
+    def _bind_hook(
+        self,
+        record: BackendPluginRecord,
+        hook_name: str,
+        hook: Callable[..., Any],
+        args: Tuple[Any, ...],
+    ) -> Optional[BackendPluginLifecycleError]:
+        expected = (
+            "initialize(context)"
+            if hook_name == "initialize"
+            else f"{hook_name}()"
+        )
+        try:
+            signature = inspect.signature(hook)
+        except (TypeError, ValueError):
+            # Some extension/builtin callables expose no inspectable
+            # signature. The real invocation remains authoritative.
+            return None
+        except Exception as exc:
+            return self._hook_error(
+                record,
+                hook_name,
+                f"Unable to inspect backend {hook_name} signature",
+                expected=expected,
+                actual=_stable_exception_actual(exc),
+                remediation=(
+                    f"Expose an introspectable valid {hook_name} signature."
+                ),
+            )
+        try:
+            signature.bind(*args)
+        except TypeError:
+            return self._hook_error(
+                record,
+                hook_name,
+                f"Backend plugin {hook_name} hook has an incompatible signature",
+                expected=expected,
+                actual=f"callable does not accept {expected}",
+                remediation=(
+                    f"Fix the {hook_name} signature to match Protocol 1.0."
+                ),
+            )
+        return None
+
+    def _call_shutdown(
+        self,
+        record: BackendPluginRecord,
+    ) -> Tuple[bool, Optional[BackendPluginLifecycleError]]:
+        """Run one best-effort synchronous shutdown outside the Registry lock."""
+        hook, error = self._read_hook(record, "shutdown")
+        if error is not None:
+            return False, error
+        if hook is _MISSING:
+            return False, None
+        error = self._bind_hook(record, "shutdown", hook, ())
+        if error is not None:
+            return False, error
+        try:
+            value = hook()
+        except Exception as exc:
+            return True, self._hook_error(
+                record,
+                "shutdown",
+                "Backend plugin shutdown() failed",
+                expected="successful cleanup returning None",
+                actual=_stable_exception_actual(exc),
+                remediation=(
+                    "Fix shutdown() so Registry reset can release resources."
+                ),
+            )
+        if inspect.isawaitable(value):
+            actual = _stable_type_name(value)
+            _close_unawaited(value)
+            return True, self._hook_error(
+                record,
+                "shutdown",
+                "Backend plugin shutdown() returned an awaitable",
+                expected="None from a synchronous shutdown() hook",
+                actual=actual,
+                remediation=(
+                    "Implement shutdown() as a synchronous hook returning None."
+                ),
+            )
+        if value is not None:
+            return True, self._hook_error(
+                record,
+                "shutdown",
+                "Backend plugin shutdown() returned a non-None value",
+                expected="None",
+                actual=_stable_type_name(value),
+                remediation="Return None from shutdown().",
+            )
+        return True, None
+
     def load(self, identifier: str) -> BackendPluginRecord:
         """Import one plugin only after its applicable pre-load gate passes."""
-        with self._lock:
-            self._ensure_not_resetting("load")
-            self.discover()
-            record = self._resolve(identifier, reject_conflicts=True)
-            record = self._pre_import_fatal_conflict_gate(record)
+        thread_id = threading.get_ident()
+        while True:
+            with self._condition:
+                self._ensure_not_resetting("load")
+                self.discover()
+                record = self._resolve(identifier, reject_conflicts=True)
+                record = self._pre_import_fatal_conflict_gate(record)
 
-            if record.state is PluginLifecycleState.REJECTED:
-                if record.error is not None:
-                    raise record.error
-                raise BackendPluginLoadError(
-                    "Rejected backend plugin cannot be loaded",
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                )
-            if record.state in {
-                PluginLifecycleState.LOADED,
-                PluginLifecycleState.REGISTERED,
-                PluginLifecycleState.SELECTED,
-                PluginLifecycleState.ACTIVE,
-            }:
-                return record
+                if record.state is PluginLifecycleState.REJECTED:
+                    if record.error is not None:
+                        raise record.error
+                    raise BackendPluginLoadError(
+                        "Rejected backend plugin cannot be loaded",
+                        plugin_id=record.plugin_id,
+                        entry_point=record.entry_point_name,
+                    )
+                if record.state in {
+                    PluginLifecycleState.LOADED,
+                    PluginLifecycleState.REGISTERED,
+                    PluginLifecycleState.SELECTED,
+                    PluginLifecycleState.ACTIVE,
+                }:
+                    return record
 
-            if record.record_id in self._loading:
-                raise BackendPluginLifecycleError(
-                    "Recursive backend plugin load is not allowed",
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                    field="load",
-                    expected="one non-reentrant load operation",
-                    actual="recursive load",
-                    remediation=(
-                        "Do not call Registry load/register for the same plugin "
-                        "from its entry-point loader or constructor."
-                    ),
+                operation = self._loading.get(record.record_id)
+                if operation is not None:
+                    wait_epoch, owner, _existing_token = operation
+                    if owner == thread_id:
+                        raise BackendPluginLifecycleError(
+                            "Recursive backend plugin load is not allowed",
+                            plugin_id=record.plugin_id,
+                            entry_point=record.entry_point_name,
+                            field="load",
+                            expected="one non-reentrant load operation",
+                            actual="recursive load",
+                            remediation=(
+                                "Do not call Registry load/register for the same "
+                                "plugin from its entry-point loader or constructor."
+                            ),
+                        )
+                    self._condition.wait()
+                    if self._lifecycle_epoch != wait_epoch:
+                        raise self._stale_operation_error(
+                            record, "load", wait_epoch, self._lifecycle_epoch
+                        )
+                    continue
+
+                self._transition(record, PluginLifecycleState.LOADED)
+                epoch = self._lifecycle_epoch
+                token = object()
+                self._loading[record.record_id] = (
+                    epoch,
+                    thread_id,
+                    token,
                 )
-            self._transition(record, PluginLifecycleState.LOADED)
-            self._loading.add(record.record_id)
+
+            operation_finished = False
             try:
+                # Entry-point loading and plugin construction are
+                # plugin-controlled and must run outside the Registry lock.
+                load_exception: Optional[Exception] = None
                 try:
                     loaded = record.entry_point.load()
                     plugin = loaded() if isinstance(loaded, type) else loaded
                 except Exception as exc:
-                    error = BackendPluginLoadError(
-                        f"Failed to load backend plugin "
-                        f"'{record.registry_key}': {exc}",
-                        plugin_id=record.plugin_id,
-                        entry_point=record.entry_point_name,
-                        field="entry_point.load",
-                        expected="a loadable backend plugin object",
-                        actual=f"<error: {exc}>",
-                        remediation=(
-                            "Fix the backend Python package or native "
-                            "dependencies and reinstall it."
-                        ),
-                    )
-                    current = self._records.get(record.record_id, record)
-                    self._reject(
-                        current,
-                        error,
-                        current.compatibility_status,
-                    )
-                    raise error from exc
+                    load_exception = exc
+                    plugin = None
 
-                current = self._records.get(record.record_id)
-                if (
-                    current is None
-                    or current.state is PluginLifecycleState.REJECTED
-                ):
-                    error = (
-                        current.error
-                        if current is not None and current.error is not None
-                        else BackendPluginLifecycleError(
-                            "Backend plugin state changed while loading",
+                with self._condition:
+                    stale = (
+                        epoch != self._lifecycle_epoch
+                        or record.record_id not in self._records
+                    )
+                    if stale:
+                        error: Optional[BackendPluginError] = (
+                            self._stale_operation_error(
+                                record,
+                                "load",
+                                epoch,
+                                self._lifecycle_epoch,
+                            )
+                        )
+                    elif load_exception is not None:
+                        error = BackendPluginLoadError(
+                            f"Failed to load backend plugin '{record.registry_key}'",
                             plugin_id=record.plugin_id,
                             entry_point=record.entry_point_name,
-                            field="state",
-                            expected=record.state.value,
-                            actual=(
-                                current.state.value
-                                if current is not None
-                                else "<record removed>"
-                            ),
+                            field="entry_point.load",
+                            expected="a loadable backend plugin object",
+                            actual=_stable_exception_actual(load_exception),
                             remediation=(
-                                "Do not reset or mutate the Registry from "
-                                "plugin load callbacks."
+                                "Fix the backend Python package or native "
+                                "dependencies and reinstall it."
                             ),
                         )
+                        current = self._records[record.record_id]
+                        self._reject(
+                            current,
+                            error,
+                            current.compatibility_status,
+                        )
+                    else:
+                        current = self._records[record.record_id]
+                        if current.state is PluginLifecycleState.REJECTED:
+                            error = current.error or BackendPluginLifecycleError(
+                                "Backend plugin state changed while loading",
+                                plugin_id=record.plugin_id,
+                                entry_point=record.entry_point_name,
+                                field="state",
+                                expected=record.state.value,
+                                actual=current.state.value,
+                                remediation=(
+                                    "Retry after resolving the recorded failure."
+                                ),
+                            )
+                        else:
+                            result = self._replace(
+                                replace(
+                                    current,
+                                    state=PluginLifecycleState.LOADED,
+                                    plugin_object=plugin,
+                                )
+                            )
+                            error = None
+                    self._finish_operation(
+                        self._loading, record.record_id, token
                     )
-                    raise error
+                    operation_finished = True
 
-                return self._replace(
-                    replace(
-                        current,
-                        state=PluginLifecycleState.LOADED,
-                        plugin_object=plugin,
-                    )
-                )
+                if error is not None:
+                    if load_exception is not None:
+                        raise error from load_exception
+                    raise error
+                return result
             finally:
-                self._loading.discard(record.record_id)
+                # Never strand reset/concurrent waiters if plugin code raises
+                # BaseException or error normalization itself fails.
+                if not operation_finished:
+                    with self._condition:
+                        self._finish_operation(
+                            self._loading, record.record_id, token
+                        )
 
     def register(
         self,
@@ -1205,181 +1527,292 @@ class BackendPluginRegistry:
         context: Optional[Mapping[str, Any]] = None,
     ) -> BackendPluginRecord:
         """Check the runtime pair, initialize once, and register one plugin."""
-        with self._lock:
-            self._ensure_not_resetting("register")
-            record = self.load(identifier)
-            if record.state in {
-                PluginLifecycleState.REGISTERED,
-                PluginLifecycleState.SELECTED,
-                PluginLifecycleState.ACTIVE,
-            }:
-                return record
-            if record.record_id in self._registering:
-                raise BackendPluginLifecycleError(
-                    "Recursive backend plugin registration is not allowed",
-                    plugin_id=record.plugin_id,
-                    entry_point=record.entry_point_name,
-                    field="register",
-                    expected="one non-reentrant registration operation",
-                    actual="recursive registration",
-                    remediation=(
-                        "Do not call Registry register for the same plugin from "
-                        "runtime attributes or initialize()."
-                    ),
+        loaded_record = self.load(identifier)
+        record_id = loaded_record.record_id
+        thread_id = threading.get_ident()
+
+        while True:
+            with self._condition:
+                self._ensure_not_resetting("register")
+                record = self._records.get(record_id)
+                if record is None:
+                    raise self._stale_operation_error(
+                        loaded_record,
+                        "register",
+                        max(0, self._lifecycle_epoch - 1),
+                        self._lifecycle_epoch,
+                    )
+                if record.state in {
+                    PluginLifecycleState.REGISTERED,
+                    PluginLifecycleState.SELECTED,
+                    PluginLifecycleState.ACTIVE,
+                }:
+                    return record
+                if record.state is PluginLifecycleState.REJECTED:
+                    if record.error is not None:
+                        raise record.error
+                    raise BackendPluginLifecycleError(
+                        "Rejected backend plugin cannot be registered",
+                        plugin_id=record.plugin_id,
+                        entry_point=record.entry_point_name,
+                        field="state",
+                        expected=PluginLifecycleState.LOADED.value,
+                        actual=record.state.value,
+                        remediation=(
+                            "Reset and rediscover after resolving the recorded "
+                            "lifecycle failure."
+                        ),
+                    )
+
+                operation = self._registering.get(record_id)
+                if operation is not None:
+                    wait_epoch, owner, _existing_token = operation
+                    if owner == thread_id:
+                        raise BackendPluginLifecycleError(
+                            "Recursive backend plugin registration is not allowed",
+                            plugin_id=record.plugin_id,
+                            entry_point=record.entry_point_name,
+                            field="register",
+                            expected="one non-reentrant registration operation",
+                            actual="recursive registration",
+                            remediation=(
+                                "Do not call Registry register for the same plugin "
+                                "from runtime attributes or initialize()."
+                            ),
+                        )
+                    self._condition.wait()
+                    if self._lifecycle_epoch != wait_epoch:
+                        raise self._stale_operation_error(
+                            record,
+                            "register",
+                            wait_epoch,
+                            self._lifecycle_epoch,
+                        )
+                    continue
+
+                if context is not None:
+                    error = BackendPluginLifecycleError(
+                        "Custom initialize context is not supported by Protocol 1.0",
+                        plugin_id=record.plugin_id,
+                        entry_point=record.entry_point_name,
+                        field="initialize.context",
+                        expected=(
+                            "Registry-owned read-only Mapping with keys "
+                            "environment, manifest, record_id"
+                        ),
+                        actual="caller-supplied context",
+                        remediation=(
+                            "Consume the fixed Registry context in initialize()."
+                        ),
+                    )
+                    self._reject(record, error, record.compatibility_status)
+                    raise error
+
+                self._transition(record, PluginLifecycleState.REGISTERED)
+                epoch = self._lifecycle_epoch
+                initialization_context = MappingProxyType(
+                    {
+                        "environment": self._get_environment(),
+                        "manifest": _manifest_snapshot(record.manifest),
+                        "record_id": record.record_id,
+                    }
                 )
-            self._transition(record, PluginLifecycleState.REGISTERED)
-            self._registering.add(record.record_id)
+                token = object()
+                self._registering[record_id] = (
+                    epoch,
+                    thread_id,
+                    token,
+                )
+
+            operation_finished = False
             try:
-                plugin = record.plugin_object
+                # Runtime descriptors, signature inspection, and lifecycle
+                # hooks are plugin-controlled; none run under Registry locks.
                 values: Dict[str, Any] = {}
                 field_errors: Dict[str, str] = {}
                 for name in ("compiler_cls", "driver_cls"):
                     try:
-                        values[name] = getattr(plugin, name, None)
+                        values[name] = getattr(
+                            record.plugin_object, name, _MISSING
+                        )
                     except Exception as exc:
-                        field_errors[name] = str(exc)
+                        values[name] = _MISSING
+                        field_errors[name] = _stable_exception_actual(exc)
                 missing = tuple(
-                    name for name, value in values.items() if not value
+                    name
+                    for name, value in values.items()
+                    if value is _MISSING or value is None
                 )
                 invalid = tuple(
                     name
                     for name, value in values.items()
-                    if value is not None and not isinstance(value, type)
+                    if value is not _MISSING
+                    and value is not None
+                    and not isinstance(value, type)
                 )
+
+                primary_error: Optional[BackendPluginError] = None
+                cleanup_error: Optional[BackendPluginLifecycleError] = None
+                cleanup_called = False
+                initialized = False
+                initializer_invoked = False
                 if missing or invalid or field_errors:
-                    error = BackendPluginInterfaceError(
+                    primary_error = BackendPluginInterfaceError(
                         missing,
                         invalid_fields=invalid,
                         field_errors=field_errors,
                         plugin_id=record.plugin_id,
                         entry_point=record.entry_point_name,
                     )
-                    self._reject(record, error, record.compatibility_status)
-                    raise error
-
-                compiler_cls = values["compiler_cls"]
-                driver_cls = values["driver_cls"]
-                initialized = False
-                if record.source is PluginSource.MANIFEST:
-                    try:
-                        initializer = getattr(plugin, "initialize", None)
-                    except Exception as exc:
-                        error = BackendPluginLifecycleError(
-                            f"Unable to inspect backend initialize hook: {exc}",
-                            plugin_id=record.plugin_id,
-                            entry_point=record.entry_point_name,
-                            field="initialize",
-                            expected="a callable hook or no hook",
-                            actual=f"<error: {exc}>",
-                            remediation=(
-                                "Fix the initialize attribute so it is safely "
-                                "readable and callable."
-                            ),
+                elif record.source is PluginSource.MANIFEST:
+                    initializer, primary_error = self._read_hook(
+                        record, "initialize"
+                    )
+                    if primary_error is None and initializer is not _MISSING:
+                        primary_error = self._bind_hook(
+                            record,
+                            "initialize",
+                            initializer,
+                            (initialization_context,),
                         )
-                        self._reject(record, error, record.compatibility_status)
-                        raise error from exc
-                    if initializer is not None and not callable(initializer):
-                        error = BackendPluginLifecycleError(
-                            "Backend plugin initialize hook is not callable",
-                            plugin_id=record.plugin_id,
-                            entry_point=record.entry_point_name,
-                            field="initialize",
-                            expected="a callable hook or no hook",
-                            actual=type(initializer).__name__,
-                            remediation=(
-                                "Expose initialize(context) as a callable or "
-                                "remove the optional hook."
-                            ),
-                        )
-                        self._reject(record, error, record.compatibility_status)
-                        raise error
-                    if callable(initializer):
+                    if primary_error is None and initializer is not _MISSING:
+                        initializer_invoked = True
                         try:
-                            initialization_context = dict(
-                                context
-                                if context is not None
-                                else {
-                                    "environment": self._get_environment(),
-                                    "manifest": record.manifest,
-                                    "record_id": record.record_id,
-                                }
+                            initialize_result = initializer(
+                                initialization_context
                             )
-                            initializer(initialization_context)
-                            initialized = True
                         except Exception as exc:
-                            shutdown_called = False
-                            try:
-                                shutdown = getattr(plugin, "shutdown", None)
-                            except Exception:
-                                shutdown = None
-                            if callable(shutdown):
-                                try:
-                                    shutdown()
-                                    shutdown_called = True
-                                except Exception:
-                                    pass
-                            current = replace(
-                                self._records.get(record.record_id, record),
-                                shutdown_called=shutdown_called,
-                            )
-                            self._replace(current)
-                            error = BackendPluginLifecycleError(
-                                f"Backend plugin initialize() failed: {exc}",
-                                plugin_id=record.plugin_id,
-                                entry_point=record.entry_point_name,
-                                field="initialize",
-                                expected="successful initialization",
-                                actual=f"<error: {exc}>",
+                            primary_error = self._hook_error(
+                                record,
+                                "initialize",
+                                "Backend plugin initialize() failed",
+                                expected=(
+                                    "successful initialization returning None"
+                                ),
+                                actual=_stable_exception_actual(exc),
                                 remediation=(
-                                    "Fix initialize(), release partial "
-                                    "resources, and reinstall the backend."
+                                    "Fix initialize(), release partial resources, "
+                                    "and reinstall the backend."
                                 ),
                             )
-                            self._reject(
+                        else:
+                            if inspect.isawaitable(initialize_result):
+                                actual = _stable_type_name(initialize_result)
+                                _close_unawaited(initialize_result)
+                                primary_error = self._hook_error(
+                                    record,
+                                    "initialize",
+                                    "Backend plugin initialize() returned an awaitable",
+                                    expected=(
+                                        "None from a synchronous "
+                                        "initialize(context) hook"
+                                    ),
+                                    actual=actual,
+                                    remediation=(
+                                        "Implement initialize(context) "
+                                        "synchronously and return None."
+                                    ),
+                                )
+                            elif initialize_result is not None:
+                                primary_error = self._hook_error(
+                                    record,
+                                    "initialize",
+                                    "Backend plugin initialize() returned a "
+                                    "non-None value",
+                                    expected="None",
+                                    actual=_stable_type_name(initialize_result),
+                                    remediation=(
+                                        "Return None from initialize(context)."
+                                    ),
+                                )
+                            else:
+                                initialized = True
+                    if primary_error is not None and initializer_invoked:
+                        cleanup_called, cleanup_error = self._call_shutdown(
+                            record
+                        )
+
+                with self._condition:
+                    stale = (
+                        epoch != self._lifecycle_epoch
+                        or record_id not in self._records
+                    )
+                    if not stale:
+                        # Validity and publication are one atomic Registry
+                        # step. Reset either wins before this lock acquisition,
+                        # or observes the published cleanup-stack entry.
+                        current = self._records[record_id]
+                        if primary_error is not None:
+                            errors: Tuple[BackendPluginError, ...] = (
+                                (primary_error, cleanup_error)
+                                if cleanup_error is not None
+                                else (primary_error,)
+                            )
+                            current = self._replace(
+                                replace(
+                                    current,
+                                    shutdown_called=cleanup_called,
+                                )
+                            )
+                            self._reject_many(
                                 current,
-                                error,
+                                errors,
                                 current.compatibility_status,
                             )
-                            raise error from exc
-
-                current = self._records.get(record.record_id)
-                if (
-                    current is None
-                    or current.state is PluginLifecycleState.REJECTED
-                ):
-                    error = (
-                        current.error
-                        if current is not None and current.error is not None
-                        else BackendPluginLifecycleError(
-                            "Backend plugin state changed while registering",
-                            plugin_id=record.plugin_id,
-                            entry_point=record.entry_point_name,
-                            field="state",
-                            expected=PluginLifecycleState.LOADED.value,
-                            actual=(
-                                current.state.value
-                                if current is not None
-                                else "<record removed>"
-                            ),
-                            remediation=(
-                                "Do not reset or mutate the Registry from "
-                                "plugin lifecycle hooks."
-                            ),
+                            error = primary_error
+                        else:
+                            result = self._replace(
+                                replace(
+                                    current,
+                                    state=PluginLifecycleState.REGISTERED,
+                                    compiler_cls=values["compiler_cls"],
+                                    driver_cls=values["driver_cls"],
+                                    initialized=initialized,
+                                )
+                            )
+                            if result.source is PluginSource.MANIFEST:
+                                self._cleanup_stack.append(result)
+                            error = None
+                        self._finish_operation(
+                            self._registering, record_id, token
                         )
-                    )
-                    raise error
+                        operation_finished = True
 
-                return self._replace(
-                    replace(
-                        current,
-                        state=PluginLifecycleState.REGISTERED,
-                        compiler_cls=compiler_cls,
-                        driver_cls=driver_cls,
-                        initialized=initialized,
+                if not stale:
+                    if error is not None:
+                        raise error
+                    return result
+
+                # Reset invalidated an unpublished successful initializer. The
+                # owner performs its one cleanup attempt before waking reset.
+                if initializer_invoked and primary_error is None:
+                    cleanup_called, cleanup_error = self._call_shutdown(record)
+
+                with self._condition:
+                    # An actual initialize contract failure remains the
+                    # primary throwing result even if reset won the race.
+                    error = primary_error or self._stale_operation_error(
+                        record,
+                        "register",
+                        epoch,
+                        self._lifecycle_epoch,
                     )
-                )
+                    if cleanup_error is not None and self._resetting:
+                        self._reset_operation_errors.append(cleanup_error)
+                    self._finish_operation(
+                        self._registering, record_id, token
+                    )
+                    operation_finished = True
+
+                raise error
             finally:
-                self._registering.discard(record.record_id)
+                # A plugin BaseException or an error-normalization bug must not
+                # strand concurrent callers or make reset wait forever.
+                if not operation_finished:
+                    with self._condition:
+                        self._finish_operation(
+                            self._registering, record_id, token
+                        )
 
     def select(
         self,
@@ -1394,7 +1827,7 @@ class BackendPluginRegistry:
         Selection itself is static and import-free.  Only the winning record
         reaches ``register()``; losing candidates are never loaded.
         """
-        with self._lock:
+        with self._condition:
             self._ensure_not_resetting("select")
             records = self.validate()
             # Fatal conflicts must reject the involved records before the
@@ -1439,7 +1872,54 @@ class BackendPluginRegistry:
                         ),
                     )
 
-            selected = self.register(decision.record_id)
+            selection_epoch = self._lifecycle_epoch
+
+        # register() may run entry-point, descriptor, and initialize code.
+        # None of that plugin-controlled work may inherit the selection lock.
+        selected = self.register(decision.record_id)
+
+        with self._condition:
+            if selection_epoch != self._lifecycle_epoch:
+                raise self._stale_operation_error(
+                    decision.record,
+                    "select",
+                    selection_epoch,
+                    self._lifecycle_epoch,
+                )
+            self._ensure_not_resetting("select")
+            selected = self._records.get(selected.record_id)
+            if selected is None:
+                raise self._stale_operation_error(
+                    decision.record,
+                    "select",
+                    selection_epoch,
+                    self._lifecycle_epoch,
+                )
+            # Another selector may have committed while register() ran, so
+            # repeat the ACTIVE-switch gate against current state.
+            previous_decision = self._selections.get(target_name)
+            if (
+                previous_decision is not None
+                and previous_decision.record_id != selected.record_id
+            ):
+                previous = self._records.get(previous_decision.record_id)
+                if (
+                    previous is not None
+                    and previous.state is PluginLifecycleState.ACTIVE
+                ):
+                    raise BackendPluginLifecycleError(
+                        "Cannot switch an ACTIVE backend selection",
+                        plugin_id=previous.plugin_id,
+                        entry_point=previous.entry_point_name,
+                        field="active selection",
+                        expected=previous.record_id,
+                        actual=selected.record_id,
+                        remediation=(
+                            "Reset the Registry-backed runtime driver before "
+                            "selecting a different plugin for this target."
+                        ),
+                    )
+
             if (
                 previous_decision is not None
                 and previous_decision.record_id != selected.record_id
@@ -1473,7 +1953,6 @@ class BackendPluginRegistry:
                         )
                     )
 
-            selected = self._records[selected.record_id]
             selected_targets = tuple(
                 sorted(set(selected.selected_targets).union({target_name}))
             )
@@ -1576,9 +2055,72 @@ class BackendPluginRegistry:
                 replace(record, state=PluginLifecycleState.ACTIVE)
             )
 
+    def _diagnostics_value(self, record: BackendPluginRecord) -> Dict[str, Any]:
+        """Call and snapshot one optional diagnostics hook outside the lock."""
+        hook, error = self._read_hook(record, "diagnostics")
+        if error is not None:
+            return {"error": error.to_dict()}
+        if hook is _MISSING:
+            return {}
+        error = self._bind_hook(record, "diagnostics", hook, ())
+        if error is not None:
+            return {"error": error.to_dict()}
+        try:
+            value = hook()
+        except Exception as exc:
+            error = self._hook_error(
+                record,
+                "diagnostics",
+                "Backend plugin diagnostics() failed",
+                expected="a Mapping result from a synchronous hook",
+                actual=_stable_exception_actual(exc),
+                remediation=(
+                    "Fix diagnostics() so it is synchronous and read-only."
+                ),
+            )
+            return {"error": error.to_dict()}
+        if inspect.isawaitable(value):
+            actual = _stable_type_name(value)
+            _close_unawaited(value)
+            error = self._hook_error(
+                record,
+                "diagnostics",
+                "Backend plugin diagnostics() returned an awaitable",
+                expected="Mapping from a synchronous diagnostics() hook",
+                actual=actual,
+                remediation="Implement diagnostics() synchronously.",
+            )
+            return {"error": error.to_dict()}
+        if not isinstance(value, Mapping):
+            error = self._hook_error(
+                record,
+                "diagnostics",
+                "Backend plugin diagnostics() returned a non-Mapping value",
+                expected="Mapping",
+                actual=_stable_type_name(value),
+                remediation="Return a Mapping from diagnostics().",
+            )
+            return {"error": error.to_dict()}
+        try:
+            return dict(value)
+        except Exception as exc:
+            error = self._hook_error(
+                record,
+                "diagnostics",
+                "Unable to snapshot backend diagnostics Mapping",
+                expected="a Mapping that can be copied with dict()",
+                actual=_stable_exception_actual(exc),
+                remediation="Return a stable Mapping from diagnostics().",
+            )
+            return {"error": error.to_dict()}
+
     def diagnostics(self, identifier: Optional[str] = None) -> Any:
-        """Return static state and optional loaded-plugin diagnostics."""
-        with self._lock:
+        """Return a static snapshot plus optional loaded-plugin diagnostics."""
+        thread_id = threading.get_ident()
+        prepared: list[Tuple[BackendPluginRecord, Dict[str, Any]]] = []
+        operations: list[Tuple[BackendPluginRecord, object]] = []
+        with self._condition:
+            self._ensure_not_resetting("diagnostics")
             self.discover()
             records = (
                 (self._resolve(identifier),)
@@ -1593,194 +2135,219 @@ class BackendPluginRegistry:
                     )
                 )
             )
-            results = []
-            for record in records:
-                result = record.to_dict()
-                result["plugin_diagnostics"] = None
-                try:
-                    diagnostics = (
-                        getattr(record.plugin_object, "diagnostics", None)
-                        if record.plugin_object is not None
-                        else None
-                    )
-                except Exception as exc:
-                    diagnostics = None
-                    result["plugin_diagnostics"] = {
-                        "error": BackendPluginLifecycleError(
-                            f"Unable to inspect backend diagnostics hook: {exc}",
-                            plugin_id=record.plugin_id,
-                            entry_point=record.entry_point_name,
-                            field="diagnostics",
-                            expected="a callable hook or no hook",
-                            actual=f"<error: {exc}>",
-                            remediation=(
-                                "Fix the diagnostics attribute so inspection "
-                                "does not raise."
-                            ),
-                        ).to_dict()
-                    }
-                if callable(diagnostics):
-                    try:
-                        value = diagnostics()
-                        result["plugin_diagnostics"] = (
-                            dict(value) if isinstance(value, Mapping) else value
-                        )
-                    except Exception as exc:
-                        result["plugin_diagnostics"] = {
-                            "error": BackendPluginLifecycleError(
-                                f"Backend plugin diagnostics() failed: {exc}",
+            try:
+                for record in records:
+                    result = record.to_dict()
+                    # Unloaded records remain import-free and distinguish "not
+                    # available yet" from a loaded plugin with no optional hook.
+                    result["plugin_diagnostics"] = None
+                    if record.plugin_object is not None:
+                        operation = self._diagnosing.get(record.record_id)
+                        if operation is not None:
+                            same_thread = operation[1] == thread_id
+                            error = BackendPluginLifecycleError(
+                                (
+                                    "Recursive backend plugin diagnostics is not allowed"
+                                    if same_thread
+                                    else "Backend plugin diagnostics is already in progress"
+                                ),
                                 plugin_id=record.plugin_id,
                                 entry_point=record.entry_point_name,
                                 field="diagnostics",
-                                expected="a diagnostic result",
-                                actual=f"<error: {exc}>",
-                                remediation="Fix diagnostics() so it is read-only.",
-                            ).to_dict()
-                        }
-                results.append(result)
-            if identifier is not None:
-                return results[0]
-            return {
-                "preflight_profile": self._preflight_profile,
-                "core_abi_fingerprint": (
-                    self._environment.core_abi_fingerprint
-                    if self._environment is not None
-                    else None
-                ),
-                "registry_errors": [
-                    error.to_dict() for error in self._registry_errors
-                ],
-                "conflicts": self.conflicts().to_dict(),
-                "selections": {
-                    target: decision.to_dict()
-                    for target, decision in sorted(self._selections.items())
-                },
-                "plugins": results,
-            }
+                                expected="one non-reentrant diagnostics operation",
+                                actual=(
+                                    "recursive diagnostics"
+                                    if same_thread
+                                    else "diagnostics already in progress"
+                                ),
+                                remediation=(
+                                    "Do not call diagnostics for the same plugin "
+                                    "from inside its diagnostics hook."
+                                ),
+                            )
+                            result["plugin_diagnostics"] = {
+                                "error": error.to_dict()
+                            }
+                        else:
+                            token = object()
+                            self._diagnosing[record.record_id] = (
+                                self._lifecycle_epoch,
+                                thread_id,
+                                token,
+                            )
+                            operations.append((record, token))
+                    prepared.append((record, result))
+
+                # Snapshot Registry-owned data while holding the lock. Calling
+                # plugin hooks below cannot mutate this report mid-construction.
+                registry_payload = {
+                    "preflight_profile": self._preflight_profile,
+                    "core_abi_fingerprint": (
+                        self._environment.core_abi_fingerprint
+                        if self._environment is not None
+                        else None
+                    ),
+                    "registry_errors": [
+                        error.to_dict() for error in self._registry_errors
+                    ],
+                    "conflicts": detect_conflicts(
+                        self._records.values()
+                    ).to_dict(),
+                    "selections": {
+                        target: decision.to_dict()
+                        for target, decision in sorted(self._selections.items())
+                    },
+                }
+            except BaseException:
+                # Do not retain tokens if Registry snapshot construction itself
+                # fails after one or more operations have been claimed.
+                for record, token in operations:
+                    self._finish_operation(
+                        self._diagnosing, record.record_id, token
+                    )
+                raise
+
+        by_record_id = {
+            record.record_id: result for record, result in prepared
+        }
+        try:
+            for record, token in operations:
+                try:
+                    by_record_id[record.record_id][
+                        "plugin_diagnostics"
+                    ] = self._diagnostics_value(record)
+                finally:
+                    with self._condition:
+                        self._finish_operation(
+                            self._diagnosing, record.record_id, token
+                        )
+        finally:
+            # A batch claims every loaded record before invoking the first
+            # hook. If an early hook raises BaseException, release the tokens
+            # for all later records as well.
+            with self._condition:
+                for record, token in operations:
+                    self._finish_operation(
+                        self._diagnosing, record.record_id, token
+                    )
+
+        results = [result for _record, result in prepared]
+        if identifier is not None:
+            return results[0]
+        registry_payload["plugins"] = results
+        return registry_payload
 
     def reset(self) -> Tuple[BackendPluginError, ...]:
-        """Best-effort shutdown and clear state; Python modules stay imported."""
-        shutdown_errors = []
+        """Invalidate state, then clean up initialized plugins exactly once."""
+        cleanup_errors: list[Tuple[int, BackendPluginError]] = []
         reset_hooks: Tuple[Callable[[], None], ...] = ()
         shutdown_records: Tuple[BackendPluginRecord, ...] = ()
         reset_started = False
         try:
-            with self._lock:
+            with self._condition:
                 self._ensure_not_resetting("reset")
-                if self._loading or self._registering:
+                thread_id = threading.get_ident()
+                if any(
+                    self._operation_owned_by(operations, thread_id)
+                    for operations in (
+                        self._loading,
+                        self._registering,
+                        self._diagnosing,
+                    )
+                ):
                     raise BackendPluginLifecycleError(
-                        "Cannot reset the Registry during plugin load or "
-                        "registration",
+                        "Cannot reset the Registry re-entrantly from a plugin hook",
                         field="reset",
-                        expected="no in-progress plugin lifecycle operation",
+                        expected="reset from outside plugin lifecycle hooks",
                         actual=(
-                            "loading="
-                            + ",".join(sorted(self._loading))
-                            + "; registering="
-                            + ",".join(sorted(self._registering))
+                            "current thread owns an in-progress plugin operation"
                         ),
                         remediation=(
-                            "Complete the current load/register callback before "
-                            "resetting the Registry."
+                            "Return from the plugin hook before resetting the "
+                            "Registry."
                         ),
-                )
+                    )
+
                 self._resetting = True
                 reset_started = True
-                shutdown_records = tuple(
-                    record
-                    for record in self._records.values()
-                    if (
-                        record.source is PluginSource.MANIFEST
-                        and record.plugin_object is not None
-                        and not record.shutdown_called
-                    )
-                )
-                reset_hooks = tuple(self._reset_hooks)
+                self._lifecycle_epoch += 1
+                # Public adapter snapshots use selection/reset generation;
+                # lifecycle attempts use the separate epoch above.
+                self._generation += 1
+                self._reset_operation_errors = []
+
+                # Invalidate public state before waiting. Owners can complete
+                # only against the advanced epoch and cannot publish stale
+                # plugin instances after this point.
                 self._records.clear()
                 self._registry_errors = ()
                 self._environment = None
                 self._environment_error = None
                 self._discovered = False
-                self._loading.clear()
-                self._registering.clear()
                 self._selections.clear()
-                self._generation += 1
+                self._condition.notify_all()
 
-            # W9 hooks may hold their own lazy-cache locks.  Run them after
-            # releasing the Registry lock to avoid Registry/LazyProxy lock
-            # inversion; _resetting still rejects lifecycle re-entry.
+                while self._loading or self._registering or self._diagnosing:
+                    self._condition.wait()
+
+                shutdown_records = tuple(reversed(self._cleanup_stack))
+                self._cleanup_stack.clear()
+                reset_hooks = tuple(self._reset_hooks)
+                cleanup_errors.extend(
+                    (0, error) for error in self._reset_operation_errors
+                )
+                self._reset_operation_errors = []
+
+            # Adapter hooks may own independent cache locks. Run them after
+            # releasing the Registry lock; _resetting rejects re-entry.
             for callback in reset_hooks:
                 try:
                     callback()
                 except BackendPluginError as exc:
-                    shutdown_errors.append(exc)
+                    cleanup_errors.append((0, exc))
                 except Exception as exc:
-                    shutdown_errors.append(
-                        BackendPluginLifecycleError(
-                            f"Backend reset hook failed: {exc}",
-                            field="reset_hook",
-                            expected="successful cache cleanup",
-                            actual=f"<error: {exc}>",
-                            remediation=(
-                                "Fix the W9 adapter reset hook so it only "
-                                "clears local compiler/driver caches."
+                    cleanup_errors.append(
+                        (
+                            0,
+                            BackendPluginLifecycleError(
+                                "Backend reset hook failed",
+                                field="reset_hook",
+                                expected="successful cache cleanup",
+                                actual=_stable_exception_actual(exc),
+                                remediation=(
+                                    "Fix the W9 adapter reset hook so it only "
+                                    "clears local compiler/driver caches."
                                 ),
-                            )
-                        )
-
-            # User shutdown hooks may acquire plugin-owned locks or attempt
-            # Registry re-entry.  They also run outside the Registry lock;
-            # _resetting makes any lifecycle re-entry fail immediately.
-            for record in shutdown_records:
-                try:
-                    shutdown = getattr(
-                        record.plugin_object,
-                        "shutdown",
-                        None,
-                    )
-                except Exception as exc:
-                    shutdown_errors.append(
-                        BackendPluginLifecycleError(
-                            "Unable to inspect backend shutdown hook: "
-                            f"{exc}",
-                            plugin_id=record.plugin_id,
-                            entry_point=record.entry_point_name,
-                            field="shutdown",
-                            expected="a callable hook or no hook",
-                            actual=f"<error: {exc}>",
-                            remediation=(
-                                "Fix the shutdown attribute so reset can "
-                                "inspect it safely."
                             ),
                         )
                     )
-                    shutdown = None
-                if callable(shutdown):
-                    try:
-                        shutdown()
-                    except BackendPluginError as exc:
-                        shutdown_errors.append(exc)
-                    except Exception as exc:
-                        shutdown_errors.append(
-                            BackendPluginLifecycleError(
-                                "Backend plugin shutdown() failed: "
-                                f"{exc}",
-                                plugin_id=record.plugin_id,
-                                entry_point=record.entry_point_name,
-                                field="shutdown",
-                                expected="successful cleanup",
-                                actual=f"<error: {exc}>",
-                                remediation=(
-                                    "Fix shutdown() so registry reset can "
-                                    "release plugin-owned resources."
-                                ),
-                            )
-                        )
-            return tuple(shutdown_errors)
+
+            # Successful Manifest registrations are cleaned in reverse order.
+            # One failure never prevents cleanup of the remaining plugins.
+            for record in shutdown_records:
+                _called, error = self._call_shutdown(record)
+                if error is not None:
+                    cleanup_errors.append((1, error))
+
+            return tuple(
+                error
+                for _rank, error in sorted(
+                    cleanup_errors,
+                    key=lambda item: (
+                        item[1].plugin_id or "",
+                        item[0],
+                        item[1].entry_point or "",
+                        item[1].code,
+                        item[1].field or "",
+                        item[1].actual or "",
+                    ),
+                )
+            )
         finally:
             if reset_started:
-                with self._lock:
+                with self._condition:
                     self._resetting = False
+                    self._condition.notify_all()
 
 
 backend_plugin_registry = BackendPluginRegistry()

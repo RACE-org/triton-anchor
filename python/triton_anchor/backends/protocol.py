@@ -25,7 +25,9 @@ from typing import (
 
 from packaging.version import InvalidVersion, Version
 
-from .._version import BACKEND_PLUGIN_PROTOCOL_VERSION
+from .._version import (
+    BACKEND_PLUGIN_PROTOCOL_VERSION as BACKEND_PLUGIN_PROTOCOL_VERSION,
+)
 from .errors import BackendPluginProtocolError
 
 
@@ -86,22 +88,33 @@ class ProtocolFieldPolicy:
 
     name: str
     introduced_in: str
-    deprecated_in: str
-    removed_in: str
+    deprecated_in: Optional[str]
+    removed_in: Optional[str]
     default_factory: Callable[[], Any] = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
         introduced = _protocol_version(self.introduced_in)
-        deprecated = _protocol_version(self.deprecated_in)
-        removed = _protocol_version(self.removed_in)
         if not self.name:
             raise ValueError("Protocol field name must not be empty")
-        if deprecated < introduced:
+        deprecated = (
+            _protocol_version(self.deprecated_in)
+            if self.deprecated_in is not None
+            else None
+        )
+        removed = (
+            _protocol_version(self.removed_in)
+            if self.removed_in is not None
+            else None
+        )
+        if deprecated is not None and deprecated < introduced:
             raise ValueError("Protocol field cannot be deprecated before introduction")
-        if removed <= deprecated:
-            raise ValueError("Protocol field removal must follow deprecation")
-        if removed.major <= introduced.major:
-            raise ValueError("Protocol field removal requires a later major version")
+        if removed is not None:
+            if deprecated is None:
+                raise ValueError("Protocol field removal requires prior deprecation")
+            if removed <= deprecated:
+                raise ValueError("Protocol field removal must follow deprecation")
+            if removed.major <= introduced.major:
+                raise ValueError("Protocol field removal requires a later major version")
 
 
 @dataclass(frozen=True)
@@ -113,8 +126,8 @@ class ProtocolFieldDiagnostic:
     field: str
     message: str
     introduced_in: str
-    deprecated_in: str
-    removed_in: str
+    deprecated_in: Optional[str]
+    removed_in: Optional[str]
     producer_protocol_version: Optional[str] = None
     consumer_protocol_version: Optional[str] = None
 
@@ -159,9 +172,9 @@ class ProtocolFieldResult:
 
 DIAGNOSTICS_FIELD_POLICY = ProtocolFieldPolicy(
     name="diagnostics",
-    introduced_in="1.1",
-    deprecated_in="1.2",
-    removed_in="2.0",
+    introduced_in="1.0",
+    deprecated_in=None,
+    removed_in=None,
     default_factory=dict,
 )
 
@@ -177,16 +190,24 @@ def consume_protocol_field(
 
     A consumer never reads a field it does not know.  A consumer that knows an
     optional field supplies the documented default for an older producer.
-    Different protocol majors fail before reading plugin code.  At and after
-    the declared removal major, same-major new producers and consumers remain
-    compatible without the removed field.
+    Different protocol majors fail before reading plugin code.  A field with
+    no approved deprecation or removal remains preserved for every compatible
+    producer/consumer pair.
     """
 
     producer_version = _protocol_version(producer_protocol_version)
     consumer_version = _protocol_version(consumer_protocol_version)
     introduced_version = _protocol_version(policy.introduced_in)
-    removed_version = _protocol_version(policy.removed_in)
-    deprecated_version = _protocol_version(policy.deprecated_in)
+    removed_version = (
+        _protocol_version(policy.removed_in)
+        if policy.removed_in is not None
+        else None
+    )
+    deprecated_version = (
+        _protocol_version(policy.deprecated_in)
+        if policy.deprecated_in is not None
+        else None
+    )
 
     if producer_version.major != consumer_version.major:
         expected = (
@@ -202,7 +223,7 @@ def consume_protocol_field(
             error=error,
         )
 
-    if consumer_version >= removed_version:
+    if removed_version is not None and consumer_version >= removed_version:
         return ProtocolFieldResult(
             field=policy.name,
             status=ProtocolFieldStatus.COMPATIBLE,
@@ -233,7 +254,7 @@ def consume_protocol_field(
     if callable(value):
         value = value()
 
-    if consumer_version >= deprecated_version:
+    if deprecated_version is not None and consumer_version >= deprecated_version:
         diagnostic = ProtocolFieldDiagnostic(
             code="backend_plugin_protocol_field_deprecated",
             severity="warning",
@@ -272,6 +293,25 @@ def evaluate_protocol_field_removal(
 
     candidate = _protocol_version(candidate_version)
     introduced = _protocol_version(policy.introduced_in)
+    if policy.removed_in is None:
+        diagnostic = ProtocolFieldDiagnostic(
+            code="backend_plugin_protocol_field_removal_forbidden",
+            severity="error",
+            field=policy.name,
+            message=(
+                f"Backend Plugin Protocol field '{policy.name}' has no approved "
+                "deprecation or replacement and cannot be removed."
+            ),
+            introduced_in=policy.introduced_in,
+            deprecated_in=None,
+            removed_in=None,
+            consumer_protocol_version=candidate_version,
+        )
+        return ProtocolFieldResult(
+            field=policy.name,
+            status=ProtocolFieldStatus.FORBIDDEN,
+            diagnostics=(diagnostic,),
+        )
     if candidate.major == introduced.major:
         diagnostic = ProtocolFieldDiagnostic(
             code="backend_plugin_protocol_field_removal_forbidden",
@@ -388,6 +428,6 @@ class BackendPluginBase:
     def shutdown(self) -> None:
         """Release plugin-owned resources.  Default: no-op."""
 
-    def diagnostics(self) -> Dict[str, Any]:
+    def diagnostics(self) -> Mapping[str, Any]:
         """Return optional plugin diagnostics.  Default: empty."""
         return {}
