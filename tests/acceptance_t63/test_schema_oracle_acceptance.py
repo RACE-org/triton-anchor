@@ -33,6 +33,17 @@ def _schema_accepts(schema: dict, candidate: dict) -> bool:
     return not list(Draft202012Validator(schema).iter_errors(candidate))
 
 
+def _schema_definition_accepts(
+    schema: dict, definition: str, candidate: object
+) -> bool:
+    """Evaluate an evidence-only leaf predicate outside the plugin domain."""
+    return not list(
+        Draft202012Validator(schema["$defs"][definition]).iter_errors(
+            candidate
+        )
+    )
+
+
 def _parser_accepts(candidate: dict) -> bool:
     try:
         parse_manifest(candidate)
@@ -88,6 +99,21 @@ def test_manifest_schema_is_valid_draft_2020_12_and_example_conforms() -> None:
     document = parse_manifest(example)
     assert document.schema_version == "1.0"
     assert document.plugins[0].plugin_id == "example.mock_backend"
+
+    for unsupported_mode in ("subprocess", "native_in_process"):
+        candidate = deepcopy(example)
+        candidate["plugins"][0]["isolation_mode"] = unsupported_mode
+        assert _schema_accepts(schema, candidate) is False
+        assert _parser_accepts(candidate) is False
+
+    for forbidden_field, value in (
+        ("native_libraries", ["lib/backend.so"]),
+        ("abi_fingerprint", "sha256:" + "d" * 64),
+    ):
+        candidate = deepcopy(example)
+        candidate["plugins"][0][forbidden_field] = value
+        assert _schema_accepts(schema, candidate) is False
+        assert _parser_accepts(candidate) is False
 
 
 def test_public_parser_rejects_value_forbidden_by_shipped_schema() -> None:
@@ -153,8 +179,12 @@ def test_manifest_anchored_pattern_schema_parser_domain(
     elif location == "requires_triton.commit":
         plugin["requires_triton"]["commit"] = base_value + suffix
     elif location == "abi_fingerprint":
-        plugin["isolation_mode"] = "native_in_process"
-        plugin["native_libraries"] = ["lib/backend.so"]
+        assert _schema_definition_accepts(
+            schema, "abiFingerprint", base_value
+        )
+        assert not _schema_definition_accepts(
+            schema, "abiFingerprint", base_value + suffix
+        )
         plugin[location] = base_value + suffix
     else:
         plugin[location] = base_value + suffix
@@ -202,11 +232,13 @@ def test_manifest_native_library_path_schema_parser_domain(
     schema, example = _documents()
     candidate = deepcopy(example)
     plugin = candidate["plugins"][0]
-    plugin["isolation_mode"] = "subprocess"
     plugin["native_libraries"] = [path]
 
-    assert _schema_accepts(schema, candidate) is expected
-    assert _parser_accepts(candidate) is expected
+    assert _schema_definition_accepts(
+        schema, "nativeLibraryPath", path
+    ) is expected
+    assert _schema_accepts(schema, candidate) is False
+    assert _parser_accepts(candidate) is False
 
 
 @pytest.mark.parametrize(

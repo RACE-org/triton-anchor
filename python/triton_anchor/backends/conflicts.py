@@ -5,12 +5,12 @@ does not load plugins, mutate registry state, or decide which lifecycle states
 are eligible for selection.  This keeps W7 useful both immediately after
 discovery and after a caller has filtered records by Triton compatibility.
 
-Version/platform/ABI mismatches are per-plugin compatibility failures.  For
-validated ``native_in_process`` records, however, this module also compares the
-verified binary reports produced before import.  Duplicate SONAMEs and dynamic
-exports are fatal because both plugins may later coexist in the host process.
-A shared target remains non-fatal by itself: W8 may resolve it through an
-explicit choice or a deterministic priority policy.
+Version/platform/ABI mismatches are per-plugin compatibility failures.  This
+module can also compare evidence-only binary reports attached to manually
+constructed ``native_in_process`` records; that static analysis never
+authorizes operational loading under Protocol 1.0.  A shared target remains
+non-fatal by itself: W8 may resolve it through an explicit choice or a
+deterministic priority policy for operational records.
 """
 
 from __future__ import annotations

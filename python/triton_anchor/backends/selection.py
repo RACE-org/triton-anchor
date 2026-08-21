@@ -17,7 +17,14 @@ from .capabilities import (
     validate_plugin_capabilities,
 )
 from .conflicts import detect_static_conflicts
-from .errors import BackendPluginError, BackendPluginSelectionError
+from .errors import (
+    BackendPluginError,
+    BackendPluginSelectionError,
+)
+from .manifest import (
+    BackendPluginManifest,
+    operational_record_manifest_error,
+)
 
 
 BACKEND_SELECTOR_ENV = "TRITON_ANCHOR_BACKEND"
@@ -252,6 +259,55 @@ def _target_name(target: Any) -> str:
     else:
         value = getattr(target, "backend", None)
     return _non_empty_string(value, "target.backend")
+
+
+def _unsupported_selector_keys(
+    record: Any,
+    error: BackendPluginError,
+) -> Tuple[str, ...]:
+    """Read only stable selector identities from an unsupported record."""
+    keys = set()
+    for field_name in ("record_id", "registry_key", "plugin_id"):
+        value = getattr(record, field_name, None)
+        if type(value) is str and value:
+            keys.add(value)
+    if type(error.plugin_id) is str and error.plugin_id:
+        keys.add(error.plugin_id)
+    return tuple(sorted(keys))
+
+
+def _unsupported_record_sort_key(record: Any) -> str:
+    record_id = getattr(record, "record_id", "")
+    return record_id if type(record_id) is str else ""
+
+
+def _unsupported_selector_error(
+    unsupported_records: Iterable[Tuple[Any, BackendPluginError]],
+    selector: str,
+) -> Optional[BackendPluginError]:
+    matches = []
+    for record, error in unsupported_records:
+        if selector not in _unsupported_selector_keys(record, error):
+            continue
+        matches.append((_unsupported_record_sort_key(record), error))
+    matches.sort(key=lambda item: item[0])
+    return matches[0][1] if matches else None
+
+
+def _unsupported_claims_target(record: Any, target_name: str) -> bool:
+    """Conservatively scope an unsupported record without projecting it."""
+    manifest = getattr(record, "manifest", None)
+    if type(manifest) is BackendPluginManifest:
+        targets = manifest.targets
+        if type(targets) is not tuple or any(
+            type(candidate) is not str for candidate in targets
+        ):
+            return True
+        return target_name in targets
+    if manifest is not None:
+        return True
+    entry_point_name = getattr(record, "entry_point_name", None)
+    return type(entry_point_name) is str and entry_point_name == target_name
 
 
 def _capability_names(
@@ -526,30 +582,34 @@ def select_backend(
             remediation="Pass Registry list/validate results to selection.",
         ) from exc
 
-    # Identity conflicts are fatal regardless of selector or enumeration
-    # order.  Target overlap deliberately remains for this function to resolve.
-    try:
-        detect_static_conflicts(record_tuple).raise_for_fatal()
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise BackendPluginSelectionError(
-            f"Backend records cannot be analyzed for conflicts: {exc}",
-            field="records",
-            expected="records with unique, readable record_id values",
-            actual=str(exc),
-            remediation="Repair or rediscover backend records before selection.",
-        ) from exc
+    operational_records = []
+    unsupported_records = []
+    for record in record_tuple:
+        error = operational_record_manifest_error(record)
+        if error is None:
+            operational_records.append(record)
+        else:
+            unsupported_records.append((record, error))
 
-    views = tuple(
-        sorted((_project_record(record) for record in record_tuple),
-               key=lambda view: view.sort_key)
-    )
-    target_name = _target_name(target)
-    core_provided = _capability_names(
-        core_provided_capabilities, "core_provided_capabilities"
-    )
-    kernel_required = _capability_names(
-        kernel_required_capabilities, "kernel_required_capabilities"
-    )
+    if not operational_records and unsupported_records:
+        selector_hint = None
+        if type(explicit_selector) is str and explicit_selector:
+            selector_hint = explicit_selector
+        elif explicit_selector is None and isinstance(environment, Mapping):
+            environment_hint = environment.get(BACKEND_SELECTOR_ENV)
+            if type(environment_hint) is str and environment_hint:
+                selector_hint = environment_hint
+        if selector_hint is not None:
+            selected_error = _unsupported_selector_error(
+                unsupported_records,
+                selector_hint,
+            )
+            if selected_error is not None:
+                raise selected_error
+        raise sorted(
+            unsupported_records,
+            key=lambda item: _unsupported_record_sort_key(item[0]),
+        )[0][1]
 
     if environment is None:
         environment = {}
@@ -588,6 +648,41 @@ def select_backend(
                 environment_selector, BACKEND_SELECTOR_ENV
             )
             method = SelectionMethod.ENVIRONMENT
+
+    if selector is not None:
+        selected_error = _unsupported_selector_error(
+            unsupported_records,
+            selector,
+        )
+        if selected_error is not None:
+            raise selected_error
+    views = tuple(
+        sorted(
+            (_project_record(record) for record in operational_records),
+            key=lambda view: view.sort_key,
+        )
+    )
+
+    # Identity conflicts are fatal regardless of selector or enumeration
+    # order.  Target overlap deliberately remains for this function to resolve.
+    try:
+        detect_static_conflicts(operational_records).raise_for_fatal()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise BackendPluginSelectionError(
+            f"Backend records cannot be analyzed for conflicts: {exc}",
+            field="records",
+            expected="records with unique, readable record_id values",
+            actual=str(exc),
+            remediation="Repair or rediscover backend records before selection.",
+        ) from exc
+
+    target_name = _target_name(target)
+    core_provided = _capability_names(
+        core_provided_capabilities, "core_provided_capabilities"
+    )
+    kernel_required = _capability_names(
+        kernel_required_capabilities, "kernel_required_capabilities"
+    )
 
     eligible = []
     reports: Dict[str, CapabilityReport] = {}
@@ -644,6 +739,14 @@ def select_backend(
                 kernel_required=kernel_required,
             )
             raise AssertionError("incompatible capability report did not raise")
+        unsupported_target = [
+            (_unsupported_record_sort_key(record), error)
+            for record, error in unsupported_records
+            if _unsupported_claims_target(record, target_name)
+        ]
+        unsupported_target.sort(key=lambda item: item[0])
+        if unsupported_target:
+            raise unsupported_target[0][1]
         rejected = []
         for view in views:
             if view.state != "rejected" or view.manifest is None:

@@ -1,10 +1,17 @@
-"""Import-free inspection of native files shipped by backend wheels.
+"""Import-free, evidence-only inspection of backend wheel native files.
 
-The inspector is intentionally conservative.  A ``native_in_process`` plugin
-is allowed to reach ``entry_point.load()`` only when every native file is
-declared, covered by the wheel RECORD, verified by SHA-256, and understood by
-the host binary inspector.  The current implementation supports Linux ELF;
-other formats fail closed until their parsers and CI coverage exist.
+Backend Plugin Protocol/Manifest 1.0 authorizes only ``python_only`` plugins.
+The public inspector therefore has two deliberately separate uses: it proves
+that an owning ``python_only`` distribution contains no native binaries, and
+it lets offline conformance/conflict tooling collect static facts from a
+manually constructed native record.  Those facts never authorize importing,
+loading, selecting, or activating native code.
+
+Inventory is intentionally fail-closed.  Every owning-distribution RECORD
+entry must resolve to a readable regular file beneath a verified install-
+scheme root before filename and file-magic classification can be trusted.
+Static native artifact parsing currently supports Linux ELF; other formats
+cannot produce an evidence report until their parsers and CI coverage exist.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sysconfig
 from dataclasses import dataclass
 from email.parser import Parser
 from pathlib import Path, PurePosixPath
@@ -34,7 +42,10 @@ from .protocol import PluginIsolationMode
 _NATIVE_SUFFIXES = (".dylib", ".dll", ".pyd", ".so")
 _ELF_MAGIC = b"\x7fELF"
 _MACHO_MAGICS = {
+    b"\xbe\xba\xfe\xca",
+    b"\xbf\xba\xfe\xca",
     b"\xca\xfe\xba\xbe",
+    b"\xca\xfe\xba\xbf",
     b"\xce\xfa\xed\xfe",
     b"\xcf\xfa\xed\xfe",
     b"\xfe\xed\xfa\xce",
@@ -51,6 +62,8 @@ _FORBIDDEN_TOOLCHAIN_DEPENDENCY = re.compile(
     r"^(?:lib)?(?:LLVM|MLIR)(?:[-.]|$)",
     flags=re.IGNORECASE,
 )
+_INSTALL_SCHEME_ROOT_KEYS = ("purelib", "platlib", "scripts", "data")
+_INSTALL_SCHEME_SITE_KEYS = ("purelib", "platlib")
 
 
 @dataclass(frozen=True)
@@ -108,7 +121,7 @@ def _record_hashes(distribution: Any) -> Mapping[str, str]:
         return {}
     try:
         text = read_text("RECORD")
-    except Exception:
+    except (AttributeError, OSError, TypeError, ValueError):
         return {}
     if not text:
         return {}
@@ -127,7 +140,7 @@ def _record_hashes(distribution: Any) -> Mapping[str, str]:
 def _package_path_hash(item: Any) -> Optional[str]:
     try:
         value = item.hash
-    except Exception:
+    except (AttributeError, OSError, TypeError, ValueError):
         return None
     if value is None:
         return None
@@ -208,12 +221,130 @@ def _distribution_file_map(
     return result
 
 
-def _has_native_magic(path: Path) -> bool:
+def _inventory_error(
+    plugin: BackendPluginManifest,
+    message: str,
+    *,
+    actual: str,
+    detail: Optional[str] = None,
+) -> BackendPluginManifestError:
+    """Build one stable error for an untrustworthy wheel inventory."""
+    return BackendPluginManifestError(
+        message,
+        plugin_id=plugin.plugin_id,
+        entry_point=plugin.entry_point,
+        detail=detail,
+        field="distribution.files",
+        expected=(
+            "readable regular files contained by the owning distribution's "
+            "verified install-scheme roots"
+        ),
+        actual=actual,
+        remediation=(
+            "Reinstall the backend from a standards-compliant wheel with a "
+            "complete RECORD and no RECORD-entry path escapes or symbolic "
+            "links."
+        ),
+    )
+
+
+def _resolved_sysconfig_path(value: Any) -> Optional[Path]:
+    """Resolve one existing absolute sysconfig directory, or ignore it."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        path = Path(value)
+        if not path.is_absolute():
+            return None
+        resolved = path.resolve(strict=True)
+        if not resolved.is_dir():
+            return None
+    except (OSError, ValueError):
+        return None
+    return resolved
+
+
+def _sysconfig_install_schemes() -> Tuple[Mapping[str, str], ...]:
+    """Return the finite set of install layouts known to this interpreter."""
+    schemes = []
+    seen = set()
+    names = tuple(sysconfig.get_scheme_names())
+
+    # The default call is retained separately: vendors may expose a preferred
+    # scheme without including its alias in get_scheme_names().
+    for name in (None,) + names:
+        paths = (
+            sysconfig.get_paths()
+            if name is None
+            else sysconfig.get_paths(scheme=name)
+        )
+        if not isinstance(paths, Mapping):
+            continue
+        signature = tuple(paths.get(key) for key in _INSTALL_SCHEME_ROOT_KEYS)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        schemes.append(paths)
+    return tuple(schemes)
+
+
+def _distribution_install_roots(root: Path) -> Tuple[Path, ...]:
+    """Derive bounded RECORD roots for the distribution's install scheme.
+
+    ``PathDistribution.locate_file("")`` is the site/purelib/platlib root.
+    Wheel installers may place scripts and data elsewhere in the same scheme,
+    leaving paths such as ``../../../bin/tool`` in RECORD.  Those sibling
+    roots are trusted only when this distribution root matches a purelib or
+    platlib root reported by sysconfig; an unrelated distribution location
+    therefore cannot use ``..`` to claim files from the active environment.
+    """
+    allowed = {root}
+    for paths in _sysconfig_install_schemes():
+        resolved = {
+            key: _resolved_sysconfig_path(paths.get(key))
+            for key in _INSTALL_SCHEME_ROOT_KEYS
+        }
+        if root not in {
+            resolved[key]
+            for key in _INSTALL_SCHEME_SITE_KEYS
+            if resolved[key] is not None
+        }:
+            continue
+        allowed.update(
+            path for path in resolved.values() if path is not None
+        )
+    return tuple(sorted(allowed, key=os.fspath))
+
+
+def _is_within_install_roots(path: Path, roots: Iterable[Path]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _has_native_magic(
+    plugin: BackendPluginManifest,
+    relative_path: str,
+    path: Path,
+) -> bool:
     try:
         with path.open("rb") as stream:
             magic = stream.read(4)
-    except OSError:
-        return False
+    except (OSError, ValueError) as exc:
+        raise _inventory_error(
+            plugin,
+            "Cannot read wheel file while checking for native binary magic: "
+            "'{}'".format(relative_path),
+            actual="{}: <error: {}>".format(
+                relative_path,
+                _stable_exception_name(exc),
+            ),
+            detail=relative_path,
+        ) from exc
     return (
         magic == _ELF_MAGIC
         or magic in _MACHO_MAGICS
@@ -222,29 +353,138 @@ def _has_native_magic(path: Path) -> bool:
 
 
 def _discover_native_paths(
+    plugin: BackendPluginManifest,
     distribution: Any,
     file_map: Mapping[str, Any],
 ) -> Tuple[str, ...]:
-    """Find native binaries by both filename and file magic."""
+    """Find native binaries without trusting incomplete filesystem evidence."""
     result = set()
     try:
-        root = Path(distribution.locate_file("")).resolve(strict=True)
-    except Exception:
-        root = None
-    for relative_path in file_map:
-        if _native_filename(relative_path):
-            result.add(relative_path)
-            continue
+        located_root = Path(distribution.locate_file(""))
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise _inventory_error(
+            plugin,
+            "Cannot locate the owning distribution root for native-file "
+            "inventory",
+            actual="<error: {}>".format(_stable_exception_name(exc)),
+        ) from exc
+
+    try:
+        root = located_root.resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        raise _inventory_error(
+            plugin,
+            "Cannot resolve the owning distribution root for native-file "
+            "inventory",
+            actual="<error: {}>".format(_stable_exception_name(exc)),
+        ) from exc
+    allowed_roots = _distribution_install_roots(root)
+
+    for relative_path in sorted(file_map):
+        record_item = file_map[relative_path]
+        record_path = PurePosixPath(relative_path)
+        if record_path.is_absolute() or "\\" in relative_path:
+            raise _inventory_error(
+                plugin,
+                "Wheel RECORD path is not a relative POSIX install path: "
+                "'{}'".format(relative_path),
+                actual=relative_path,
+                detail=relative_path,
+            )
+
         try:
-            candidate = Path(distribution.locate_file(relative_path))
-            if candidate.is_symlink() or not candidate.is_file():
-                continue
+            candidate = Path(distribution.locate_file(record_item))
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            raise _inventory_error(
+                plugin,
+                "Cannot locate wheel RECORD entry while checking for native "
+                "files: '{}'".format(relative_path),
+                actual="{}: <error: {}>".format(
+                    relative_path,
+                    _stable_exception_name(exc),
+                ),
+                detail=relative_path,
+            ) from exc
+
+        try:
+            is_symlink = candidate.is_symlink()
+        except (OSError, ValueError) as exc:
+            raise _inventory_error(
+                plugin,
+                "Cannot determine whether wheel RECORD entry is a symbolic "
+                "link: '{}'".format(relative_path),
+                actual="{}: <error: {}>".format(
+                    relative_path,
+                    _stable_exception_name(exc),
+                ),
+                detail=relative_path,
+            ) from exc
+        if is_symlink:
+            raise _inventory_error(
+                plugin,
+                "Wheel RECORD entry cannot be a symbolic link: '{}'".format(
+                    relative_path
+                ),
+                actual=relative_path,
+                detail=relative_path,
+            )
+
+        try:
             resolved = candidate.resolve(strict=True)
-            if root is not None:
-                resolved.relative_to(root)
-        except Exception:
-            continue
-        if _has_native_magic(resolved):
+        except (OSError, ValueError) as exc:
+            raise _inventory_error(
+                plugin,
+                "Wheel RECORD entry is missing or cannot be resolved: '{}'".format(
+                    relative_path
+                ),
+                actual="{}: <error: {}>".format(
+                    relative_path,
+                    _stable_exception_name(exc),
+                ),
+                detail=relative_path,
+            ) from exc
+        if not _is_within_install_roots(resolved, allowed_roots):
+            raise _inventory_error(
+                plugin,
+                "Wheel RECORD entry escapes the owning distribution's "
+                "verified install-scheme roots: '{}'".format(relative_path),
+                actual=relative_path,
+                detail=relative_path,
+            )
+
+        try:
+            is_file = resolved.is_file()
+        except (OSError, ValueError) as exc:
+            raise _inventory_error(
+                plugin,
+                "Cannot determine the file type of wheel RECORD entry: "
+                "'{}'".format(relative_path),
+                actual="{}: <error: {}>".format(
+                    relative_path,
+                    _stable_exception_name(exc),
+                ),
+                detail=relative_path,
+            ) from exc
+        if not is_file:
+            raise _inventory_error(
+                plugin,
+                "Wheel RECORD entry is not a regular file: '{}'".format(
+                    relative_path
+                ),
+                actual=relative_path,
+                detail=relative_path,
+            )
+
+        # Filename classification remains an independent conservative signal;
+        # renamed binaries are additionally caught by the content signature.
+        # Read every entry even when its filename is conclusive so unreadable
+        # wheel contents cannot be hidden behind a native-looking suffix.
+        has_native_magic = _has_native_magic(
+            plugin,
+            relative_path,
+            resolved,
+        )
+        if _native_filename(relative_path) or has_native_magic:
             result.add(relative_path)
     return tuple(sorted(result))
 
@@ -257,7 +497,7 @@ def _validate_native_wheel_layout(
     try:
         wheel_text = read_text("WHEEL") if callable(read_text) else None
         headers = Parser().parsestr(wheel_text or "")
-    except Exception as exc:
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
         raise BackendPluginCompatibilityError(
             "native wheel layout",
             "readable WHEEL metadata",
@@ -287,8 +527,8 @@ def _validate_native_wheel_layout(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Build native_in_process plugins as platform wheels; do not "
-                "publish native binaries in a py3-none-any/purelib wheel."
+                "For offline static evidence, use a platform-specific wheel. "
+                "Protocol/Manifest 1.0 still does not authorize loading it."
             ),
         )
 
@@ -303,7 +543,7 @@ def _locate_verified_file(
     try:
         root = Path(distribution.locate_file("")).resolve(strict=True)
         installed = Path(distribution.locate_file(relative_path))
-    except Exception as exc:
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
         raise BackendPluginManifestError(
             "Cannot locate declared native library '{}'".format(relative_path),
             plugin_id=plugin.plugin_id,
@@ -325,8 +565,9 @@ def _locate_verified_file(
             expected="a regular in-wheel file, not a symbolic link",
             actual=relative_path,
             remediation=(
-                "Package the native binary itself in the wheel and regenerate "
-                "RECORD."
+                "For offline evidence, package the native binary itself in "
+                "the wheel and regenerate RECORD. This does not authorize "
+                "loading."
             ),
         )
     try:
@@ -342,8 +583,8 @@ def _locate_verified_file(
             expected="a regular file contained by the distribution root",
             actual=relative_path,
             remediation=(
-                "Remove symlink/path escapes and package the exact binary in "
-                "the backend wheel."
+                "Remove symlink/path escapes from the offline evidence wheel. "
+                "Static verification does not authorize loading."
             ),
         ) from exc
     if not resolved.is_file():
@@ -439,7 +680,8 @@ def _run_tool(
             entry_point=plugin.entry_point,
             remediation=(
                 "Install readelf/nm (or the LLVM equivalents) in the validation "
-                "environment; native plugins fail closed without them."
+                "environment; static native evidence cannot be collected "
+                "without them."
             ),
         ) from exc
     if completed.returncode != 0:
@@ -504,8 +746,8 @@ def _inspect_elf(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Install binutils in the validation environment. Native "
-                "plugins fail closed when their binaries cannot be audited."
+                "Install binutils in the validation environment to collect "
+                "offline static evidence. This does not authorize loading."
             ),
         )
 
@@ -554,8 +796,9 @@ def _inspect_elf(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Install a backend wheel whose native libraries target the "
-                "current machine architecture."
+                "Collect offline evidence from an artifact targeting the "
+                "current machine architecture. This does not authorize "
+                "loading."
             ),
         )
 
@@ -581,8 +824,9 @@ def _inspect_elf(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Link through the approved Core boundary instead of loading a "
-                "second LLVM/MLIR implementation into the host process."
+                "Remove private LLVM/MLIR dependencies from the evidence "
+                "artifact; Protocol/Manifest 1.0 does not authorize loading "
+                "it."
             ),
         )
 
@@ -612,27 +856,28 @@ def inspect_native_artifacts(
     plugin: BackendPluginManifest,
     distribution: Any,
 ) -> NativeInspectionReport:
-    """Inspect all native files before any backend Python import.
+    """Collect import-free static evidence about owning-wheel native files.
 
-    ``python_only`` wheels are required to contain no native binaries.
-    ``native_in_process`` wheels must declare every native binary and each
-    declaration must be verifiable from RECORD.
+    ``python_only`` wheels are required to contain no native binaries.  Other
+    isolation-mode values are accepted here only so offline conformance and
+    conflict tooling can inspect manually constructed records; a successful
+    report is never operational authorization under Protocol/Manifest 1.0.
     """
     file_map = _distribution_file_map(plugin, distribution)
-    discovered_native = _discover_native_paths(distribution, file_map)
+    discovered_native = _discover_native_paths(plugin, distribution, file_map)
     declared = tuple(sorted(set(plugin.native_libraries)))
 
     if plugin.isolation_mode is PluginIsolationMode.PYTHON_ONLY:
         if discovered_native:
             raise BackendPluginCompatibilityError(
                 "python_only wheel contents",
-                "no native .so/.dylib/.dll/.pyd files",
+                "no native files by filename or ELF/Mach-O/PE signature",
                 ", ".join(discovered_native),
                 plugin_id=plugin.plugin_id,
                 entry_point=plugin.entry_point,
                 remediation=(
-                    "Declare native_in_process with an exact Core ABI "
-                    "fingerprint, or publish a genuinely pure-Python wheel."
+                    "Remove native artifacts from the owning distribution and "
+                    "publish a genuinely Python-only backend wheel."
                 ),
             )
         return NativeInspectionReport()
@@ -649,8 +894,9 @@ def inspect_native_artifacts(
             expected="exact paths present in the wheel RECORD",
             actual=", ".join(missing),
             remediation=(
-                "Package every declared native library in the backend wheel or "
-                "remove the stale Manifest entry."
+                "For offline evidence, make each declared path match the "
+                "evidence wheel or remove the stale record. This does not "
+                "authorize loading."
             ),
         )
 
@@ -668,15 +914,16 @@ def inspect_native_artifacts(
             expected="every native wheel file declared exactly once",
             actual=", ".join(undeclared),
             remediation=(
-                "Add every native artifact to native_libraries and rebuild the "
-                "wheel; hidden native code cannot bypass ABI validation."
+                "Remove native artifacts from a Protocol/Manifest 1.0 backend "
+                "wheel. Offline evidence records may describe every artifact, "
+                "but do not authorize loading."
             ),
         )
 
     if plugin.isolation_mode is PluginIsolationMode.SUBPROCESS:
-        # The versioned subprocess IR contract is validated by compatibility.py.
-        # Child binaries are not loaded into the host process, so host ELF/ABI
-        # conflict inspection is intentionally deferred with that contract.
+        # Preserve inventory evidence for manually constructed records without
+        # implying a subprocess protocol or load contract. Protocol/Manifest
+        # 1.0 rejects this mode at every operational boundary.
         return NativeInspectionReport()
 
     _validate_native_wheel_layout(plugin, distribution)
@@ -689,8 +936,9 @@ def inspect_native_artifacts(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Use python_only, or wait for the Mach-O/PE inspector and "
-                "platform CI before enabling in-process native plugins."
+                "Collect evidence on a supported inspection platform, or "
+                "publish a genuinely Python-only backend wheel. Static "
+                "inspection never authorizes in-process loading."
             ),
         )
 

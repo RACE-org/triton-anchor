@@ -38,20 +38,25 @@ def _enum_value(value):
 
 
 def _is_selected_record(record) -> bool:
+    operational_manifest = (
+        _registry_api().operational_record_manifest_error(record) is None
+    )
     return (
-        _enum_value(record.state) in {"selected", "active"}
+        operational_manifest
+        and _enum_value(record.state) in {"selected", "active"}
         and bool(record.selected_targets)
     )
 
 
 def _prune_registry_backends(registry) -> None:
+    api = _registry_api()
     for name, backend in tuple(backends.items()):
         record_id = getattr(backend, "record_id", None)
         if record_id is None:
             continue
         try:
-            record = registry.inspect(record_id)
-        except Exception:
+            record = registry.validate(record_id)
+        except api.BackendPluginError:
             backends.pop(name, None)
             continue
         if not _is_selected_record(record):
@@ -60,11 +65,14 @@ def _prune_registry_backends(registry) -> None:
 
 def _cache_decision(decision) -> Backend:
     registry = _registry()
+    api = _registry_api()
     generation = registry.generation
     try:
-        record = registry.inspect(decision.record_id)
-    except Exception as exc:
-        raise _registry_api().BackendPluginLifecycleError(
+        record = registry.validate(decision.record_id)
+    except api.BackendPluginManifestError:
+        raise
+    except api.BackendPluginError as exc:
+        raise api.BackendPluginLifecycleError(
             "Backend selection was invalidated before consumption",
             plugin_id=decision.plugin_id,
             entry_point=decision.entry_point_name,
@@ -76,11 +84,13 @@ def _cache_decision(decision) -> Backend:
                 "reset or selection change completes."
             ),
         ) from exc
+    if record.manifest is not None:
+        api.require_operational_manifest(record.manifest)
     if (
         not _is_selected_record(record)
         or decision.target not in record.selected_targets
     ):
-        raise _registry_api().BackendPluginLifecycleError(
+        raise api.BackendPluginLifecycleError(
             "Backend selection changed before consumption",
             plugin_id=record.plugin_id,
             entry_point=record.entry_point_name,
@@ -108,7 +118,7 @@ def _cache_decision(decision) -> Backend:
             and getattr(cached, "record_id", None) == record.record_id
         ):
             backends.pop(record.entry_point_name, None)
-        raise _registry_api().BackendPluginLifecycleError(
+        raise api.BackendPluginLifecycleError(
             "Backend selection was invalidated during consumption",
             plugin_id=record.plugin_id,
             entry_point=record.entry_point_name,
@@ -139,6 +149,10 @@ def _selector_record(records, selector):
         keys = {record.record_id, record.registry_key}
         if record.manifest is not None and record.plugin_id is not None:
             keys.add(record.plugin_id)
+        error = getattr(record, "error", None)
+        error_plugin_id = getattr(error, "plugin_id", None)
+        if isinstance(error_plugin_id, str) and error_plugin_id:
+            keys.add(error_plugin_id)
         if selector in keys:
             matches.append(record)
     if not matches:
@@ -151,6 +165,14 @@ def _selector_record(records, selector):
                 "Use a selector shown by BackendPluginRegistry diagnostics."
             ),
         )
+    unsupported = []
+    for record in matches:
+        error = _registry_api().operational_record_manifest_error(record)
+        if error is not None:
+            unsupported.append((record.record_id, error))
+    unsupported.sort(key=lambda item: item[0])
+    if unsupported:
+        raise unsupported[0][1]
     if len(matches) != 1:
         record_ids = tuple(sorted(record.record_id for record in matches))
         raise _selection_error(
@@ -161,17 +183,54 @@ def _selector_record(records, selector):
             actual=", ".join(record_ids),
             remediation="Select one backend by its unique record_id.",
         )
-    return matches[0]
+    record = matches[0]
+    if record.manifest is not None:
+        _registry_api().require_operational_manifest(record.manifest)
+    return record
 
 
 def _bootstrap_target(record) -> str:
     if record.manifest is not None:
+        _registry_api().require_operational_manifest(record.manifest)
         targets = tuple(sorted(record.manifest.targets))
         if targets:
             return targets[0]
     # Legacy records have no static target declaration.  This value is only a
     # selection cache key; W8 still requires an exact Legacy record selector.
     return record.entry_point_name
+
+
+def _unsupported_record_claims_target(record, target_name) -> bool:
+    manifest = getattr(record, "manifest", None)
+    if manifest is not None:
+        if type(manifest) is not _registry_api().BackendPluginManifest:
+            return True
+        targets = manifest.targets
+        if type(targets) is not tuple or any(
+            type(candidate) is not str for candidate in targets
+        ):
+            return True
+        return type(target_name) is str and target_name in targets
+    entry_point_name = getattr(record, "entry_point_name", None)
+    return (
+        type(entry_point_name) is str
+        and entry_point_name == target_name
+    )
+
+
+def _operational_record_claims_target(record, target_name) -> bool:
+    api = _registry_api()
+    if api.operational_record_manifest_error(record) is not None:
+        return False
+    manifest = getattr(record, "manifest", None)
+    if type(manifest) is not api.BackendPluginManifest:
+        return False
+    targets = manifest.targets
+    if type(targets) is not tuple or any(
+        type(candidate) is not str for candidate in targets
+    ):
+        return False
+    return type(target_name) is str and target_name in targets
 
 
 def _target_name(target) -> str:
@@ -250,8 +309,7 @@ def get_backend(target) -> Backend:
             )
         )
         manifest_claims_target = any(
-            record.manifest is not None
-            and target_name in record.manifest.targets
+            _operational_record_claims_target(record, target_name)
             for record in records
         )
         candidate_entry_points = {
@@ -293,6 +351,7 @@ def get_driver_backends() -> Tuple[Backend, ...]:
     """
     api = _registry_api()
     registry = _registry()
+    _prune_registry_backends(registry)
     records = registry.validate()
     environment = dict(os.environ)
     selector = environment.get(api.BACKEND_SELECTOR_ENV)
@@ -330,6 +389,8 @@ def get_driver_backends() -> Tuple[Backend, ...]:
                     for record in records
                     if (
                         record.manifest is not None
+                        and api.operational_record_manifest_error(record)
+                        is None
                         and _enum_value(record.compatibility_status)
                         == "compatible"
                         and _enum_value(record.state)
@@ -458,6 +519,21 @@ def activate_backend(backend: Backend, *, target=None):
         target_name = _target_name(target)
         registry = _registry()
         records = registry.validate()
+        api = _registry_api()
+        operational_matching = tuple(
+            record
+            for record in records
+            if (
+                record.manifest is not None
+                and api.operational_record_manifest_error(record) is None
+                and type(record.manifest.targets) is tuple
+                and all(
+                    type(candidate) is str
+                    for candidate in record.manifest.targets
+                )
+                and target_name in record.manifest.targets
+            )
+        )
         malformed_same_entry_point = tuple(
             sorted(
                 (record.record_id, record.error)
@@ -465,6 +541,7 @@ def activate_backend(backend: Backend, *, target=None):
                 if (
                     record.error is not None
                     and record.manifest is None
+                    and api.operational_record_manifest_error(record) is None
                     and _enum_value(record.source) != "legacy"
                     and record.entry_point_name
                     == backend.entry_point_name
@@ -473,24 +550,16 @@ def activate_backend(backend: Backend, *, target=None):
         )
         if malformed_same_entry_point:
             raise malformed_same_entry_point[0][1]
-        matching = tuple(
-            record
-            for record in records
-            if (
-                record.manifest is not None
-                and target_name in record.manifest.targets
-            )
-        )
         rejected = tuple(
             sorted(
                 (record.record_id, record.error)
-                for record in matching
+                for record in operational_matching
                 if record.error is not None
             )
         )
         if rejected:
             raise rejected[0][1]
-        if matching:
+        if operational_matching:
             selected = registry.get_selection(target_name)
             raise _selection_error(
                 "Manual Legacy driver overlaps a Manifest-governed target",
@@ -506,7 +575,28 @@ def activate_backend(backend: Backend, *, target=None):
                     "overlapping Manifest before using the Legacy channel."
                 ),
             )
+        unsupported_related = []
+        for record in records:
+            error = api.operational_record_manifest_error(record)
+            if error is None:
+                continue
+            target_related = _unsupported_record_claims_target(
+                record, target_name
+            ) or (
+                record.manifest is None
+                and record.entry_point_name == backend.entry_point_name
+            )
+            if not target_related:
+                continue
+            unsupported_related.append((record.record_id, error))
+        unsupported_related.sort(key=lambda item: item[0])
+        if unsupported_related:
+            raise unsupported_related[0][1]
         return None
+    registry = _registry()
+    record = registry.validate(record_id)
+    if record.manifest is not None:
+        _registry_api().require_operational_manifest(record.manifest)
     if target is not None:
         selected = get_backend(target)
         if selected.record_id != record_id:
@@ -521,7 +611,7 @@ def activate_backend(backend: Backend, *, target=None):
                     "Manifest plugin for compiler and runtime."
                 ),
             )
-    return _registry().activate(record_id)
+    return registry.activate(record_id)
 
 
 _registry().register_reset_hook(_reset_backend_cache)

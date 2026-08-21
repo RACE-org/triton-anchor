@@ -51,10 +51,12 @@ from .manifest import (
     MANIFEST_FILENAME,
     BackendPluginManifest,
     load_distribution_manifest,
+    operational_record_manifest_error,
+    stable_manifest_actual,
 )
+from .native import NativeInspectionReport, inspect_native_artifacts
 from .protocol import (
     PluginCompatibilityStatus,
-    PluginIsolationMode,
     PluginLifecycleState,
     PluginSource,
     can_transition,
@@ -177,7 +179,10 @@ class BackendPluginRecord:
 
     @property
     def plugin_id(self) -> Optional[str]:
-        return self.manifest.plugin_id if self.manifest is not None else None
+        if type(self.manifest) is BackendPluginManifest:
+            plugin_id = self.manifest.plugin_id
+            return plugin_id if type(plugin_id) is str else None
+        return None
 
     @property
     def registry_key(self) -> str:
@@ -197,18 +202,38 @@ class BackendPluginRecord:
     def to_dict(self) -> Dict[str, Any]:
         manifest = None
         if self.manifest is not None:
-            manifest = {
-                "plugin_id": self.manifest.plugin_id,
-                "entry_point": self.manifest.entry_point,
-                "backend_protocol": self.manifest.backend_protocol,
-                "targets": list(self.manifest.targets),
-                "capabilities": list(self.manifest.capabilities),
-                "requires_capabilities": list(
-                    self.manifest.requires_capabilities
-                ),
-                "isolation_mode": self.manifest.isolation_mode.value,
-                "priority": self.manifest.priority,
-            }
+            if type(self.manifest) is not BackendPluginManifest:
+                manifest = {
+                    "type": stable_manifest_actual(self.manifest),
+                }
+            else:
+                isolation_mode = self.manifest.isolation_mode
+                manifest = {
+                    "plugin_id": _manifest_diagnostic_scalar(
+                        self.manifest.plugin_id
+                    ),
+                    "entry_point": _manifest_diagnostic_scalar(
+                        self.manifest.entry_point
+                    ),
+                    "backend_protocol": _manifest_diagnostic_scalar(
+                        self.manifest.backend_protocol
+                    ),
+                    "targets": _manifest_diagnostic_sequence(
+                        self.manifest.targets
+                    ),
+                    "capabilities": _manifest_diagnostic_sequence(
+                        self.manifest.capabilities
+                    ),
+                    "requires_capabilities": _manifest_diagnostic_sequence(
+                        self.manifest.requires_capabilities
+                    ),
+                    "isolation_mode": stable_manifest_actual(
+                        isolation_mode
+                    ),
+                    "priority": _manifest_diagnostic_scalar(
+                        self.manifest.priority
+                    ),
+                }
         return {
             "record_id": self.record_id,
             "registry_key": self.registry_key,
@@ -217,7 +242,7 @@ class BackendPluginRecord:
             "entry_point_value": self.entry_point_value,
             "distribution_name": self.distribution_name,
             "distribution_version": self.distribution_version,
-            "source": self.source.value if self.source is not None else None,
+            "source": _source_diagnostic_value(self.source),
             "state": self.state.value,
             "compatibility_status": self.compatibility_status.value,
             "manifest": manifest,
@@ -247,6 +272,31 @@ class BackendPluginRecord:
             "shutdown_called": self.shutdown_called,
             "selected_targets": list(self.selected_targets),
         }
+
+
+def _manifest_diagnostic_scalar(value: Any) -> Any:
+    """Keep exact JSON scalars; safely describe forged runtime objects."""
+    if value is None or type(value) in {str, int, float, bool}:
+        return value
+    return stable_manifest_actual(value)
+
+
+def _source_diagnostic_value(value: Any) -> Optional[str]:
+    """Render a forged source without invoking ``repr`` or ``.value``."""
+    if value is None:
+        return None
+    if type(value) is PluginSource:
+        return value.value
+    if type(value) is str:
+        return value
+    return stable_manifest_actual(value)
+
+
+def _manifest_diagnostic_sequence(value: Any) -> Any:
+    """Serialize an exact string tuple without invoking forged iterables."""
+    if type(value) is tuple and all(type(item) is str for item in value):
+        return list(value)
+    return stable_manifest_actual(value)
 
 
 def _qualified_name(value: Any) -> Optional[str]:
@@ -683,14 +733,13 @@ class BackendPluginRegistry:
                             error=error,
                         )
                     continue
-                except Exception as exc:
+                except (AttributeError, OSError, TypeError, ValueError) as exc:
                     source = _source_hint(distribution)
                     unexpected = BackendPluginManifestError(
-                        "Unexpected error while reading distribution Manifest: "
-                        f"{exc}",
+                        "Unable to read distribution Manifest metadata",
                         field="distribution_manifest",
                         expected="readable, valid static Manifest metadata",
-                        actual=f"<error: {exc}>",
+                        actual=_stable_exception_actual(exc),
                         remediation=(
                             "Repair or reinstall the affected backend "
                             "distribution; discovery did not import plugin code."
@@ -777,7 +826,13 @@ class BackendPluginRegistry:
         matches = tuple(
             record
             for record in self._records.values()
-            if record.registry_key == identifier
+            if (
+                record.registry_key == identifier
+                or (
+                    isinstance(record.error, BackendPluginManifestError)
+                    and record.error.plugin_id == identifier
+                )
+            )
         )
         if not matches:
             raise BackendPluginSelectionError(
@@ -790,13 +845,35 @@ class BackendPluginRegistry:
                     "or registry_key values."
                 ),
             )
+        if reject_conflicts:
+            unsupported_matches = []
+            for record in matches:
+                error = operational_record_manifest_error(record)
+                if error is not None:
+                    rejected = self._reject_non_operational_manifest(
+                        record,
+                        error,
+                    )
+                    unsupported_matches.append(
+                        (rejected.record_id, rejected.error or error)
+                    )
+            if unsupported_matches:
+                raise sorted(
+                    unsupported_matches,
+                    key=lambda item: item[0],
+                )[0][1]
         if len(matches) > 1:
             if reject_conflicts:
                 match_ids = {record.record_id for record in matches}
+                operational_records = tuple(
+                    record
+                    for record in self._records.values()
+                    if operational_record_manifest_error(record) is None
+                )
                 related_conflicts = tuple(
                     conflict
                     for conflict in detect_conflicts(
-                        self._records.values()
+                        operational_records
                     ).fatal_conflicts
                     if match_ids.intersection(conflict.record_ids)
                 )
@@ -875,6 +952,61 @@ class BackendPluginRegistry:
         if capability_report is not _UNSET:
             replacements["capability_report"] = capability_report
         return self._replace(replace(record, **replacements))
+
+    def _reject_non_operational_manifest(
+        self,
+        record: BackendPluginRecord,
+        error: BackendPluginManifestError,
+    ) -> BackendPluginRecord:
+        """Revoke every forged runtime fact without calling plugin code.
+
+        Unsupported isolation is structural and must remain the primary error
+        even if a caller manually forged an old rejection, compatibility
+        report, lifecycle state, runtime object, or cached selection.
+        """
+        selected = any(
+            decision.record_id == record.record_id
+            for decision in self._selections.values()
+        )
+        published = selected or record.state in {
+            PluginLifecycleState.SELECTED,
+            PluginLifecycleState.ACTIVE,
+        } or bool(record.selected_targets)
+        rejected = replace(
+            record,
+            state=PluginLifecycleState.REJECTED,
+            compatibility_status=PluginCompatibilityStatus.NOT_CHECKED,
+            compatibility_report=None,
+            capability_report=None,
+            errors=(error,),
+            plugin_object=None,
+            compiler_cls=None,
+            driver_cls=None,
+            initialized=False,
+            shutdown_called=False,
+            selected_targets=(),
+        )
+        self._records[record.record_id] = rejected
+        self._cleanup_stack = [
+            candidate
+            for candidate in self._cleanup_stack
+            if candidate.record_id != record.record_id
+        ]
+        for target, decision in tuple(self._selections.items()):
+            if decision.record_id == record.record_id:
+                del self._selections[target]
+        if published:
+            self._generation += 1
+        return rejected
+
+    def _guard_operational_record(
+        self, record: BackendPluginRecord
+    ) -> BackendPluginRecord:
+        """Apply the Protocol 1.0 shape gate before any lifecycle shortcut."""
+        error = operational_record_manifest_error(record)
+        if error is None:
+            return record
+        return self._reject_non_operational_manifest(record, error)
 
     def _reject_conflicted(
         self,
@@ -957,6 +1089,9 @@ class BackendPluginRegistry:
     def _validate_record(
         self, record: BackendPluginRecord
     ) -> BackendPluginRecord:
+        # This precedes every state/source/profile shortcut.  A manually
+        # forged VALIDATED/ACTIVE/REJECTED record is still not authorization.
+        record = self._guard_operational_record(record)
         if record.state is PluginLifecycleState.REJECTED:
             return record
         if record.source is PluginSource.LEGACY:
@@ -991,25 +1126,13 @@ class BackendPluginRegistry:
         errors = []
         report = None
         if self._preflight_profile == "triton_version":
-            if (
-                record.manifest.isolation_mode
-                is not PluginIsolationMode.PYTHON_ONLY
-            ):
-                errors.append(
-                    BackendPluginCompatibilityError(
-                        "isolation mode for triton_version profile",
-                        PluginIsolationMode.PYTHON_ONLY.value,
-                        record.manifest.isolation_mode.value,
-                        plugin_id=record.plugin_id,
-                        entry_point=record.entry_point_name,
-                        remediation=(
-                            "The staged W6-W8 profile only admits python_only "
-                            "plugins. Keep native_in_process and subprocess "
-                            "plugins disabled until their ABI or IR-contract "
-                            "validation is enabled."
-                        ),
-                    )
+            native_report = NativeInspectionReport()
+            try:
+                native_report = inspect_native_artifacts(
+                    record.manifest, record.distribution
                 )
+            except BackendPluginError as error:
+                errors.append(error)
             try:
                 report = validate_triton_version_requirement(
                     record.manifest,
@@ -1017,6 +1140,11 @@ class BackendPluginRegistry:
                 )
             except BackendPluginError as error:
                 errors.append(error)
+            else:
+                report = replace(
+                    report,
+                    native_artifacts=native_report.artifacts,
+                )
         else:
             evaluation = _evaluate_backend_plugin_compatibility(
                 record.manifest,
@@ -1041,6 +1169,8 @@ class BackendPluginRegistry:
 
         ordered_errors = _sort_backend_plugin_errors(errors)
         if ordered_errors:
+            if report is not None and report.compatible:
+                report = replace(report, compatible=False)
             compatibility_status = (
                 PluginCompatibilityStatus.NOT_CHECKED
                 if any(
@@ -1110,6 +1240,9 @@ class BackendPluginRegistry:
         record: BackendPluginRecord,
     ) -> BackendPluginRecord:
         """Reject fatal static conflicts involving one record before import."""
+        record = self._guard_operational_record(record)
+        if record.state is PluginLifecycleState.REJECTED:
+            return record
         if record.source is not PluginSource.MANIFEST or record.state in {
             PluginLifecycleState.LOADED,
             PluginLifecycleState.REGISTERED,
@@ -1121,25 +1254,12 @@ class BackendPluginRegistry:
         if record.state is not PluginLifecycleState.REJECTED:
             record = self._validate_record(record)
 
-        if (
-            record.state is not PluginLifecycleState.REJECTED
-            and record.manifest is not None
-            and record.manifest.isolation_mode
-            is PluginIsolationMode.NATIVE_IN_PROCESS
-        ):
-            for candidate in tuple(self._records.values()):
-                if (
-                    candidate.record_id == record.record_id
-                    or candidate.source is not PluginSource.MANIFEST
-                    or candidate.state is not PluginLifecycleState.DISCOVERED
-                    or candidate.manifest is None
-                    or candidate.manifest.isolation_mode
-                    is not PluginIsolationMode.NATIVE_IN_PROCESS
-                ):
-                    continue
-                self._validate_record(candidate)
-
-        for conflict in detect_conflicts(self._records.values()).fatal_conflicts:
+        operational_records = tuple(
+            candidate
+            for candidate in self._records.values()
+            if operational_record_manifest_error(candidate) is None
+        )
+        for conflict in detect_conflicts(operational_records).fatal_conflicts:
             if record.record_id in conflict.record_ids:
                 self._reject_conflicted(conflict)
         return self._records[record.record_id]
@@ -1830,11 +1950,25 @@ class BackendPluginRegistry:
         with self._condition:
             self._ensure_not_resetting("select")
             records = self.validate()
+            operational_records = [
+                record
+                for record in records
+                if operational_record_manifest_error(record) is None
+            ]
+
+            selection_environment = (
+                os.environ if environment is None else environment
+            )
             # Fatal conflicts must reject the involved records before the
             # static selection algorithm raises (selection itself is not
             # changed); this also covers compiler/runtime entry paths that
             # resolve through select().
-            self._reject_all_fatal_conflicts(records)
+            self._reject_all_fatal_conflicts(
+                tuple(
+                    record
+                    for record in operational_records
+                )
+            )
             decision = select_backend(
                 records,
                 target=target,
@@ -1843,9 +1977,7 @@ class BackendPluginRegistry:
                 ),
                 core_provided_capabilities=self._core_capabilities,
                 explicit_selector=explicit_selector,
-                environment=(
-                    os.environ if environment is None else environment
-                ),
+                environment=selection_environment,
             )
 
             target_name = decision.target
@@ -2008,6 +2140,15 @@ class BackendPluginRegistry:
             self._ensure_not_resetting("activate")
             self.discover()
             record = self._resolve(identifier, reject_conflicts=True)
+            record = self._guard_operational_record(record)
+            if record.state is PluginLifecycleState.REJECTED:
+                if record.error is not None:
+                    raise record.error
+                raise BackendPluginLifecycleError(
+                    "Rejected backend plugin cannot be activated",
+                    plugin_id=record.plugin_id,
+                    entry_point=record.entry_point_name,
+                )
             other_active = tuple(
                 candidate
                 for candidate in self._records.values()
@@ -2137,6 +2278,7 @@ class BackendPluginRegistry:
             )
             try:
                 for record in records:
+                    record = self._guard_operational_record(record)
                     result = record.to_dict()
                     # Unloaded records remain import-free and distinguish "not
                     # available yet" from a loaded plugin with no optional hook.
@@ -2180,6 +2322,11 @@ class BackendPluginRegistry:
 
                 # Snapshot Registry-owned data while holding the lock. Calling
                 # plugin hooks below cannot mutate this report mid-construction.
+                operational_conflict_records = tuple(
+                    record
+                    for record in self._records.values()
+                    if operational_record_manifest_error(record) is None
+                )
                 registry_payload = {
                     "preflight_profile": self._preflight_profile,
                     "core_abi_fingerprint": (
@@ -2191,7 +2338,7 @@ class BackendPluginRegistry:
                         error.to_dict() for error in self._registry_errors
                     ],
                     "conflicts": detect_conflicts(
-                        self._records.values()
+                        operational_conflict_records
                     ).to_dict(),
                     "selections": {
                         target: decision.to_dict()
@@ -2290,7 +2437,11 @@ class BackendPluginRegistry:
                 while self._loading or self._registering or self._diagnosing:
                     self._condition.wait()
 
-                shutdown_records = tuple(reversed(self._cleanup_stack))
+                shutdown_records = tuple(
+                    record
+                    for record in reversed(self._cleanup_stack)
+                    if operational_record_manifest_error(record) is None
+                )
                 self._cleanup_stack.clear()
                 reset_hooks = tuple(self._reset_hooks)
                 cleanup_errors.extend(

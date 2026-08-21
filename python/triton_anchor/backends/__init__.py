@@ -61,7 +61,11 @@ from .manifest import (
     load_distribution_manifest,
     load_manifest,
     load_manifest_for_entry_point,
+    operational_manifest_error,
+    operational_record_manifest_error,
     parse_manifest,
+    require_operational_manifest,
+    unsupported_isolation_mode_error,
     validate_manifest_semantics,
 )
 from .protocol import (
@@ -157,7 +161,10 @@ __all__ = [
     "get_backend_plugin_registry",
     "inspect_native_artifacts",
     "normalize_toolchain_version",
+    "operational_manifest_error",
+    "operational_record_manifest_error",
     "parse_manifest",
+    "require_operational_manifest",
     "select_backend",
     "select_backend_plugin",
     "validate_backend_plugin",
@@ -165,4 +172,5 @@ __all__ = [
     "validate_capabilities",
     "validate_plugin_capabilities",
     "validate_triton_requirement",
+    "unsupported_isolation_mode_error",
 ]

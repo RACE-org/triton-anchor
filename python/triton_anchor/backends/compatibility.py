@@ -17,13 +17,12 @@ from .errors import (
     BackendPluginManifestError,
     BackendPluginProtocolError,
 )
-from .manifest import BackendPluginManifest
+from .manifest import BackendPluginManifest, require_operational_manifest
 from .native import (
     NativeArtifact,
     NativeInspectionReport,
     inspect_native_artifacts,
 )
-from .protocol import PluginIsolationMode
 
 
 @dataclass(frozen=True)
@@ -267,6 +266,7 @@ def validate_triton_version_requirement(
     plugin: BackendPluginManifest, environment: CoreEnvironment
 ) -> CompatibilityReport:
     """Validate only the staged Triton version-number example."""
+    require_operational_manifest(plugin)
     check = _version_check(
         plugin,
         "Triton version",
@@ -411,6 +411,10 @@ def _evaluate_backend_plugin_compatibility(
     supported_tags: Optional[Iterable[Tag]] = None,
 ) -> _CompatibilityEvaluation:
     """Evaluate all independent W5 dimensions without importing the plugin."""
+    # Unsupported isolation is a structural Protocol/Schema error, not one
+    # compatibility dimension.  It must short-circuit before distribution,
+    # environment-adjacent inspection, readelf/nm, or any fingerprint check.
+    require_operational_manifest(plugin)
     checks = []
     errors = []
     native_report = NativeInspectionReport()
@@ -577,36 +581,6 @@ def _evaluate_backend_plugin_compatibility(
                 environment.runtime_platform,
                 remediation=(
                     "Install or rebuild triton-anchor for the current platform."
-                ),
-            )
-        )
-
-    if plugin.isolation_mode is PluginIsolationMode.NATIVE_IN_PROCESS:
-        check(
-            lambda: _exact_check(
-                plugin,
-                "Core ABI fingerprint",
-                plugin.abi_fingerprint or "<missing>",
-                core_abi_fingerprint,
-                remediation=(
-                    "A native_in_process backend requires the exact Core ABI "
-                    "fingerprint. Complete ABI governance or use subprocess "
-                    "isolation; never guess this value."
-                ),
-            )
-        )
-    elif plugin.isolation_mode is PluginIsolationMode.SUBPROCESS:
-        errors.append(
-            BackendPluginCompatibilityError(
-                "subprocess IR contract",
-                "a declared and supported input/output IR contract",
-                "<unavailable in Manifest 1.0>",
-                plugin_id=plugin.plugin_id,
-                entry_point=plugin.entry_point,
-                remediation=(
-                    "Use python_only for the current protocol, or wait for the "
-                    "versioned subprocess IR contract introduced with capability "
-                    "negotiation. Do not treat an unchecked subprocess as compatible."
                 ),
             )
         )

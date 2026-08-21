@@ -14,7 +14,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 from .._version import BACKEND_MANIFEST_SCHEMA_VERSION
 from .errors import BackendPluginManifestError
-from .protocol import PluginIsolationMode
+from .protocol import PluginIsolationMode, PluginSource
 
 
 MANIFEST_FILENAME = "triton_anchor_backend.json"
@@ -51,6 +51,14 @@ _NATIVE_LIBRARY_PATH_PATTERN = re.compile(
     r"(?![\s\S]*[\r\n])\S(?:[\s\S]*\S)?"
 )
 _TRITON_REQUIREMENT_FIELDS = {"version", "commit"}
+_STRUCTURAL_MANIFEST_FIELDS = frozenset(
+    {
+        "manifest",
+        "isolation_mode",
+        "native_libraries",
+        "abi_fingerprint",
+    }
+)
 
 _SEMANTIC_FIELD_ORDER = {
     "backend_protocol": 40,
@@ -67,7 +75,7 @@ def _manifest_actual(data: Mapping[str, Any], field_name: str) -> str:
     """Render one invalid value without confusing absence with JSON null."""
     if field_name not in data:
         return "<missing>"
-    return repr(data[field_name])
+    return stable_manifest_actual(data[field_name])
 
 
 @dataclass(frozen=True)
@@ -83,7 +91,12 @@ class TritonRequirement:
 
 @dataclass(frozen=True)
 class BackendPluginManifest:
-    """One backend entry-point declaration from a distribution manifest."""
+    """One backend entry-point declaration from a distribution manifest.
+
+    Direct construction is intentionally available to evidence-only tooling.
+    It does not authorize a manifest for loading; every operational API must
+    call :func:`require_operational_manifest` first.
+    """
 
     plugin_id: str
     entry_point: str
@@ -118,6 +131,262 @@ class BackendPluginManifest:
             distribution_name=name,
             distribution_version=version,
         )
+
+
+def _stable_runtime_type_name(value: Any) -> str:
+    """Return a qualified runtime type without invoking instance methods."""
+    value_type = type(value)
+    try:
+        module = type.__getattribute__(value_type, "__module__")
+        qualname = type.__getattribute__(value_type, "__qualname__")
+    except BaseException:
+        return "builtins.object"
+    if type(module) is not str or type(qualname) is not str:
+        return "builtins.object"
+    return f"{module}.{qualname}" if module else qualname
+
+
+def _json_manifest_value(
+    value: Any,
+    *,
+    seen: Optional[set[int]] = None,
+    depth: int = 0,
+    budget: Optional[list[int]] = None,
+) -> Tuple[bool, Any]:
+    """Project bounded, acyclic builtin JSON values without user code."""
+    if seen is None:
+        seen = set()
+    if budget is None:
+        budget = [1024]
+    if depth > 32 or budget[0] <= 0:
+        return False, None
+    budget[0] -= 1
+    value_type = type(value)
+    if value is None or value_type is bool:
+        return True, value
+    if value_type is int:
+        return (True, value) if value.bit_length() <= 16384 else (False, None)
+    if value_type is str:
+        return (True, value) if len(value) <= 65536 else (False, None)
+    if value_type is float:
+        return (True, value) if math.isfinite(value) else (False, None)
+    if value_type in {list, tuple}:
+        identity = id(value)
+        if identity in seen or len(value) > budget[0]:
+            return False, None
+        seen.add(identity)
+        projected = []
+        try:
+            for item in value:
+                valid, normalized = _json_manifest_value(
+                    item,
+                    seen=seen,
+                    depth=depth + 1,
+                    budget=budget,
+                )
+                if not valid:
+                    return False, None
+                projected.append(normalized)
+            return True, projected
+        finally:
+            seen.remove(identity)
+    if value_type is dict:
+        identity = id(value)
+        if identity in seen or len(value) > budget[0]:
+            return False, None
+        seen.add(identity)
+        projected_mapping = {}
+        try:
+            for key, item in value.items():
+                if type(key) is not str or len(key) > 65536:
+                    return False, None
+                valid, normalized = _json_manifest_value(
+                    item,
+                    seen=seen,
+                    depth=depth + 1,
+                    budget=budget,
+                )
+                if not valid:
+                    return False, None
+                projected_mapping[key] = normalized
+            return True, projected_mapping
+        finally:
+            seen.remove(identity)
+    return False, None
+
+
+def stable_manifest_actual(value: Any) -> str:
+    """Render manifest diagnostics deterministically and without ``repr``.
+
+    Protocol enums and strings retain their user-facing value.  Other exact
+    JSON-like builtins use canonical JSON.  Arbitrary runtime objects are
+    represented solely by their qualified type, so an object's ``__repr__``
+    cannot execute while the structural rejection gate is reporting it.
+    """
+    if type(value) is PluginIsolationMode:
+        return value.value
+    if type(value) is str:
+        return value
+    valid, normalized = _json_manifest_value(value)
+    if valid:
+        try:
+            return json.dumps(
+                normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            pass
+    return f"<invalid type: {_stable_runtime_type_name(value)}>"
+
+
+def _manifest_identity(value: Any) -> Optional[str]:
+    """Keep malformed manually-constructed identity fields out of errors."""
+    return value if type(value) is str and value else None
+
+
+def unsupported_isolation_mode_error(
+    actual: Any,
+    *,
+    plugin_id: Optional[str] = None,
+    entry_point: Optional[str] = None,
+) -> BackendPluginManifestError:
+    """Build the Protocol 1.0 structural isolation rejection."""
+    actual_text = stable_manifest_actual(actual)
+    return BackendPluginManifestError(
+        "Backend Plugin Protocol 1.0 only supports isolation_mode "
+        "'python_only'",
+        plugin_id=plugin_id,
+        entry_point=entry_point,
+        field="isolation_mode",
+        expected=PluginIsolationMode.PYTHON_ONLY.value,
+        actual=actual_text,
+        remediation=(
+            "Publish a genuinely python_only backend, or use a future "
+            "protocol release that defines the required isolation contract."
+        ),
+    )
+
+
+def operational_manifest_error(
+    plugin: Any,
+) -> Optional[BackendPluginManifestError]:
+    """Return the first structural error that forbids operational use.
+
+    ``native_in_process`` and ``subprocess`` remain representable for static
+    evidence tests, but Protocol/Schema 1.0 never authorizes either mode.
+    Requiring the exact enum member also prevents a manually constructed raw
+    string from taking a different downstream identity-comparison branch.
+    """
+    if type(plugin) is not BackendPluginManifest:
+        return BackendPluginManifestError(
+            "Operational backend manifests must use BackendPluginManifest",
+            field="manifest",
+            expected="triton_anchor.backends.BackendPluginManifest",
+            actual=stable_manifest_actual(plugin),
+            remediation=(
+                "Pass a manifest returned by parse_manifest(), or construct "
+                "the exact BackendPluginManifest dataclass for static tests."
+            ),
+        )
+    plugin_id = _manifest_identity(plugin.plugin_id)
+    entry_point = _manifest_identity(plugin.entry_point)
+    if plugin.isolation_mode is not PluginIsolationMode.PYTHON_ONLY:
+        return unsupported_isolation_mode_error(
+            plugin.isolation_mode,
+            plugin_id=plugin_id,
+            entry_point=entry_point,
+        )
+    native_libraries = plugin.native_libraries
+    if type(native_libraries) is not tuple or len(native_libraries) != 0:
+        return BackendPluginManifestError(
+            "python_only plugins cannot declare native_libraries",
+            plugin_id=plugin_id,
+            entry_point=entry_point,
+            field="native_libraries",
+            expected="an omitted field for python_only",
+            actual=stable_manifest_actual(native_libraries),
+            remediation=(
+                "Remove native_libraries and publish a genuinely pure-Python "
+                "backend distribution."
+            ),
+        )
+    if plugin.abi_fingerprint is not None:
+        return BackendPluginManifestError(
+            "python_only plugins cannot declare abi_fingerprint",
+            plugin_id=plugin_id,
+            entry_point=entry_point,
+            field="abi_fingerprint",
+            expected="an omitted field for python_only",
+            actual=stable_manifest_actual(plugin.abi_fingerprint),
+            remediation=(
+                "Remove abi_fingerprint; Protocol 1.0 does not authorize "
+                "in-process native backend code."
+            ),
+        )
+    return None
+
+
+def operational_record_manifest_error(
+    record: Any,
+) -> Optional[BackendPluginManifestError]:
+    """Return the structural error that forbids a record's operational use.
+
+    Parser-rejected records intentionally retain ``manifest=None`` while their
+    structured error carries the parsed plugin identity.  Treat that shape as
+    unsupported too; forged lifecycle state must not turn a rejected manifest
+    into a Legacy record.
+    """
+    manifest = getattr(record, "manifest", None)
+    if manifest is not None:
+        error = operational_manifest_error(manifest)
+        if error is not None:
+            return error
+    source = getattr(record, "source", None)
+    if manifest is None and source is PluginSource.LEGACY:
+        return None
+    if manifest is None:
+        errors = getattr(record, "errors", ())
+        if type(errors) in {list, tuple}:
+            for candidate in errors:
+                if isinstance(candidate, BackendPluginManifestError):
+                    return candidate
+        error = getattr(record, "error", None)
+        if isinstance(error, BackendPluginManifestError):
+            return error
+        plugin_id = getattr(record, "plugin_id", None)
+        entry_point = getattr(record, "entry_point_name", None)
+        return BackendPluginManifestError(
+            "Manifest-governed backend record has no parsed Manifest",
+            plugin_id=_manifest_identity(plugin_id),
+            entry_point=_manifest_identity(entry_point),
+            field="manifest",
+            expected="a valid parsed BackendPluginManifest",
+            actual="<missing>",
+            remediation=(
+                "Rediscover the backend from a valid Protocol/Schema 1.0 "
+                "Manifest; only explicitly Legacy records may omit it."
+            ),
+        )
+    error = getattr(record, "error", None)
+    if (
+        isinstance(error, BackendPluginManifestError)
+        and error.field in _STRUCTURAL_MANIFEST_FIELDS
+    ):
+        return error
+    return None
+
+
+def require_operational_manifest(
+    plugin: Any,
+) -> BackendPluginManifest:
+    """Return a Protocol 1.0 operational manifest or raise its first error."""
+    error = operational_manifest_error(plugin)
+    if error is not None:
+        raise error
+    return plugin
 
 
 @dataclass(frozen=True)
@@ -204,7 +473,7 @@ def _validated_string(
             expected=(
                 "a non-empty string without surrounding whitespace, CR, or LF"
             ),
-            actual=repr(value),
+            actual=stable_manifest_actual(value),
             remediation=(
                 f"Set '{field_name}' to a non-empty string without surrounding "
                 "whitespace or line breaks."
@@ -339,7 +608,7 @@ def _string_tuple(
                 "an array containing only non-empty strings without surrounding "
                 "whitespace, CR, or LF"
             ),
-            actual=repr(value),
+            actual=stable_manifest_actual(value),
             remediation=(
                 f"Remove empty, non-string, surrounding-whitespace, CR, or LF "
                 f"values from '{field_name}'."
@@ -352,7 +621,7 @@ def _string_tuple(
             plugin_id=plugin_id,
             field=field_name,
             expected="unique string values",
-            actual=repr(value),
+            actual=stable_manifest_actual(value),
             remediation=f"Remove duplicate values from '{field_name}'.",
         )
     return normalized
@@ -367,7 +636,7 @@ def _parse_triton_requirement(
             plugin_id=plugin_id,
             field="requires_triton",
             expected="an object containing a version specifier",
-            actual=repr(value),
+            actual=stable_manifest_actual(value),
             remediation=(
                 "Set 'requires_triton' to an object such as "
                 "{'version': '==<triton-version>'}."
@@ -394,7 +663,7 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
             "Each manifest plugin must be an object",
             field="plugins[]",
             expected="a plugin object",
-            actual=repr(data),
+            actual=stable_manifest_actual(data),
             remediation="Replace each plugins array item with a plugin object.",
         )
 
@@ -430,18 +699,13 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
     isolation_value = _required_string(
         data, "isolation_mode", plugin_id=plugin_id
     )
-    try:
-        isolation_mode = PluginIsolationMode(isolation_value)
-    except ValueError as exc:
-        allowed = ", ".join(mode.value for mode in PluginIsolationMode)
-        raise BackendPluginManifestError(
-            f"Unknown isolation_mode '{isolation_value}'; expected one of: {allowed}",
+    if isolation_value != PluginIsolationMode.PYTHON_ONLY.value:
+        raise unsupported_isolation_mode_error(
+            isolation_value,
             plugin_id=plugin_id,
-            field="isolation_mode",
-            expected=allowed,
-            actual=isolation_value,
-            remediation="Choose one of the supported isolation_mode values.",
-        ) from exc
+            entry_point=entry_point,
+        )
+    isolation_mode = PluginIsolationMode.PYTHON_ONLY
 
     native_libraries = _string_tuple(
         data, "native_libraries", required=False, plugin_id=plugin_id
@@ -468,38 +732,6 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
         data, plugin_id=plugin_id
     )
     if (
-        isolation_mode is PluginIsolationMode.NATIVE_IN_PROCESS
-        and not native_libraries
-    ):
-        raise BackendPluginManifestError(
-            "native_in_process plugins must declare at least one "
-            "'native_libraries' path",
-            plugin_id=plugin_id,
-            field="native_libraries",
-            expected="a non-empty array of installed native library paths",
-            actual=_manifest_actual(data, "native_libraries"),
-            remediation=(
-                "List every in-process native library using its exact relative "
-                "path from the wheel RECORD, or choose a non-native isolation "
-                "mode."
-            ),
-        )
-    if (
-        isolation_mode is PluginIsolationMode.NATIVE_IN_PROCESS
-        and abi_fingerprint is None
-    ):
-        raise BackendPluginManifestError(
-            "native_in_process plugins must declare 'abi_fingerprint'",
-            plugin_id=plugin_id,
-            field="abi_fingerprint",
-            expected="the exact Core ABI fingerprint",
-            actual="<missing>",
-            remediation=(
-                "Declare the exact Core ABI fingerprint, or use a non-native "
-                "isolation mode."
-            ),
-        )
-    if (
         isolation_mode is PluginIsolationMode.PYTHON_ONLY
         and "native_libraries" in data
     ):
@@ -510,8 +742,8 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
             expected="an omitted field for python_only",
             actual=_manifest_actual(data, "native_libraries"),
             remediation=(
-                "Remove native_libraries or choose the appropriate native "
-                "isolation mode."
+                "Remove native_libraries and publish a genuinely pure-Python "
+                "backend distribution."
             ),
         )
     if (
@@ -529,22 +761,6 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
                 "Core C++ ABI."
             ),
         )
-    if (
-        isolation_mode is PluginIsolationMode.SUBPROCESS
-        and "abi_fingerprint" in data
-    ):
-        raise BackendPluginManifestError(
-            "subprocess plugins cannot declare abi_fingerprint",
-            plugin_id=plugin_id,
-            field="abi_fingerprint",
-            expected="an omitted field for subprocess isolation",
-            actual=_manifest_actual(data, "abi_fingerprint"),
-            remediation=(
-                "Remove abi_fingerprint; subprocess compatibility must be "
-                "governed by a versioned process/IR contract instead of the "
-                "Core in-process C++ ABI."
-            ),
-        )
 
     priority_value = data.get("priority", 0)
     if isinstance(priority_value, bool) or not isinstance(priority_value, (int, float)):
@@ -553,7 +769,7 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
             plugin_id=plugin_id,
             field="priority",
             expected="an integer",
-            actual=repr(priority_value),
+            actual=stable_manifest_actual(priority_value),
             remediation="Set 'priority' to an integer.",
         )
     if isinstance(priority_value, float) and (
@@ -564,7 +780,7 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
             plugin_id=plugin_id,
             field="priority",
             expected="a finite JSON integer",
-            actual=repr(priority_value),
+            actual=stable_manifest_actual(priority_value),
             remediation="Set 'priority' to a finite integer.",
         )
     priority = int(priority_value)
@@ -911,12 +1127,14 @@ def load_distribution_manifest(
 
     try:
         manifest_path = distribution.locate_file(candidates[0])
-    except Exception as exc:
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        error_type = _stable_runtime_type_name(exc)
         raise BackendPluginManifestError(
-            f"Unable to locate distribution manifest '{candidates[0]}': {exc}",
+            "Unable to locate the distribution Manifest recorded by "
+            "installed metadata",
             field=MANIFEST_FILENAME,
             expected="an installed readable Manifest path",
-            actual=f"<error: {exc}>",
+            actual=f"<error: {error_type}>",
             remediation="Reinstall the backend wheel with a valid RECORD.",
         ) from exc
     document = load_manifest(Path(manifest_path))

@@ -46,7 +46,12 @@ class PluginSource(str, Enum):
 
 
 class PluginIsolationMode(str, Enum):
-    """Boundary between a plugin and the triton-anchor process."""
+    """Representable plugin/process boundaries.
+
+    Protocol 1.0 operationally authorizes only ``PYTHON_ONLY``.  The remaining
+    values stay representable so the parser can reject them structurally and
+    evidence-only tooling can describe native artifacts without loading them.
+    """
 
     PYTHON_ONLY = "python_only"
     SUBPROCESS = "subprocess"

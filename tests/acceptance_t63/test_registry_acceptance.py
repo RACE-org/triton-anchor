@@ -677,32 +677,20 @@ def test_registry_rejects_non_integer_priority(priority: Any) -> None:
 
 def test_registry_accepts_all_schema_isolation_modes() -> None:
     python_only = parse_manifest(good_manifest()).plugins[0]
-    subprocess = parse_manifest(
-        good_manifest(
-            [
-                good_plugin(
-                    isolation_mode="subprocess",
-                    native_libraries=["vendor/worker.so"],
+    assert python_only.isolation_mode is PluginIsolationMode.PYTHON_ONLY
+
+    # Keep this historical baseline node name: the approved Protocol/Schema
+    # 1.0 disposition now makes the accepted operational set exactly one.
+    for unsupported in ("subprocess", "native_in_process"):
+        with pytest.raises(BackendPluginManifestError) as caught:
+            parse_manifest(
+                good_manifest(
+                    [good_plugin(isolation_mode=unsupported)]
                 )
-            ]
-        )
-    ).plugins[0]
-    native = parse_manifest(
-        good_manifest(
-            [
-                good_plugin(
-                    isolation_mode="native_in_process",
-                    native_libraries=["vendor/libbackend.so"],
-                    abi_fingerprint=ABI_FINGERPRINT,
-                )
-            ]
-        )
-    ).plugins[0]
-    assert {python_only.isolation_mode, subprocess.isolation_mode, native.isolation_mode} == {
-        PluginIsolationMode.PYTHON_ONLY,
-        PluginIsolationMode.SUBPROCESS,
-        PluginIsolationMode.NATIVE_IN_PROCESS,
-    }
+            )
+        assert caught.value.field == "isolation_mode"
+        assert caught.value.expected == "python_only"
+        assert caught.value.actual == unsupported
 
 
 @pytest.mark.parametrize(
@@ -736,7 +724,12 @@ def test_registry_rejects_illegal_isolation_combinations(
 ) -> None:
     with pytest.raises(BackendPluginManifestError) as caught:
         parse_manifest(good_manifest([good_plugin(**overrides)]))
-    assert caught.value.field == field
+    expected_field = (
+        "isolation_mode"
+        if overrides.get("isolation_mode") != "python_only"
+        else field
+    )
+    assert caught.value.field == expected_field
 
 
 def test_registry_discovery_query_and_validation_do_not_import_plugin(
@@ -1575,6 +1568,28 @@ def test_registry_does_not_mask_wheel_parser_programming_errors(
     )
     with pytest.raises(AssertionError, match="wheel parser bug sentinel"):
         registry.validate(record_id)
+    assert entry_point.load_calls == 0
+
+
+def test_registry_does_not_mask_manifest_lookup_programming_errors(
+    tmp_path: Path,
+) -> None:
+    entry_point = FakeEntryPoint("alpha", structural_plugin("alpha"))
+    distribution = make_distribution(
+        tmp_path,
+        entry_points=[entry_point],
+    )
+
+    def broken_locate_file(_file: Any) -> Path:
+        raise AssertionError("manifest lookup implementation sentinel")
+
+    distribution.locate_file = broken_locate_file
+    registry = registry_for([distribution])
+    with pytest.raises(
+        AssertionError,
+        match="manifest lookup implementation sentinel",
+    ):
+        registry.discover()
     assert entry_point.load_calls == 0
 
 
