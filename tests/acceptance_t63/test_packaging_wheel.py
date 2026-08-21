@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -96,3 +97,36 @@ def test_every_source_python_package_is_declared_for_the_wheel() -> None:
         "source Python package(s) omitted from setup.py Distribution.packages: "
         + ", ".join(omitted)
     )
+
+
+def test_source_language_extension_namespace_is_importable() -> None:
+    repo_root = HERE.parents[1]
+    probe = r'''\
+import importlib
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(repo / "python"))
+language = importlib.import_module("triton_anchor.language")
+extension = importlib.import_module("triton_anchor.language.ext")
+if not hasattr(language, "__path__"):
+    raise AssertionError("triton_anchor.language lost its package identity")
+expected = repo / "python/triton_anchor/language/ext/__init__.py"
+if pathlib.Path(extension.__file__).resolve() != expected:
+    raise AssertionError(f"extension loaded from unexpected path: {extension.__file__}")
+'''
+    environment = os.environ.copy()
+    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+        environment.pop(key, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(repo_root)],
+        cwd=repo_root,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
