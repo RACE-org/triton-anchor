@@ -1596,6 +1596,78 @@ def test_registry_batch_diagnostics_are_sorted_by_registry_key(
     ] == ["vendor.alpha", "vendor.zeta"]
 
 
+@pytest.mark.parametrize(
+    "environment_overrides,dimension",
+    [
+        ({"runtime_python_soabi": "cpython-other"}, "core Python SOABI"),
+        ({"runtime_platform": "other-platform"}, "core build platform"),
+    ],
+    ids=("python-soabi", "platform"),
+)
+def test_registry_reports_built_runtime_compatibility_dimensions(
+    tmp_path: Path,
+    environment_overrides: Mapping[str, Any],
+    dimension: str,
+) -> None:
+    registry, entry_point = _validation_fixture(
+        tmp_path,
+        environment_overrides=environment_overrides,
+    )
+    record = registry.validate()[0]
+    assert len(record.errors) == 1
+    assert isinstance(record.error, BackendPluginCompatibilityError)
+    assert record.error.dimension == dimension
+    assert registry.diagnostics(record.record_id)["errors"] == [
+        record.error.to_dict()
+    ]
+    assert entry_point.load_calls == 0
+
+
+@pytest.mark.parametrize("operation", ["identifier", "strict", "load", "register"])
+def test_registry_public_failure_routes_preserve_complete_diagnostics(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    registry, entry_point = _validation_fixture(
+        tmp_path,
+        plugin_overrides={
+            "backend_protocol": ">=2.0,<3.0",
+            "requires_core": ">=0.3,<0.4",
+            "requires_triton": {"version": ">=3.7,<3.8"},
+            "requires_llvm_commit": OTHER_COMMIT,
+        },
+    )
+    record_id = one_record(registry).record_id
+
+    with pytest.raises(BackendPluginProtocolError):
+        if operation == "identifier":
+            registry.validate(record_id)
+        elif operation == "strict":
+            registry.validate(strict=True)
+        elif operation == "load":
+            registry.load(record_id)
+        else:
+            registry.register(record_id)
+
+    record = registry.inspect(record_id)
+    diagnostics = registry.diagnostics(record_id)
+    assert [
+        error["dimension"] or error["field"]
+        for error in diagnostics["errors"]
+    ] == [
+        "backend_protocol",
+        "triton-anchor Core version",
+        "Triton version",
+        "LLVM commit",
+    ]
+    assert diagnostics["errors"] == [error.to_dict() for error in record.errors]
+    assert record.state is PluginLifecycleState.REJECTED
+    assert record.plugin_object is None
+    assert not record.to_dict()["registered"]
+    assert registry.get_selection("alpha") is None
+    assert entry_point.load_calls == 0
+
+
 def test_registry_protocol_optional_field_old_producer_gets_default() -> None:
     result = consume_protocol_field(
         object(), producer_protocol_version="1.0", consumer_protocol_version="1.1"
