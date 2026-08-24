@@ -122,8 +122,17 @@ def _assert_release_branch_triggers(workflow: str) -> None:
 def _assert_ci_contract(workflow: str) -> None:
     lint = _lint_job(workflow)
 
+    assert not re.search(r"(?m)^defaults:\s*", workflow), (
+        "top-level run defaults can bypass the shared gate"
+    )
+    assert not re.search(r"(?m)^  (?:PATH|BASH_ENV|ENV|SHELLOPTS):\s*", workflow), (
+        "top-level shell-control environment is forbidden"
+    )
     assert not re.search(r"(?m)^    if:\s*", lint), (
         "the lint job cannot be conditionally skipped"
+    )
+    assert not re.search(r"(?m)^    (?:needs|defaults|container):\s*", lint), (
+        "the lint job cannot inherit or depend on bypassable execution context"
     )
     assert re.findall(r"(?m)^\s+(?:-\s+)?uses:\s*(\S+)\s*$", lint) == [
         "actions/checkout@v4",
@@ -137,9 +146,17 @@ def _assert_ci_contract(workflow: str) -> None:
         lint,
     )
     assert gate_step is not None, "the canonical shared-gate step is missing"
-    assert not re.search(r"(?m)^\s+(?:if|shell):\s*", gate_step.group("body")), (
-        "the shared-gate step cannot be skipped or run through a custom shell"
+    gate_body = gate_step.group("body")
+    assert not re.search(r"(?m)^\s+(?:if|shell|working-directory):\s*", gate_body), (
+        "the shared-gate step cannot alter or skip its execution context"
     )
+    assert re.findall(r"(?m)^\s+run:\s*(.*?)\s*$", gate_body) == [
+        f"bash {GATE_RELATIVE.as_posix()}"
+    ], "the canonical gate step must itself own the exact shared-gate command"
+    assert re.findall(r"(?m)^          ([A-Za-z_][A-Za-z0-9_]*):", gate_body) == [
+        "PRODUCTION_CANDIDATE_SHA",
+        "T63_RUFF_EVIDENCE_DIR",
+    ], "the gate step environment must contain only the two approved bindings"
 
     upload_step = re.search(
         r"(?ms)^      - name: Upload Ruff gate evidence\s*$\n"
@@ -147,14 +164,27 @@ def _assert_ci_contract(workflow: str) -> None:
         lint,
     )
     assert upload_step is not None, "the Ruff evidence upload step is missing"
-    assert re.search(r"(?m)^\s+if:\s*always\(\)\s*$", upload_step.group("body"))
-    assert re.search(
-        r"(?m)^\s+if-no-files-found:\s*error\s*$", upload_step.group("body")
-    )
+    upload_body = upload_step.group("body")
+    assert re.findall(r"(?m)^\s+uses:\s*(\S+)\s*$", upload_body) == [
+        "actions/upload-artifact@v4"
+    ], "the canonical upload step must itself own upload-artifact"
+    assert re.search(r"(?m)^\s+if:\s*always\(\)\s*$", upload_body)
+    assert re.search(r"(?m)^\s+if-no-files-found:\s*error\s*$", upload_body)
     assert re.search(
         r"(?m)^\s+path:\s*\$\{\{\s*runner\.temp\s*\}\}/t63-ruff-evidence\s*$",
-        upload_step.group("body"),
+        upload_body,
     )
+
+    checkout_step = re.search(
+        r"(?ms)^      - uses: actions/checkout@v4\s*$\n"
+        r"(?P<body>.*?)(?=^      - |\Z)",
+        lint,
+    )
+    assert checkout_step is not None
+    assert not re.search(
+        r"(?m)^\s+(?:if|shell|working-directory):\s*",
+        checkout_step.group("body"),
+    ), "the canonical checkout cannot be disabled or redirected"
 
     assert "fetch-depth: 0" in lint
     assert re.search(
@@ -267,6 +297,69 @@ def _without_evidence_upload_step(workflow: str) -> str:
     assert upload is not None, "fixture requires the evidence upload step"
     mutated_lint = lint[: upload.start()] + lint[upload.end() :]
     return workflow.replace(lint, mutated_lint, 1)
+
+
+def _with_relocated_gate_command(workflow: str) -> str:
+    lint = _lint_job(workflow)
+    gate = re.search(
+        r"(?ms)^      - name: Run deterministic T6\.3 Ruff release gates\s*$\n"
+        r".*?(?=^      - |\Z)",
+        lint,
+    )
+    assert gate is not None, "fixture requires the canonical gate step"
+    canonical = gate.group(0)
+    command = f"        run: bash {GATE_RELATIVE.as_posix()}\n"
+    assert command in canonical
+    relocated = canonical.replace(command, "") + (
+        "      - name: Relocated disabled Ruff gate\n"
+        "        if: false\n"
+        f"        run: bash {GATE_RELATIVE.as_posix()}\n"
+    )
+    return workflow.replace(lint, lint.replace(canonical, relocated, 1), 1)
+
+
+def _with_relocated_upload_action(workflow: str) -> str:
+    lint = _lint_job(workflow)
+    upload = re.search(
+        r"(?ms)^      - name: Upload Ruff gate evidence\s*$\n"
+        r".*?(?=^      - |\Z)",
+        lint,
+    )
+    assert upload is not None, "fixture requires the canonical upload step"
+    canonical = upload.group(0)
+    uses = "        uses: actions/upload-artifact@v4\n"
+    assert uses in canonical
+    relocated = canonical.replace(uses, "") + (
+        "      - name: Relocated disabled evidence upload\n"
+        "        if: false\n"
+        "        uses: actions/upload-artifact@v4\n"
+    )
+    return workflow.replace(lint, lint.replace(canonical, relocated, 1), 1)
+
+
+def _with_top_level_defaults(workflow: str, body: str) -> str:
+    marker = "\n# 同一分支上新的推送自动取消旧的运行\n"
+    assert marker in workflow, "fixture requires the concurrency comment marker"
+    defaults = f"\ndefaults:\n  run:\n    {body}\n"
+    return workflow.replace(marker, defaults + marker, 1)
+
+
+def _with_gate_environment_binding(workflow: str, binding: str) -> str:
+    marker = "      - name: Run deterministic T6.3 Ruff release gates\n        env:\n"
+    assert marker in workflow, "fixture requires the canonical gate environment"
+    return workflow.replace(marker, marker + f"          {binding}\n", 1)
+
+
+def _with_global_environment_binding(workflow: str, binding: str) -> str:
+    marker = "env:\n"
+    assert workflow.count(marker) >= 2, "fixture requires global and gate env blocks"
+    return workflow.replace(marker, marker + f"  {binding}\n", 1)
+
+
+def _with_checkout_field(workflow: str, field: str) -> str:
+    marker = "      - uses: actions/checkout@v4\n"
+    assert marker in workflow, "fixture requires the canonical checkout step"
+    return workflow.replace(marker, marker + f"        {field}\n", 1)
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -575,6 +668,47 @@ def test_ci_contract_rejects_missing_or_disabled_evidence_upload(mutator) -> Non
     workflow = _required_text(CI_WORKFLOW)
     mutated = mutator(workflow)
     assert mutated != workflow, "fixture could not mutate evidence upload"
+    with pytest.raises(AssertionError):
+        _assert_ci_contract(mutated)
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    (
+        _with_relocated_gate_command,
+        _with_relocated_upload_action,
+        lambda workflow: _with_gate_step_field(workflow, "working-directory: decoy"),
+        lambda workflow: _with_gate_environment_binding(
+            workflow, "PATH: decoy-bin:/usr/bin"
+        ),
+        lambda workflow: _with_global_environment_binding(
+            workflow, "BASH_ENV: /tmp/attacker-env"
+        ),
+        lambda workflow: _with_top_level_defaults(
+            workflow, "shell: bash -c '{0}; exit 0'"
+        ),
+        lambda workflow: _with_top_level_defaults(workflow, "working-directory: decoy"),
+        lambda workflow: _with_lint_job_field(workflow, "needs: never-run"),
+        lambda workflow: _with_lint_job_field(workflow, "defaults:"),
+        lambda workflow: _with_checkout_field(workflow, "if: false"),
+    ),
+    ids=(
+        "relocated-gate",
+        "relocated-upload",
+        "gate-working-directory",
+        "gate-path",
+        "global-bash-env",
+        "top-default-shell",
+        "top-default-directory",
+        "job-needs",
+        "job-defaults",
+        "disabled-checkout",
+    ),
+)
+def test_ci_contract_rejects_execution_context_decoys(mutator) -> None:
+    workflow = _required_text(CI_WORKFLOW)
+    mutated = mutator(workflow)
+    assert mutated != workflow
     with pytest.raises(AssertionError):
         _assert_ci_contract(mutated)
 
@@ -1462,6 +1596,16 @@ def test_policy_scanner_rejects_mutating_or_weakened_gate_commands(
         "missing-evidence-step",
         "disabled-evidence-step",
         "wrong-evidence-path",
+        "relocated-gate-command",
+        "relocated-upload-action",
+        "gate-working-directory",
+        "gate-path-environment",
+        "global-bash-environment",
+        "top-default-shell",
+        "top-default-directory",
+        "job-needs",
+        "job-defaults",
+        "disabled-checkout",
         "synthetic-head",
         "missing-ref",
         "missing-release-trigger",
@@ -1510,6 +1654,28 @@ def test_policy_scanner_rejects_workflow_gate_or_head_bypasses(
             1,
         )
         assert mutated != workflow, "fixture requires canonical evidence path"
+    elif mutation == "relocated-gate-command":
+        mutated = _with_relocated_gate_command(workflow)
+    elif mutation == "relocated-upload-action":
+        mutated = _with_relocated_upload_action(workflow)
+    elif mutation == "gate-working-directory":
+        mutated = _with_gate_step_field(workflow, "working-directory: decoy")
+    elif mutation == "gate-path-environment":
+        mutated = _with_gate_environment_binding(workflow, "PATH: decoy-bin:/usr/bin")
+    elif mutation == "global-bash-environment":
+        mutated = _with_global_environment_binding(
+            workflow, "BASH_ENV: /tmp/attacker-env"
+        )
+    elif mutation == "top-default-shell":
+        mutated = _with_top_level_defaults(workflow, "shell: bash -c '{0}; exit 0'")
+    elif mutation == "top-default-directory":
+        mutated = _with_top_level_defaults(workflow, "working-directory: decoy")
+    elif mutation == "job-needs":
+        mutated = _with_lint_job_field(workflow, "needs: never-run")
+    elif mutation == "job-defaults":
+        mutated = _with_lint_job_field(workflow, "defaults:")
+    elif mutation == "disabled-checkout":
+        mutated = _with_checkout_field(workflow, "if: false")
     elif mutation == "synthetic-head":
         mutated_lint = lint.replace(
             "github.event.pull_request.head.sha",
