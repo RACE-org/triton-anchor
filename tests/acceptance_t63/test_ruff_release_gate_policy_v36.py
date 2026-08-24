@@ -151,6 +151,10 @@ def _assert_ci_contract(workflow: str) -> None:
     assert re.search(
         r"(?m)^\s+if-no-files-found:\s*error\s*$", upload_step.group("body")
     )
+    assert re.search(
+        r"(?m)^\s+path:\s*\$\{\{\s*runner\.temp\s*\}\}/t63-ruff-evidence\s*$",
+        upload_step.group("body"),
+    )
 
     assert "fetch-depth: 0" in lint
     assert re.search(
@@ -251,6 +255,18 @@ def _with_late_checkout(workflow: str) -> str:
         "          fetch-depth: 1\n"
     )
     return workflow.replace(marker, late_checkout + marker, 1)
+
+
+def _without_evidence_upload_step(workflow: str) -> str:
+    lint = _lint_job(workflow)
+    upload = re.search(
+        r"(?ms)^      - name: Upload Ruff gate evidence\s*$\n"
+        r".*?(?=^      - |\Z)",
+        lint,
+    )
+    assert upload is not None, "fixture requires the evidence upload step"
+    mutated_lint = lint[: upload.start()] + lint[upload.end() :]
+    return workflow.replace(lint, mutated_lint, 1)
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -536,6 +552,29 @@ def test_ci_contract_requires_fail_closed_evidence_upload() -> None:
     workflow = _required_text(CI_WORKFLOW)
     mutated = workflow.replace("          if-no-files-found: error\n", "", 1)
     assert mutated != workflow, "fixture requires fail-closed artifact upload"
+    with pytest.raises(AssertionError):
+        _assert_ci_contract(mutated)
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    (
+        _without_evidence_upload_step,
+        lambda workflow: workflow.replace(
+            "        if: always()\n", "        if: false\n", 1
+        ),
+        lambda workflow: workflow.replace(
+            "          path: ${{ runner.temp }}/t63-ruff-evidence\n",
+            "          path: /tmp/not-the-gate-evidence\n",
+            1,
+        ),
+    ),
+    ids=("missing-step", "disabled-step", "wrong-path"),
+)
+def test_ci_contract_rejects_missing_or_disabled_evidence_upload(mutator) -> None:
+    workflow = _required_text(CI_WORKFLOW)
+    mutated = mutator(workflow)
+    assert mutated != workflow, "fixture could not mutate evidence upload"
     with pytest.raises(AssertionError):
         _assert_ci_contract(mutated)
 
@@ -1420,6 +1459,9 @@ def test_policy_scanner_rejects_mutating_or_weakened_gate_commands(
         "job-if-false",
         "late-checkout",
         "missing-evidence-fail-closed",
+        "missing-evidence-step",
+        "disabled-evidence-step",
+        "wrong-evidence-path",
         "synthetic-head",
         "missing-ref",
         "missing-release-trigger",
@@ -1456,6 +1498,18 @@ def test_policy_scanner_rejects_workflow_gate_or_head_bypasses(
     elif mutation == "missing-evidence-fail-closed":
         mutated = workflow.replace("          if-no-files-found: error\n", "", 1)
         assert mutated != workflow, "fixture requires fail-closed artifact upload"
+    elif mutation == "missing-evidence-step":
+        mutated = _without_evidence_upload_step(workflow)
+    elif mutation == "disabled-evidence-step":
+        mutated = workflow.replace("        if: always()\n", "        if: false\n", 1)
+        assert mutated != workflow, "fixture requires enabled artifact upload"
+    elif mutation == "wrong-evidence-path":
+        mutated = workflow.replace(
+            "          path: ${{ runner.temp }}/t63-ruff-evidence\n",
+            "          path: /tmp/not-the-gate-evidence\n",
+            1,
+        )
+        assert mutated != workflow, "fixture requires canonical evidence path"
     elif mutation == "synthetic-head":
         mutated_lint = lint.replace(
             "github.event.pull_request.head.sha",
