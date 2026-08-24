@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import os
 import re
+import runpy
 import shlex
 import stat
 import subprocess
@@ -25,6 +27,8 @@ CI_WORKFLOW = REPO_ROOT / WORKFLOW_RELATIVE
 RUFF_VERSION = "0.15.22"
 T63_BASE_SHA = "9ceba3e222fd2c9af9cbaf6a440beb23911c197b"
 POLICY_SCHEMA = "triton-anchor-t63-ruff-policy-v1"
+GATE_CONTEXT_SCHEMA = "triton-anchor-t63-ruff-gate-context-v1"
+GATE_EXIT_SCHEMA = "triton-anchor-t63-ruff-gate-exits-v1"
 EXPECTED_MANIFESTS = {
     "ALL_PYTHON_FILES": b"all.py\0changed.py\0",
     "T63_CHANGED_PYTHON_FILES": b"changed.py\0",
@@ -97,6 +101,24 @@ def _lint_job(workflow: str) -> str:
     return match.group("body")
 
 
+def _assert_release_branch_triggers(workflow: str) -> None:
+    trigger = re.search(
+        r"(?ms)^on:\s*$\n(?P<body>.*?)(?=^[A-Za-z_][A-Za-z0-9_-]*:\s*$)",
+        workflow,
+    )
+    assert trigger is not None, "workflow must have a top-level on: trigger"
+    for event in ("push", "pull_request"):
+        event_block = re.search(
+            rf"(?ms)^  {re.escape(event)}:\s*$\n"
+            r"(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:\s*$|\Z)",
+            trigger.group("body"),
+        )
+        assert event_block is not None, f"workflow trigger is missing {event}"
+        assert "triton_v3.6" in event_block.group("body"), (
+            f"{event} trigger must include triton_v3.6"
+        )
+
+
 def _assert_ci_contract(workflow: str) -> None:
     lint = _lint_job(workflow)
 
@@ -111,12 +133,23 @@ def _assert_ci_contract(workflow: str) -> None:
     )
     assert f"bash {GATE_RELATIVE.as_posix()}" in lint
     assert "continue-on-error" not in lint
-    assert "|| true" not in lint
     assert not re.search(
-        r"(?m)^\s*(?:(?:-\s*)?run:\s*)?"
-        r"(?:python\s+-m\s+)?ruff\s+(?:check|format)\b",
+        rf"bash\s+{re.escape(GATE_RELATIVE.as_posix())}[^\n]*"
+        r"\|\|\s*(?:true\b|:\s*(?:#.*)?$|echo\b)",
+        lint,
+        re.MULTILINE,
+    )
+    assert not re.search(
+        r"(?mi)^\s*(?:(?:-\s*)?run:\s*)?"
+        r"(?:"
+        r"(?:env(?:\s+[A-Za-z_][A-Za-z0-9_]*=[^\s]+)*\s+)?"
+        r"(?:python(?:3)?\s+-m\s+)?ruff\s+(?:check|format)\b"
+        r"|bash\s+-c\s+['\"][^'\"\n]*\bruff\s+(?:check|format)\b"
+        r")",
         lint,
     )
+    assert "T63_RUFF_EVIDENCE_DIR" in lint
+    assert "actions/upload-artifact@v4" in lint
 
 
 def _with_extra_ci_run_step(workflow: str, command: str) -> str:
@@ -135,6 +168,33 @@ def _with_extra_ci_run_step(workflow: str, command: str) -> str:
     assert f"bash {GATE_RELATIVE.as_posix()}" in _lint_job(mutated)
     assert command in _lint_job(mutated)
     return mutated
+
+
+def _with_extra_ci_multiline_run_step(workflow: str, command: str) -> str:
+    lint = _lint_job(workflow)
+    step = re.search(r"(?m)^(?P<indent>\s*)-\s+(?:name|uses|run):", lint)
+    assert step is not None, "lint job must contain a YAML step list"
+    indent = step.group("indent")
+    trailing_newlines = lint[len(lint.rstrip("\n")) :]
+    mutated_lint = (
+        lint.rstrip("\n")
+        + f"\n{indent}- name: forbidden multiline Ruff fixture"
+        + f"\n{indent}  run: |"
+        + f"\n{indent}    {command}\n"
+        + trailing_newlines
+    )
+    mutated = workflow.replace(lint, mutated_lint, 1)
+    assert f"bash {GATE_RELATIVE.as_posix()}" in _lint_job(mutated)
+    assert command in _lint_job(mutated)
+    return mutated
+
+
+def _with_shared_gate_bypass(workflow: str, suffix: str) -> str:
+    lint = _lint_job(workflow)
+    invocation = f"bash {GATE_RELATIVE.as_posix()}"
+    mutated_lint = lint.replace(invocation, f"{invocation} {suffix}", 1)
+    assert mutated_lint != lint, "fixture requires the shared gate invocation"
+    return workflow.replace(lint, mutated_lint, 1)
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -361,13 +421,38 @@ def test_ci_pins_ruff_checks_pr_head_and_runs_shared_gate_as_hard_failure() -> N
     _assert_ci_contract(workflow)
 
 
+def test_ci_push_and_pull_request_triggers_cover_triton_v36() -> None:
+    _assert_release_branch_triggers(_required_text(CI_WORKFLOW))
+
+
 @pytest.mark.parametrize(
     "direct_command",
-    ("ruff check .", "python -m ruff check .", "ruff format --check ."),
+    (
+        "ruff check .",
+        "python -m ruff check .",
+        "ruff format --check .",
+        "env ruff check .",
+        "bash -c 'ruff check .'",
+    ),
 )
 def test_ci_contract_rejects_direct_ruff_commands(direct_command: str) -> None:
     workflow = _required_text(CI_WORKFLOW)
     mutated = _with_extra_ci_run_step(workflow, direct_command)
+    with pytest.raises(AssertionError):
+        _assert_ci_contract(mutated)
+
+
+def test_ci_contract_rejects_multiline_env_ruff_command() -> None:
+    workflow = _required_text(CI_WORKFLOW)
+    mutated = _with_extra_ci_multiline_run_step(workflow, "env ruff check .")
+    with pytest.raises(AssertionError):
+        _assert_ci_contract(mutated)
+
+
+@pytest.mark.parametrize("suffix", ("|| :", "|| echo ignored"))
+def test_ci_contract_rejects_shared_gate_failure_bypasses(suffix: str) -> None:
+    workflow = _required_text(CI_WORKFLOW)
+    mutated = _with_shared_gate_bypass(workflow, suffix)
     with pytest.raises(AssertionError):
         _assert_ci_contract(mutated)
 
@@ -404,6 +489,7 @@ import sys
 
 
 args = sys.argv[1:]
+base = os.environ["FAKE_BASE_SHA"]
 candidate = os.environ["FAKE_CANDIDATE_SHA"]
 tree = os.environ["FAKE_TREE_SHA"]
 dirty = os.environ.get("FAKE_GIT_DIRTY", "")
@@ -421,6 +507,8 @@ if args[0] == "rev-parse":
         print(os.environ["FAKE_REPO_ROOT"])
     elif any("tree" in argument for argument in args):
         print(tree)
+    elif any(base in argument for argument in args):
+        print(base)
     else:
         print(candidate)
     raise SystemExit(0)
@@ -568,6 +656,7 @@ def _initialize_full_gate_fixture(
         {
             "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
             "FAKE_CALL_LOG": str(call_log),
+            "FAKE_BASE_SHA": T63_BASE_SHA,
             "FAKE_CANDIDATE_SHA": candidate,
             "FAKE_TREE_SHA": "2" * 40,
             "FAKE_REPO_ROOT": str(fixture_root),
@@ -660,6 +749,100 @@ def _assert_manifest_evidence(
     assert hashlib.sha256(manifest).hexdigest() == digest
     assert re.search(rf"(?i){re.escape(name)}[^\n]*count={count}\b", stdout)
     assert re.search(rf"(?i){re.escape(name)}[^\n]*sha256={digest}\b", stdout)
+
+
+def _argv0(arguments: list[str]) -> bytes:
+    return b"\0".join(os.fsencode(argument) for argument in arguments) + b"\0"
+
+
+def _assert_gate_evidence_bundle(
+    evidence: Path,
+    fixture_root: Path,
+    manifest_paths: dict[str, Path],
+    scanner_output: Path,
+    fail_stage: str,
+) -> None:
+    context_path = evidence / "gate-context.json"
+    assert context_path.is_file()
+    context = json.loads(context_path.read_text(encoding="utf-8"))
+    expected_context = {
+        "schema": GATE_CONTEXT_SCHEMA,
+        "base_sha": T63_BASE_SHA,
+        "candidate_sha": "1" * 40,
+        "head_sha": "1" * 40,
+        "head_tree_sha": "2" * 40,
+        "index_tree_sha": "2" * 40,
+        "base_is_ancestor": True,
+        "tracked_worktree_clean": True,
+        "cached_index_clean": True,
+        "ruff_version": f"ruff {RUFF_VERSION}",
+    }
+    assert {key: context.get(key) for key in expected_context} == expected_context
+
+    policy_argv = [
+        "python3",
+        str(fixture_root / SCANNER_RELATIVE),
+        "--repo-root",
+        str(fixture_root),
+        "--changed-manifest",
+        str(manifest_paths["T63_CHANGED_PYTHON_FILES"]),
+        "--gate-script",
+        GATE_RELATIVE.as_posix(),
+        "--workflow",
+        WORKFLOW_RELATIVE.as_posix(),
+        "--output-json",
+        str(scanner_output),
+    ]
+    expected_argv = {
+        "critical": [
+            "ruff",
+            *RUFF_CRITICAL_ARGS,
+            "--",
+            "all.py",
+            "changed.py",
+        ],
+        "changed": ["ruff", *RUFF_CHANGED_ARGS, "--", "changed.py"],
+        "format": ["ruff", *RUFF_FORMAT_ARGS, "--", "changed.py"],
+        "policy": policy_argv,
+    }
+    expected_raw = {
+        "critical": b"[]\n",
+        "changed": b"[]\n",
+        "format": b"[]\n",
+        "policy": b"",
+    }
+    expected_exits = {
+        "critical": 23 if fail_stage == "critical" else 0,
+        "changed": 23 if fail_stage == "changed" else 0,
+        "format": 23 if fail_stage == "format" else 0,
+        "policy": 29 if fail_stage == "scanner" else 0,
+    }
+
+    required_paths = {context_path, scanner_output, *manifest_paths.values()}
+    for stage in ("critical", "changed", "format", "policy"):
+        argv_path = evidence / f"{stage}.argv0"
+        raw_path = evidence / f"{stage}.raw.log"
+        required_paths.update((argv_path, raw_path))
+        assert argv_path.read_bytes() == _argv0(expected_argv[stage])
+        assert raw_path.read_bytes() == expected_raw[stage]
+
+    exit_path = evidence / "gate-exit-summary.json"
+    required_paths.add(exit_path)
+    exit_summary = json.loads(exit_path.read_text(encoding="utf-8"))
+    assert exit_summary.get("schema") == GATE_EXIT_SCHEMA
+    assert exit_summary.get("exits") == expected_exits
+
+    checksums_path = evidence / "SHA256SUMS"
+    assert checksums_path.is_file()
+    checksums = {}
+    for line in checksums_path.read_text(encoding="utf-8").splitlines():
+        digest, separator, relative = line.partition("  ")
+        assert separator and re.fullmatch(r"[0-9a-f]{64}", digest)
+        assert relative and not Path(relative).is_absolute()
+        checksums[relative] = digest
+    for path in required_paths:
+        relative = path.relative_to(evidence).as_posix()
+        assert checksums[relative] == hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 @pytest.mark.parametrize(
@@ -763,6 +946,13 @@ def test_full_gate_invokes_every_hard_gate_with_exact_argv_and_aggregates_failur
     ).encode()
     assert scanner_output.is_file()
     assert scanner_output.read_bytes() == expected_scanner_bytes
+    _assert_gate_evidence_bundle(
+        evidence,
+        fixture_root,
+        manifest_paths,
+        scanner_output,
+        fail_stage,
+    )
 
 
 @pytest.mark.parametrize("dirty", ("worktree", "cached", "tree"))
@@ -781,6 +971,25 @@ def test_full_gate_rejects_non_candidate_state_before_tools(
     )
 
     assert completed.returncode != 0
+    assert not [call for call in calls if call["tool"] in {"ruff", "scanner"}]
+
+
+def test_manifest_sha256_failure_hard_fails_before_ruff_or_scanner(
+    tmp_path: Path,
+) -> None:
+    fixture_root, call_log, _evidence, environment = _initialize_full_gate_fixture(
+        tmp_path
+    )
+    fake_bin = Path(environment["PATH"].split(os.pathsep, 1)[0])
+    _write_executable(
+        fake_bin / "sha256sum",
+        "#!/bin/sh\nprintf 'injected sha256sum failure\\n' >&2\nexit 71\n",
+    )
+
+    completed, calls = _run_full_gate(fixture_root, call_log, environment)
+
+    assert completed.returncode != 0
+    assert "injected sha256sum failure" in completed.stderr
     assert not [call for call in calls if call["tool"] in {"ruff", "scanner"}]
 
 
@@ -859,6 +1068,53 @@ def _run_scanner(
     return completed, payload
 
 
+def _run_scanner_without_toml_parsers(
+    fixture_root: Path,
+    manifest: Path,
+    output: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[int, dict[str, object]]:
+    namespace = runpy.run_path(
+        str(fixture_root / SCANNER_RELATIVE),
+        run_name="t63_policy_scanner_python310_fixture",
+    )
+    real_import = builtins.__import__
+
+    def import_without_toml_parser(
+        name: str,
+        globals_: object = None,
+        locals_: object = None,
+        fromlist: object = (),
+        level: int = 0,
+    ) -> object:
+        if name in {"tomllib", "tomli"}:
+            raise ImportError(f"injected missing TOML parser: {name}")
+        return real_import(name, globals_, locals_, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_toml_parser)
+    main = namespace["main"]
+    try:
+        return_code = main(
+            [
+                "--repo-root",
+                str(fixture_root),
+                "--changed-manifest",
+                str(manifest),
+                "--gate-script",
+                GATE_RELATIVE.as_posix(),
+                "--workflow",
+                WORKFLOW_RELATIVE.as_posix(),
+                "--output-json",
+                str(output),
+            ]
+        )
+    except ImportError as error:
+        pytest.fail(f"missing TOML parser must fail closed with JSON: {error}")
+    assert output.is_file(), "Python 3.10 parser failure must still emit policy JSON"
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    return return_code, payload
+
+
 def test_policy_scanner_is_nul_safe_and_uses_tokenize_comment_semantics(
     tmp_path: Path,
 ) -> None:
@@ -877,6 +1133,71 @@ def test_policy_scanner_is_nul_safe_and_uses_tokenize_comment_semantics(
     assert completed.returncode == 0, completed.stderr
     assert payload["status"] == "PASS"
     assert payload["findings"] == []
+
+
+def test_python310_toml_fallback_does_not_treat_tool_other_as_ruff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relative = Path("pyproject.toml")
+    fixture_root, manifest, output = _initialize_scanner_fixture(
+        tmp_path,
+        python_source="value = 1\n",
+        extra_files={relative: '[tool.other]\nignore = ["F401"]\n'},
+    )
+    return_code, payload = _run_scanner_without_toml_parsers(
+        fixture_root,
+        manifest,
+        output,
+        monkeypatch,
+    )
+
+    if return_code != 0:
+        assert payload["status"] == "FAIL"
+        assert any(
+            finding.get("rule") == "ruff-config-parser-unavailable"
+            for finding in payload["findings"]
+        ), "a missing dependency may fail closed, but tool.other is not a Ruff bypass"
+    else:
+        assert payload == {
+            "schema": POLICY_SCHEMA,
+            "status": "PASS",
+            "findings": [],
+        }
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        '[tool]\nruff.lint.ignore = ["F401"]\n',
+        '[tool.ruff.lint]\nignore = ["F401"]\n',
+        '[tool]\nruff = { lint = { ignore = ["F401"] } }\n',
+    ),
+    ids=("dotted-key", "ruff-table", "inline-table"),
+)
+def test_python310_toml_fallback_rejects_every_ruff_ignore_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    relative = Path("pyproject.toml")
+    fixture_root, manifest, output = _initialize_scanner_fixture(
+        tmp_path,
+        python_source="value = 1\n",
+        extra_files={relative: content},
+    )
+    return_code, payload = _run_scanner_without_toml_parsers(
+        fixture_root,
+        manifest,
+        output,
+        monkeypatch,
+    )
+
+    assert return_code != 0
+    assert payload["status"] == "FAIL"
+    assert any(
+        finding.get("path") == relative.as_posix() for finding in payload["findings"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1003,7 +1324,18 @@ def test_policy_scanner_rejects_mutating_or_weakened_gate_commands(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("direct-ruff", "direct-python-ruff", "synthetic-head", "missing-ref"),
+    (
+        "direct-ruff",
+        "direct-python-ruff",
+        "direct-env-ruff",
+        "direct-bash-c-ruff",
+        "direct-multiline-env-ruff",
+        "gate-colon-bypass",
+        "gate-echo-bypass",
+        "synthetic-head",
+        "missing-ref",
+        "missing-release-trigger",
+    ),
 )
 def test_policy_scanner_rejects_workflow_gate_or_head_bypasses(
     tmp_path: Path,
@@ -1015,6 +1347,16 @@ def test_policy_scanner_rejects_workflow_gate_or_head_bypasses(
         mutated = _with_extra_ci_run_step(workflow, "ruff check .")
     elif mutation == "direct-python-ruff":
         mutated = _with_extra_ci_run_step(workflow, "python -m ruff check .")
+    elif mutation == "direct-env-ruff":
+        mutated = _with_extra_ci_run_step(workflow, "env ruff check .")
+    elif mutation == "direct-bash-c-ruff":
+        mutated = _with_extra_ci_run_step(workflow, "bash -c 'ruff check .'")
+    elif mutation == "direct-multiline-env-ruff":
+        mutated = _with_extra_ci_multiline_run_step(workflow, "env ruff check .")
+    elif mutation == "gate-colon-bypass":
+        mutated = _with_shared_gate_bypass(workflow, "|| :")
+    elif mutation == "gate-echo-bypass":
+        mutated = _with_shared_gate_bypass(workflow, "|| echo ignored")
     elif mutation == "synthetic-head":
         mutated_lint = lint.replace(
             "github.event.pull_request.head.sha",
@@ -1023,11 +1365,18 @@ def test_policy_scanner_rejects_workflow_gate_or_head_bypasses(
         )
         assert mutated_lint != lint, f"fixture could not apply {mutation} mutation"
         mutated = workflow.replace(lint, mutated_lint, 1)
-    else:
+    elif mutation == "missing-ref":
         mutated_lint = re.sub(r"(?m)^\s*ref:.*\n", "", lint, count=1)
         assert mutated_lint != lint, f"fixture could not apply {mutation} mutation"
         mutated = workflow.replace(lint, mutated_lint, 1)
+    else:
+        assert workflow.count("triton_v3.6") >= 2, (
+            "fixture requires release branch coverage for push and pull_request"
+        )
+        mutated = workflow.replace("triton_v3.6", "main")
     if mutation.startswith("direct-"):
+        assert f"bash {GATE_RELATIVE.as_posix()}" in _lint_job(mutated)
+    if mutation.startswith("gate-"):
         assert f"bash {GATE_RELATIVE.as_posix()}" in _lint_job(mutated)
     fixture_root, manifest, output = _initialize_scanner_fixture(
         tmp_path,
