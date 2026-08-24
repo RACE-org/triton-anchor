@@ -122,6 +122,36 @@ def _assert_release_branch_triggers(workflow: str) -> None:
 def _assert_ci_contract(workflow: str) -> None:
     lint = _lint_job(workflow)
 
+    assert not re.search(r"(?m)^    if:\s*", lint), (
+        "the lint job cannot be conditionally skipped"
+    )
+    assert re.findall(r"(?m)^\s+(?:-\s+)?uses:\s*(\S+)\s*$", lint) == [
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "actions/upload-artifact@v4",
+    ], "the lint job must use only the canonical action sequence"
+
+    gate_step = re.search(
+        r"(?ms)^      - name: Run deterministic T6\.3 Ruff release gates\s*$\n"
+        r"(?P<body>.*?)(?=^      - |\Z)",
+        lint,
+    )
+    assert gate_step is not None, "the canonical shared-gate step is missing"
+    assert not re.search(r"(?m)^\s+(?:if|shell):\s*", gate_step.group("body")), (
+        "the shared-gate step cannot be skipped or run through a custom shell"
+    )
+
+    upload_step = re.search(
+        r"(?ms)^      - name: Upload Ruff gate evidence\s*$\n"
+        r"(?P<body>.*?)(?=^      - |\Z)",
+        lint,
+    )
+    assert upload_step is not None, "the Ruff evidence upload step is missing"
+    assert re.search(r"(?m)^\s+if:\s*always\(\)\s*$", upload_step.group("body"))
+    assert re.search(
+        r"(?m)^\s+if-no-files-found:\s*error\s*$", upload_step.group("body")
+    )
+
     assert "fetch-depth: 0" in lint
     assert re.search(
         r"(?m)^\s*ref:\s*\$\{\{[^}\n]*github\.event\.pull_request\.head\.sha",
@@ -195,6 +225,32 @@ def _with_shared_gate_bypass(workflow: str, suffix: str) -> str:
     mutated_lint = lint.replace(invocation, f"{invocation} {suffix}", 1)
     assert mutated_lint != lint, "fixture requires the shared gate invocation"
     return workflow.replace(lint, mutated_lint, 1)
+
+
+def _with_gate_step_field(workflow: str, field: str) -> str:
+    marker = "      - name: Run deterministic T6.3 Ruff release gates\n"
+    assert marker in workflow, "fixture requires the canonical gate step"
+    return workflow.replace(marker, marker + f"        {field}\n", 1)
+
+
+def _with_lint_job_field(workflow: str, field: str) -> str:
+    lint = _lint_job(workflow)
+    marker = "    runs-on: ubuntu-latest\n"
+    assert marker in lint, "fixture requires the canonical lint job"
+    mutated_lint = lint.replace(marker, marker + f"    {field}\n", 1)
+    return workflow.replace(lint, mutated_lint, 1)
+
+
+def _with_late_checkout(workflow: str) -> str:
+    marker = "      - uses: actions/setup-python@v5\n"
+    assert marker in workflow, "fixture requires the canonical setup-python step"
+    late_checkout = (
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n"
+        "          ref: ${{ github.sha }}\n"
+        "          fetch-depth: 1\n"
+    )
+    return workflow.replace(marker, late_checkout + marker, 1)
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -453,6 +509,33 @@ def test_ci_contract_rejects_multiline_env_ruff_command() -> None:
 def test_ci_contract_rejects_shared_gate_failure_bypasses(suffix: str) -> None:
     workflow = _required_text(CI_WORKFLOW)
     mutated = _with_shared_gate_bypass(workflow, suffix)
+    with pytest.raises(AssertionError):
+        _assert_ci_contract(mutated)
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    (
+        lambda workflow: _with_gate_step_field(workflow, "if: false"),
+        lambda workflow: _with_gate_step_field(workflow, "shell: python"),
+        lambda workflow: _with_lint_job_field(workflow, "if: false"),
+        _with_late_checkout,
+    ),
+    ids=("gate-if-false", "gate-custom-shell", "job-if-false", "late-checkout"),
+)
+def test_ci_contract_rejects_step_and_checkout_bypasses(
+    mutator,
+) -> None:
+    workflow = _required_text(CI_WORKFLOW)
+    mutated = mutator(workflow)
+    with pytest.raises(AssertionError):
+        _assert_ci_contract(mutated)
+
+
+def test_ci_contract_requires_fail_closed_evidence_upload() -> None:
+    workflow = _required_text(CI_WORKFLOW)
+    mutated = workflow.replace("          if-no-files-found: error\n", "", 1)
+    assert mutated != workflow, "fixture requires fail-closed artifact upload"
     with pytest.raises(AssertionError):
         _assert_ci_contract(mutated)
 
@@ -1332,6 +1415,11 @@ def test_policy_scanner_rejects_mutating_or_weakened_gate_commands(
         "direct-multiline-env-ruff",
         "gate-colon-bypass",
         "gate-echo-bypass",
+        "gate-if-false",
+        "gate-custom-shell",
+        "job-if-false",
+        "late-checkout",
+        "missing-evidence-fail-closed",
         "synthetic-head",
         "missing-ref",
         "missing-release-trigger",
@@ -1357,6 +1445,17 @@ def test_policy_scanner_rejects_workflow_gate_or_head_bypasses(
         mutated = _with_shared_gate_bypass(workflow, "|| :")
     elif mutation == "gate-echo-bypass":
         mutated = _with_shared_gate_bypass(workflow, "|| echo ignored")
+    elif mutation == "gate-if-false":
+        mutated = _with_gate_step_field(workflow, "if: false")
+    elif mutation == "gate-custom-shell":
+        mutated = _with_gate_step_field(workflow, "shell: python")
+    elif mutation == "job-if-false":
+        mutated = _with_lint_job_field(workflow, "if: false")
+    elif mutation == "late-checkout":
+        mutated = _with_late_checkout(workflow)
+    elif mutation == "missing-evidence-fail-closed":
+        mutated = workflow.replace("          if-no-files-found: error\n", "", 1)
+        assert mutated != workflow, "fixture requires fail-closed artifact upload"
     elif mutation == "synthetic-head":
         mutated_lint = lint.replace(
             "github.event.pull_request.head.sha",
