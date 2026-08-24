@@ -1,0 +1,39 @@
+{
+  "schema": "triton-anchor-t63-v36-release-gate-identity-baseline-v1",
+  "source_commit": "609c3c7d1f4e6032e8b1399531d1c998b970fdb8",
+  "junit_suites": [
+    {
+      "name": "common",
+      "testcase_count": 409,
+      "sha256": "cb16e2e524028279975e14ac5605f466618b20c2e048b16d7e8caec603bb4cbb"
+    },
+    {
+      "name": "f5_f6",
+      "testcase_count": 118,
+      "sha256": "d945e20f54747cb85a84dda1b4d440db8b505c4f6c36db11e33c996fdc640cf3"
+    },
+    {
+      "name": "f4",
+      "testcase_count": 3,
+      "sha256": "c5521ec99e7793cfb723f175017cf4a76bbb38d0aca1ee47371d6994c220c038"
+    }
+  ],
+  "canonicalization": {
+    "version": "adr-0002-section-10.1-v1",
+    "identity_fields": [
+      "classname",
+      "name"
+    ],
+    "missing_attribute_value": "",
+    "preserve_duplicates": true,
+    "sort": "python-unicode-code-point-tuple-ascending",
+    "serialization": "json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(\",\", \":\")) + \"\\n\"",
+    "encoding": "utf-8"
+  },
+  "canonical_identity_manifest": {
+    "testcase_count": 530,
+    "unique_identity_count": 530,
+    "size_bytes": 76376,
+    "sha256": "f6a7af60a2bf8bbf7a822c1f855c19045b975169e6c67d1f8846c5f66a307235"
+  }
+}
