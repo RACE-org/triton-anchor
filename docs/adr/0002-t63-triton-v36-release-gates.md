@@ -1,7 +1,7 @@
 # ADR-0002：T6.3 / Triton 3.6 发布制品与版本专属门禁治理
 
-- 总体状态：**Proposed — 等待用户以发布责任人身份确认；尚未授权实现**
-- 决策状态：`PROPOSED`
+- 总体状态：**Approved design — implementation binding pending；不是 Accepted**
+- 决策状态：`APPROVED`
 - 实现绑定：`UNBOUND`
 - 日期：2026-08-24
 - 适用对象：triton-anchor Core 0.2.0 的 Triton 3.6 发布候选
@@ -15,13 +15,14 @@
   `1dc1a4e86a9fbc7127178f01115b97d6ef3bed3a711274aae5858f10055b398c`）
 - 明确排除：T10.2 Conformance Kit
 
-> [!CAUTION]
-> 本草案在用户明确确认前不是 Accepted 合同。确认前只允许修改本 ADR；不得修改
-> 测试 oracle、生产代码、构建逻辑、CI 或版本 pin，也不得据此把任何 SPEC GAP 标为关闭。
+> [!IMPORTANT]
+> D-01～D-12 与全文规则已获第一次维护者批准，允许进入实施阶段；实现绑定仍为
+> `UNBOUND`。在 exact candidate、fresh wheel、全部新鲜证据和第二次维护者确认完成前，
+> 本 ADR 不是 release Accepted 合同，`AUTH-SHA` 仍是 SPEC GAP。
 
-本 ADR 使用两阶段状态，避免让批准文档循环绑定自身。用户第一次确认推荐 bundle 后，
-`决策状态` 可改为 `APPROVED`，但 `实现绑定` 仍为 `UNBOUND`，总体状态仍不得写成
-Accepted。只有最终生产候选、全新 wheel 和新鲜证据完成，并由发布责任人第二次确认，
+本 ADR 使用两阶段状态，避免让批准文档循环绑定自身。第一次确认已经把 `决策状态` 改为
+`APPROVED`，但 `实现绑定` 仍为 `UNBOUND`，总体状态不得写成 Accepted。只有最终生产
+候选、全新 wheel 和新鲜证据完成，并由发布责任人第二次确认，
 `决策状态=APPROVED` 且 `实现绑定=BOUND` 时，总体状态才可改为 **Accepted**。
 
 ## 1. 决策背景
@@ -541,19 +542,36 @@ annex 文件建议为 `docs/adr/0002-t63-triton-v36-release-gates-conformance.md
 
 只有 annex 中所有必需软件项均 PASS、`FAIL=0`、`SPEC GAP=0` 时才可签署。
 
-## 15. 待用户确认
+## 15. 第一次维护者批准记录
 
-请用户以发布责任人身份明确确认或修改以下规则：
+- 审批角色：**T6.3 发布责任人/维护者；姓名或公开 handle 未提供**
+- 审批日期：**2026-08-24**
+- 批准范围：**D-01～D-12 不可拆分 bundle 与本 ADR 全文**
+- 明确接受：**RUNPATH、Ruff、coverage 与 hardware 分类/执行规则**
+- 授权状态：**进入 `APPROVED + UNBOUND` 实施阶段**
+- 偏离：**无**
+- 本任务会话收到的书面确认：
 
-1. 批准 D-01～D-12 作为不可拆分 bundle；
-2. 确认 `triton_anchor.tests` 不进入 production wheel；
-3. 确认 ELF 规则，尤其 `triton-shared-opt` 的 exact RUNPATH 为 `$ORIGIN/../lib`；
-4. 确认 Ruff 0.15.22、全 tracked `.py`/`.pyi` critical gate，以及**包含被改 vendored
-   `triton/` 文件**的 changed-files full check/format；确认“full”使用 0.15.22 默认规则集，
-   不是 `--select ALL`；
-5. 确认 combined coverage normative floor 为 76.00%，并接受它相对观测 76.2562% 的明确
-   小幅容差；
-6. 确认 §11 固定 hardware oracle，且缺硬件时只能 CONDITIONAL PASS；
-7. 确认本会话用户具有批准本发布合同的发布责任人/维护者权限。
+```text
+护者身份确认 ADR-0002 D-01～D-12 及全文规则，接受 RUNPATH、Ruff、coverage 和
+hardware 分类方案，授权进入 APPROVED + UNBOUND 实施阶段。
+```
 
-在收到明确确认前，实施阶段保持暂停。
+回复开头在传输文本中呈截断形式，但其确认对象、接受的四类方案及实施授权均明确，并且是
+对前一版 §15 确认请求的直接回复；本记录不据此补写未提供的姓名或公开 handle。
+
+自本记录起，`AUTH-F4/F5/F6` 与 `PKG-TESTS` 的规范决策缺口按 §2.2 关闭；旧 wheel 仍因
+tests-in-wheel 与 RUNPATH 规则为 FAIL，`QA-CI-001` 仍为 FAIL，`AUTH-SHA` 仍为 SPEC GAP。
+
+## 16. 第二次绑定确认（尚未发生）
+
+完成候选提交 `I`、证据提交 `E`、fresh wheel 与全部软件门禁后，必须向发布责任人提供：
+
+- 完整 `PRODUCTION_CANDIDATE_SHA=I` 与 `EVIDENCE_COMMIT_SHA=E`；
+- 新 wheel filename/size/SHA-256；
+- 530 baseline + additional identity、JUnit、Ruff、coverage、F4/ELF/fresh-install 证据；
+- hardware PASS/BLOCKED 证据及最终结论上限；
+- `git diff I..E` 仅包含 docs/evidence 的证明。
+
+只有发布责任人第二次明确确认这些 exact identities 后，才可形成绑定提交 `A` 并把状态改为
+`APPROVED + BOUND / Accepted`。
