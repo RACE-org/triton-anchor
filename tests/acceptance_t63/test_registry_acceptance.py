@@ -316,7 +316,8 @@ def submit_daemon_future(callback: Any) -> Future[Any]:
             return
         try:
             result = callback()
-        except BaseException as exc:  # noqa: BLE001 - preserve test timeout
+        # Preserve every callback failure so the bounded future cannot hang.
+        except BaseException as exc:
             future.set_exception(exc)
         else:
             future.set_result(result)

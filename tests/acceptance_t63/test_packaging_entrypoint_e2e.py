@@ -19,7 +19,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _run(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str], *, cwd: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         command,
         cwd=cwd,
@@ -120,7 +122,7 @@ def _write_backend_project(root: Path, *, ordinal: str, target: str) -> None:
     )
 
 
-E2E_PROBE = r'''
+E2E_PROBE = r"""
 import importlib.metadata
 import json
 import pathlib
@@ -238,7 +240,7 @@ print(json.dumps({
     "selections": [one.to_dict(), two.to_dict()],
     "sentinels": sorted(path.name for path in sentinels.iterdir()),
 }, sort_keys=True))
-'''
+"""
 
 
 def _build_fixture_wheels(tmp_path: Path) -> tuple[list[Path], list[dict]]:
@@ -269,8 +271,12 @@ def _build_fixture_wheels(tmp_path: Path) -> tuple[list[Path], list[dict]]:
     for path in wheel_paths:
         with zipfile.ZipFile(path) as archive:
             names = archive.namelist()
-            assert sum(name.endswith("triton_anchor_backend.json") for name in names) == 1
-            assert sum(name.endswith(".dist-info/entry_points.txt") for name in names) == 1
+            assert (
+                sum(name.endswith("triton_anchor_backend.json") for name in names) == 1
+            )
+            assert (
+                sum(name.endswith(".dist-info/entry_points.txt") for name in names) == 1
+            )
         wheel_evidence.append(
             {
                 "filename": path.name,
@@ -320,9 +326,7 @@ def test_two_real_wheels_discovery_and_import_gate(tmp_path: Path) -> None:
     sentinels.mkdir()
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        [str(site), str(REPO_ROOT / "python")]
-    )
+    env["PYTHONPATH"] = os.pathsep.join([str(site), str(REPO_ROOT / "python")])
     env["PYTHONNOUSERSITE"] = "1"
     env["T63_ENTRYPOINT_SITE"] = str(site)
     env["T63_ENTRYPOINT_SENTINEL_DIR"] = str(sentinels)

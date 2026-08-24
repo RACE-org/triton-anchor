@@ -74,7 +74,10 @@ class ASTSource:
 
     def hash(self):
         sorted_sig = [v for k, v in sorted(self.signature.items())]
-        get_key = lambda x: x.cache_key if hasattr(x, "cache_key") else str(x)
+
+        def get_key(x):
+            return x.cache_key if hasattr(x, "cache_key") else str(x)
+
         constants_key = "-".join(
             [get_key(v) for k, v in sorted(self.constants.items())]
         )

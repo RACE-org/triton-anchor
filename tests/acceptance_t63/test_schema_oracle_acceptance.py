@@ -38,9 +38,7 @@ def _schema_definition_accepts(
 ) -> bool:
     """Evaluate an evidence-only leaf predicate outside the plugin domain."""
     return not list(
-        Draft202012Validator(schema["$defs"][definition]).iter_errors(
-            candidate
-        )
+        Draft202012Validator(schema["$defs"][definition]).iter_errors(candidate)
     )
 
 
@@ -179,9 +177,7 @@ def test_manifest_anchored_pattern_schema_parser_domain(
     elif location == "requires_triton.commit":
         plugin["requires_triton"]["commit"] = base_value + suffix
     elif location == "abi_fingerprint":
-        assert _schema_definition_accepts(
-            schema, "abiFingerprint", base_value
-        )
+        assert _schema_definition_accepts(schema, "abiFingerprint", base_value)
         assert not _schema_definition_accepts(
             schema, "abiFingerprint", base_value + suffix
         )
@@ -234,9 +230,7 @@ def test_manifest_native_library_path_schema_parser_domain(
     plugin = candidate["plugins"][0]
     plugin["native_libraries"] = [path]
 
-    assert _schema_definition_accepts(
-        schema, "nativeLibraryPath", path
-    ) is expected
+    assert _schema_definition_accepts(schema, "nativeLibraryPath", path) is expected
     assert _schema_accepts(schema, candidate) is False
     assert _parser_accepts(candidate) is False
 

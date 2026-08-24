@@ -52,12 +52,8 @@ _MACHO_MAGICS = {
     b"\xfe\xed\xfa\xcf",
 }
 _RECORD_HASH_PATTERN = re.compile(r"^sha256=([A-Za-z0-9_-]+)$")
-_SONAME_PATTERN = re.compile(
-    r"\(SONAME\).*Library soname: \[([^\]]+)\]"
-)
-_NEEDED_PATTERN = re.compile(
-    r"\(NEEDED\).*Shared library: \[([^\]]+)\]"
-)
+_SONAME_PATTERN = re.compile(r"\(SONAME\).*Library soname: \[([^\]]+)\]")
+_NEEDED_PATTERN = re.compile(r"\(NEEDED\).*Shared library: \[([^\]]+)\]")
 _FORBIDDEN_TOOLCHAIN_DEPENDENCY = re.compile(
     r"^(?:lib)?(?:LLVM|MLIR)(?:[-.]|$)",
     flags=re.IGNORECASE,
@@ -108,11 +104,7 @@ class NativeInspectionReport:
 
 def _native_filename(path: str) -> bool:
     name = PurePosixPath(path).name.lower()
-    return (
-        name.endswith(_NATIVE_SUFFIXES)
-        or ".so." in name
-        or ".dylib." in name
-    )
+    return name.endswith(_NATIVE_SUFFIXES) or ".so." in name or ".dylib." in name
 
 
 def _record_hashes(distribution: Any) -> Mapping[str, str]:
@@ -196,8 +188,7 @@ def _distribution_file_map(
             normalized = str(PurePosixPath(str(item)))
             if normalized in result:
                 raise BackendPluginManifestError(
-                    "Backend wheel RECORD contains a duplicate path: "
-                    + normalized,
+                    "Backend wheel RECORD contains a duplicate path: " + normalized,
                     plugin_id=plugin.plugin_id,
                     entry_point=plugin.entry_point,
                     field="distribution.files",
@@ -274,9 +265,7 @@ def _sysconfig_install_schemes() -> Tuple[Mapping[str, str], ...]:
     # scheme without including its alias in get_scheme_names().
     for name in (None,) + names:
         paths = (
-            sysconfig.get_paths()
-            if name is None
-            else sysconfig.get_paths(scheme=name)
+            sysconfig.get_paths() if name is None else sysconfig.get_paths(scheme=name)
         )
         if not isinstance(paths, Mapping):
             continue
@@ -310,9 +299,7 @@ def _distribution_install_roots(root: Path) -> Tuple[Path, ...]:
             if resolved[key] is not None
         }:
             continue
-        allowed.update(
-            path for path in resolved.values() if path is not None
-        )
+        allowed.update(path for path in resolved.values() if path is not None)
     return tuple(sorted(allowed, key=os.fspath))
 
 
@@ -345,11 +332,7 @@ def _has_native_magic(
             ),
             detail=relative_path,
         ) from exc
-    return (
-        magic == _ELF_MAGIC
-        or magic in _MACHO_MAGICS
-        or magic[:2] == b"MZ"
-    )
+    return magic == _ELF_MAGIC or magic in _MACHO_MAGICS or magic[:2] == b"MZ"
 
 
 def _discover_native_paths(
@@ -364,8 +347,7 @@ def _discover_native_paths(
     except (AttributeError, OSError, TypeError, ValueError) as exc:
         raise _inventory_error(
             plugin,
-            "Cannot locate the owning distribution root for native-file "
-            "inventory",
+            "Cannot locate the owning distribution root for native-file inventory",
             actual="<error: {}>".format(_stable_exception_name(exc)),
         ) from exc
 
@@ -374,8 +356,7 @@ def _discover_native_paths(
     except (OSError, ValueError) as exc:
         raise _inventory_error(
             plugin,
-            "Cannot resolve the owning distribution root for native-file "
-            "inventory",
+            "Cannot resolve the owning distribution root for native-file inventory",
             actual="<error: {}>".format(_stable_exception_name(exc)),
         ) from exc
     allowed_roots = _distribution_install_roots(root)
@@ -386,8 +367,9 @@ def _discover_native_paths(
         if record_path.is_absolute() or "\\" in relative_path:
             raise _inventory_error(
                 plugin,
-                "Wheel RECORD path is not a relative POSIX install path: "
-                "'{}'".format(relative_path),
+                "Wheel RECORD path is not a relative POSIX install path: '{}'".format(
+                    relative_path
+                ),
                 actual=relative_path,
                 detail=relative_path,
             )
@@ -457,8 +439,9 @@ def _discover_native_paths(
         except (OSError, ValueError) as exc:
             raise _inventory_error(
                 plugin,
-                "Cannot determine the file type of wheel RECORD entry: "
-                "'{}'".format(relative_path),
+                "Cannot determine the file type of wheel RECORD entry: '{}'".format(
+                    relative_path
+                ),
                 actual="{}: <error: {}>".format(
                     relative_path,
                     _stable_exception_name(exc),
@@ -468,9 +451,7 @@ def _discover_native_paths(
         if not is_file:
             raise _inventory_error(
                 plugin,
-                "Wheel RECORD entry is not a regular file: '{}'".format(
-                    relative_path
-                ),
+                "Wheel RECORD entry is not a regular file: '{}'".format(relative_path),
                 actual=relative_path,
                 detail=relative_path,
             )
@@ -514,8 +495,10 @@ def _validate_native_wheel_layout(
         for tag in raw_tags
         if isinstance(tag, str) and "-" in tag
     )
-    if purelib != "false" or not platform_tags or all(
-        tag == "any" for tag in platform_tags
+    if (
+        purelib != "false"
+        or not platform_tags
+        or all(tag == "any" for tag in platform_tags)
     ):
         raise BackendPluginCompatibilityError(
             "native wheel layout",
@@ -589,9 +572,7 @@ def _locate_verified_file(
         ) from exc
     if not resolved.is_file():
         raise BackendPluginManifestError(
-            "Declared native library is not a regular file: '{}'".format(
-                relative_path
-            ),
+            "Declared native library is not a regular file: '{}'".format(relative_path),
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             field="native_libraries",
@@ -606,8 +587,9 @@ def _locate_verified_file(
     match = _RECORD_HASH_PATTERN.fullmatch(expected_hash or "")
     if match is None:
         raise BackendPluginManifestError(
-            "Declared native library lacks a SHA-256 wheel RECORD hash: "
-            "'{}'".format(relative_path),
+            "Declared native library lacks a SHA-256 wheel RECORD hash: '{}'".format(
+                relative_path
+            ),
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             field="RECORD",
@@ -632,14 +614,12 @@ def _locate_verified_file(
             remediation="Reinstall the backend wheel and verify permissions.",
         ) from exc
     digest_bytes = hashlib.sha256(content).digest()
-    actual_record_digest = base64.urlsafe_b64encode(digest_bytes).decode(
-        "ascii"
-    ).rstrip("=")
+    actual_record_digest = (
+        base64.urlsafe_b64encode(digest_bytes).decode("ascii").rstrip("=")
+    )
     if actual_record_digest != match.group(1):
         raise BackendPluginManifestError(
-            "Wheel RECORD hash mismatch for native library '{}'".format(
-                relative_path
-            ),
+            "Wheel RECORD hash mismatch for native library '{}'".format(relative_path),
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             field="RECORD",
@@ -761,9 +741,7 @@ def _inspect_elf(
     )
 
     class_match = re.search(r"^\s*Class:\s*(\S+)", header, flags=re.MULTILINE)
-    machine_match = re.search(
-        r"^\s*Machine:\s*(.+?)\s*$", header, flags=re.MULTILINE
-    )
+    machine_match = re.search(r"^\s*Machine:\s*(.+?)\s*$", header, flags=re.MULTILINE)
     type_match = re.search(r"^\s*Type:\s*(\S+)", header, flags=re.MULTILINE)
     if class_match is None or machine_match is None or type_match is None:
         raise BackendPluginCompatibilityError(
@@ -784,9 +762,7 @@ def _inspect_elf(
             remediation="Package a shared library, not an executable/object file.",
         )
 
-    architecture = _normalize_machine(
-        machine_match.group(1), class_match.group(1)
-    )
+    architecture = _normalize_machine(machine_match.group(1), class_match.group(1))
     host = _host_machine()
     if architecture.lower() != host:
         raise BackendPluginCompatibilityError(
@@ -900,9 +876,7 @@ def inspect_native_artifacts(
             ),
         )
 
-    undeclared = tuple(
-        path for path in discovered_native if path not in set(declared)
-    )
+    undeclared = tuple(path for path in discovered_native if path not in set(declared))
     if undeclared:
         raise BackendPluginManifestError(
             "Backend wheel contains undeclared native libraries: "
@@ -956,9 +930,7 @@ def inspect_native_artifacts(
             magic = installed.read_bytes()[:4]
         except OSError as exc:
             raise BackendPluginManifestError(
-                "Cannot read native binary magic for '{}'".format(
-                    relative_path
-                ),
+                "Cannot read native binary magic for '{}'".format(relative_path),
                 plugin_id=plugin.plugin_id,
                 entry_point=plugin.entry_point,
                 field="native_libraries",

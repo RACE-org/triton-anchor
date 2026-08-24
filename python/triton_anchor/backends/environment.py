@@ -195,8 +195,7 @@ def load_build_info(path: Optional[Path] = None) -> Dict[str, Any]:
     schema_version = data["schema_version"]
     if schema_version not in _SUPPORTED_BUILD_INFO_SCHEMAS:
         raise RuntimeError(
-            "Unsupported triton-anchor build info schema: "
-            f"{schema_version}"
+            f"Unsupported triton-anchor build info schema: {schema_version}"
         )
     abi_fields = {
         "core_abi_fingerprint_schema",
@@ -254,9 +253,7 @@ def load_build_info(path: Optional[Path] = None) -> Dict[str, Any]:
         "built_python_soabi",
         "built_platform",
     }
-    required_strings = required.difference(
-        optional_strings | {"generated", "ttgpu"}
-    )
+    required_strings = required.difference(optional_strings | {"generated", "ttgpu"})
     invalid_strings = sorted(
         field
         for field in required_strings
@@ -295,8 +292,7 @@ def load_build_info(path: Optional[Path] = None) -> Dict[str, Any]:
     invalid_commits = sorted(
         field
         for field in commit_fields
-        if data[field] is not None
-        and not _GIT_COMMIT_PATTERN.fullmatch(data[field])
+        if data[field] is not None and not _GIT_COMMIT_PATTERN.fullmatch(data[field])
     )
     if invalid_commits:
         raise RuntimeError(
@@ -307,8 +303,7 @@ def load_build_info(path: Optional[Path] = None) -> Dict[str, Any]:
     for field in ("vendored_triton_commit", "expected_llvm_project_commit"):
         if not _GIT_COMMIT_PATTERN.fullmatch(data[field]):
             raise RuntimeError(
-                f"triton-anchor build info '{field}' must be a 40-character "
-                "git commit"
+                f"triton-anchor build info '{field}' must be a 40-character git commit"
             )
 
     fingerprint_schema = data["core_abi_fingerprint_schema"]
@@ -350,8 +345,7 @@ def load_build_info(path: Optional[Path] = None) -> Dict[str, Any]:
             )
     elif data["generated"] and material is not None:
         raise RuntimeError(
-            "triton-anchor generated build info is missing its Core ABI "
-            "fingerprint"
+            "triton-anchor generated build info is missing its Core ABI fingerprint"
         )
 
     if not data["generated"] and (

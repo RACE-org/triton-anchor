@@ -82,14 +82,10 @@ class Conflict:
             conflict_kind=self.kind.value,
             claim=self.claim,
             related_plugin_ids=(
-                self.plugin_ids
-                if related_plugin_ids is None
-                else related_plugin_ids
+                self.plugin_ids if related_plugin_ids is None else related_plugin_ids
             ),
             related_record_ids=(
-                self.record_ids
-                if related_record_ids is None
-                else related_record_ids
+                self.record_ids if related_record_ids is None else related_record_ids
             ),
             detail=(
                 f"kind={self.kind.value}; severity={self.severity.value}; "
@@ -111,8 +107,7 @@ class ConflictReport:
     @property
     def has_fatal(self) -> bool:
         return any(
-            conflict.severity is ConflictSeverity.FATAL
-            for conflict in self.conflicts
+            conflict.severity is ConflictSeverity.FATAL for conflict in self.conflicts
         )
 
     @property
@@ -149,9 +144,7 @@ class ConflictReport:
             "ok": self.ok,
             "has_fatal": self.has_fatal,
             "requires_selection": self.requires_selection,
-            "conflicts": [
-                conflict.to_dict() for conflict in self.conflicts
-            ],
+            "conflicts": [conflict.to_dict() for conflict in self.conflicts],
         }
 
     def raise_for_fatal(self) -> None:
@@ -196,20 +189,14 @@ def _project_record(record: Any) -> _RecordView:
         )
 
     plugin_id = _optional_string(getattr(record, "plugin_id", None))
-    entry_point_name = _optional_string(
-        getattr(record, "entry_point_name", None)
-    )
+    entry_point_name = _optional_string(getattr(record, "entry_point_name", None))
 
     manifest = getattr(record, "manifest", None)
     raw_targets = getattr(manifest, "targets", ()) if manifest is not None else ()
     try:
         targets = tuple(
             sorted(
-                {
-                    target
-                    for target in raw_targets
-                    if isinstance(target, str) and target
-                }
+                {target for target in raw_targets if isinstance(target, str) and target}
             )
         )
     except TypeError as exc:
@@ -250,9 +237,7 @@ def _project_record(record: Any) -> _RecordView:
                     {
                         symbol
                         for artifact in artifacts
-                        for symbol in getattr(
-                            artifact, "exported_symbols", ()
-                        )
+                        for symbol in getattr(artifact, "exported_symbols", ())
                         if isinstance(symbol, str) and symbol
                     }
                 )
@@ -293,11 +278,7 @@ def _record_metadata(
         tuple(sorted(record.record_id for record in records)),
         tuple(
             sorted(
-                {
-                    record.plugin_id
-                    for record in records
-                    if record.plugin_id is not None
-                }
+                {record.plugin_id for record in records if record.plugin_id is not None}
             )
         ),
         tuple(
@@ -332,26 +313,24 @@ def _new_conflict(
     elif kind is ConflictKind.TARGET_OVERLAP:
         message = (
             f"Target '{claim}' has multiple backend candidates and requires "
-            "selection: "
-            + ", ".join(record_ids)
+            "selection: " + ", ".join(record_ids)
         )
     elif kind is ConflictKind.DUPLICATE_NATIVE_IDENTITY:
         message = (
-            "Multiple in-process backend native libraries claim SONAME "
-            "'{}': ".format(claim)
+            "Multiple in-process backend native libraries claim SONAME '{}': ".format(
+                claim
+            )
             + ", ".join(record_ids)
         )
     elif kind is ConflictKind.DUPLICATE_EXPORTED_SYMBOL:
         message = (
-            "Multiple in-process backend native libraries export symbol "
-            "'{}': ".format(claim)
+            "Multiple in-process backend native libraries export symbol '{}': ".format(
+                claim
+            )
             + ", ".join(record_ids)
         )
     else:
-        message = (
-            "Multiple backend plugin records are ACTIVE: "
-            + ", ".join(record_ids)
-        )
+        message = "Multiple backend plugin records are ACTIVE: " + ", ".join(record_ids)
     return Conflict(
         kind=kind,
         severity=severity,
@@ -416,19 +395,19 @@ def detect_conflicts(records: Iterable[Any]) -> ConflictReport:
     ``record_id`` is rejected as malformed input rather than reported as a
     plugin conflict because record IDs are the identities used in diagnostics.
     """
-    views = tuple(sorted((_project_record(record) for record in records),
-                         key=lambda record: record.record_id))
+    views = tuple(
+        sorted(
+            (_project_record(record) for record in records),
+            key=lambda record: record.record_id,
+        )
+    )
     record_ids = [record.record_id for record in views]
     if len(record_ids) != len(set(record_ids)):
-        raise ValueError(
-            "Conflict analysis requires unique record_id values"
-        )
+        raise ValueError("Conflict analysis requires unique record_id values")
 
     conflicts: List[Conflict] = []
 
-    for plugin_id, claimants in sorted(
-        _group_by(views, "plugin_id").items()
-    ):
+    for plugin_id, claimants in sorted(_group_by(views, "plugin_id").items()):
         if len(claimants) > 1:
             conflicts.append(
                 _new_conflict(
@@ -439,9 +418,7 @@ def detect_conflicts(records: Iterable[Any]) -> ConflictReport:
                 )
             )
 
-    for entry_point, claimants in sorted(
-        _group_by(views, "entry_point_name").items()
-    ):
+    for entry_point, claimants in sorted(_group_by(views, "entry_point_name").items()):
         if len(claimants) > 1:
             conflicts.append(
                 _new_conflict(

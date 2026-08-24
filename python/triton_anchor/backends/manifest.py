@@ -256,8 +256,7 @@ def unsupported_isolation_mode_error(
     """Build the Protocol 1.0 structural isolation rejection."""
     actual_text = stable_manifest_actual(actual)
     return BackendPluginManifestError(
-        "Backend Plugin Protocol 1.0 only supports isolation_mode "
-        "'python_only'",
+        "Backend Plugin Protocol 1.0 only supports isolation_mode 'python_only'",
         plugin_id=plugin_id,
         entry_point=entry_point,
         field="isolation_mode",
@@ -400,9 +399,7 @@ class BackendManifestDocument:
     )
 
     def get_by_entry_point(self, name: str) -> BackendPluginManifest:
-        matches = tuple(
-            plugin for plugin in self.plugins if plugin.entry_point == name
-        )
+        matches = tuple(plugin for plugin in self.plugins if plugin.entry_point == name)
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
@@ -412,9 +409,7 @@ class BackendManifestDocument:
                 field="plugins[].entry_point",
                 expected="one record matching the installed entry point",
                 actual=str(len(matches)),
-                remediation=(
-                    "Give every Manifest plugin record a unique entry_point."
-                ),
+                remediation=("Give every Manifest plugin record a unique entry_point."),
             )
         raise BackendPluginManifestError(
             f"Manifest does not declare backend entry point '{name}'",
@@ -441,7 +436,10 @@ class BackendManifestDocument:
 
 def _is_non_empty_string(value: Any) -> bool:
     """Mirror the Schema 1.x nonEmptyString acceptance predicate."""
-    return isinstance(value, str) and _NON_EMPTY_STRING_PATTERN.fullmatch(value) is not None
+    return (
+        isinstance(value, str)
+        and _NON_EMPTY_STRING_PATTERN.fullmatch(value) is not None
+    )
 
 
 def _validated_string(
@@ -470,9 +468,7 @@ def _validated_string(
             "without surrounding whitespace or line breaks",
             plugin_id=plugin_id,
             field=field_name,
-            expected=(
-                "a non-empty string without surrounding whitespace, CR, or LF"
-            ),
+            expected=("a non-empty string without surrounding whitespace, CR, or LF"),
             actual=stable_manifest_actual(value),
             remediation=(
                 f"Set '{field_name}' to a non-empty string without surrounding "
@@ -488,9 +484,7 @@ def _required_string(
     *,
     plugin_id: Optional[str] = None,
 ) -> str:
-    value = _validated_string(
-        data, field_name, required=True, plugin_id=plugin_id
-    )
+    value = _validated_string(data, field_name, required=True, plugin_id=plugin_id)
     assert value is not None
     return value
 
@@ -501,9 +495,7 @@ def _optional_string(
     *,
     plugin_id: Optional[str] = None,
 ) -> Optional[str]:
-    return _validated_string(
-        data, field_name, required=False, plugin_id=plugin_id
-    )
+    return _validated_string(data, field_name, required=False, plugin_id=plugin_id)
 
 
 def _optional_commit(
@@ -535,9 +527,7 @@ def _optional_abi_fingerprint(
     *,
     plugin_id: Optional[str] = None,
 ) -> Optional[str]:
-    value = _optional_string(
-        data, "abi_fingerprint", plugin_id=plugin_id
-    )
+    value = _optional_string(data, "abi_fingerprint", plugin_id=plugin_id)
     if value is None:
         return None
     if not _ABI_FINGERPRINT_PATTERN.fullmatch(value):
@@ -627,9 +617,7 @@ def _string_tuple(
     return normalized
 
 
-def _parse_triton_requirement(
-    value: Any, plugin_id: str
-) -> TritonRequirement:
+def _parse_triton_requirement(value: Any, plugin_id: str) -> TritonRequirement:
     if not isinstance(value, dict):
         raise BackendPluginManifestError(
             "Manifest field 'requires_triton' must be an object",
@@ -642,9 +630,7 @@ def _parse_triton_requirement(
                 "{'version': '==<triton-version>'}."
             ),
         )
-    version = _required_version_string(
-        value, "version", plugin_id=plugin_id
-    )
+    version = _required_version_string(value, "version", plugin_id=plugin_id)
     commit = _optional_commit(value, "commit", plugin_id=plugin_id)
     return TritonRequirement(
         version=version,
@@ -696,9 +682,7 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
     backend_protocol = _required_version_string(
         data, "backend_protocol", plugin_id=plugin_id
     )
-    isolation_value = _required_string(
-        data, "isolation_mode", plugin_id=plugin_id
-    )
+    isolation_value = _required_string(data, "isolation_mode", plugin_id=plugin_id)
     if isolation_value != PluginIsolationMode.PYTHON_ONLY.value:
         raise unsupported_isolation_mode_error(
             isolation_value,
@@ -728,13 +712,8 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
                 "present in the wheel RECORD."
             ),
         )
-    abi_fingerprint = _optional_abi_fingerprint(
-        data, plugin_id=plugin_id
-    )
-    if (
-        isolation_mode is PluginIsolationMode.PYTHON_ONLY
-        and "native_libraries" in data
-    ):
+    abi_fingerprint = _optional_abi_fingerprint(data, plugin_id=plugin_id)
+    if isolation_mode is PluginIsolationMode.PYTHON_ONLY and "native_libraries" in data:
         raise BackendPluginManifestError(
             "python_only plugins cannot declare native_libraries",
             plugin_id=plugin_id,
@@ -746,10 +725,7 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
                 "backend distribution."
             ),
         )
-    if (
-        isolation_mode is PluginIsolationMode.PYTHON_ONLY
-        and "abi_fingerprint" in data
-    ):
+    if isolation_mode is PluginIsolationMode.PYTHON_ONLY and "abi_fingerprint" in data:
         raise BackendPluginManifestError(
             "python_only plugins cannot declare abi_fingerprint",
             plugin_id=plugin_id,
@@ -809,9 +785,7 @@ def _parse_plugin(data: Any) -> BackendPluginManifest:
         requires_mlir_commit=_optional_commit(
             data, "requires_mlir_commit", plugin_id=plugin_id
         ),
-        targets=_string_tuple(
-            data, "targets", required=True, plugin_id=plugin_id
-        ),
+        targets=_string_tuple(data, "targets", required=True, plugin_id=plugin_id),
         capabilities=_string_tuple(
             data, "capabilities", required=False, plugin_id=plugin_id
         ),
@@ -894,16 +868,13 @@ def _invalid_version_specifier_error(
         SpecifierSet(value)
     except InvalidSpecifier:
         return BackendPluginManifestError(
-            f"Manifest field '{field_name}' has invalid version specifier "
-            f"'{value}'",
+            f"Manifest field '{field_name}' has invalid version specifier '{value}'",
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             field=field_name,
             expected="a valid PEP 440 version specifier",
             actual=value,
-            remediation=(
-                f"Replace '{field_name}' with a valid PEP 440 specifier."
-            ),
+            remediation=(f"Replace '{field_name}' with a valid PEP 440 specifier."),
         )
     return None
 
@@ -1108,9 +1079,7 @@ def load_distribution_manifest(
         )
     files: Sequence[Any] = files_value
     candidates = [
-        file
-        for file in files
-        if PurePosixPath(str(file)).name == MANIFEST_FILENAME
+        file for file in files if PurePosixPath(str(file)).name == MANIFEST_FILENAME
     ]
     if not candidates:
         return None
@@ -1120,9 +1089,7 @@ def load_distribution_manifest(
             field=MANIFEST_FILENAME,
             expected="exactly one Manifest file per distribution",
             actual=str(len(candidates)),
-            remediation=(
-                "Package exactly one backend Manifest in the distribution."
-            ),
+            remediation=("Package exactly one backend Manifest in the distribution."),
         )
 
     try:
@@ -1130,8 +1097,7 @@ def load_distribution_manifest(
     except (AttributeError, OSError, TypeError, ValueError) as exc:
         error_type = _stable_runtime_type_name(exc)
         raise BackendPluginManifestError(
-            "Unable to locate the distribution Manifest recorded by "
-            "installed metadata",
+            "Unable to locate the distribution Manifest recorded by installed metadata",
             field=MANIFEST_FILENAME,
             expected="an installed readable Manifest path",
             actual=f"<error: {error_type}>",

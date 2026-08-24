@@ -94,9 +94,7 @@ def evaluate_capabilities(
 
     core_set = set(core)
     kernel_available = tuple(sorted(core_set.union(provided)))
-    missing_for_plugin = tuple(
-        sorted(set(required_by_plugin).difference(core_set))
-    )
+    missing_for_plugin = tuple(sorted(set(required_by_plugin).difference(core_set)))
     missing_for_kernel = tuple(
         sorted(set(required_by_kernel).difference(kernel_available))
     )

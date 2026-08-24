@@ -5,6 +5,7 @@ Builds the embedded triton-shared frontend/core as libtriton.so plus
 triton-shared-opt, then packages it together with the triton_anchor Python
 orchestration layer.
 """
+
 import hashlib
 import json
 import os
@@ -18,9 +19,6 @@ import sysconfig
 import warnings
 from pathlib import Path
 
-#Suppress annoying setuptools warnings about C++ header directories looking like Python packages
-warnings.filterwarnings("ignore", message=".*is absent from the `packages` configuration.*")
-
 import pybind11
 from setuptools import Extension, setup, find_namespace_packages
 from setuptools.command.build_ext import build_ext
@@ -30,6 +28,11 @@ try:
     from setuptools.command.bdist_wheel import bdist_wheel
 except ImportError:
     from wheel.bdist_wheel import bdist_wheel
+
+# Suppress setuptools warnings about C++ header directories looking like packages.
+warnings.filterwarnings(
+    "ignore", message=".*is absent from the `packages` configuration.*"
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -96,9 +99,7 @@ def _read_cmake_cache(cmake_dir):
 
 
 def _read_compiler_info(cmake_dir):
-    compiler_files = sorted(
-        Path(cmake_dir).glob("CMakeFiles/*/CMakeCXXCompiler.cmake")
-    )
+    compiler_files = sorted(Path(cmake_dir).glob("CMakeFiles/*/CMakeCXXCompiler.cmake"))
     if not compiler_files:
         return None, None
     compiler_file = compiler_files[-1]
@@ -170,8 +171,7 @@ def _read_cxx11_abi(cache):
         return None
 
     build_type = (
-        cache.get("CMAKE_BUILD_TYPE")
-        or os.environ.get("CMAKE_BUILD_TYPE", "Release")
+        cache.get("CMAKE_BUILD_TYPE") or os.environ.get("CMAKE_BUILD_TYPE", "Release")
     ).upper()
     raw_flags = " ".join(
         value
@@ -264,9 +264,7 @@ def _compute_core_abi_fingerprint(build_info):
 def collect_build_info(cmake_dir=None, core_library=None):
     """Collect reproducible build metadata without recording host paths."""
     base_dir = BASE_DIR
-    cmake_dir = (
-        Path(cmake_dir) if cmake_dir is not None else get_cmake_build_dir()
-    )
+    cmake_dir = Path(cmake_dir) if cmake_dir is not None else get_cmake_build_dir()
     cache = _read_cmake_cache(cmake_dir)
     compiler_id, compiler_version = _read_compiler_info(cmake_dir)
 
@@ -279,8 +277,10 @@ def collect_build_info(cmake_dir=None, core_library=None):
         r"^# Commit:\s*([0-9a-fA-F]+)\s*$",
     )
     expected_llvm_commit = (
-        base_dir / "triton" / "cmake" / "llvm-hash.txt"
-    ).read_text(encoding="utf-8").strip()
+        (base_dir / "triton" / "cmake" / "llvm-hash.txt")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
 
     llvm_dir = cache.get("LLVM_DIR")
     mlir_dir = cache.get("MLIR_DIR")
@@ -297,9 +297,7 @@ def collect_build_info(cmake_dir=None, core_library=None):
         "backend_protocol_version": VERSION_CONSTANTS[
             "BACKEND_PLUGIN_PROTOCOL_VERSION"
         ],
-        "manifest_schema_version": VERSION_CONSTANTS[
-            "BACKEND_MANIFEST_SCHEMA_VERSION"
-        ],
+        "manifest_schema_version": VERSION_CONSTANTS["BACKEND_MANIFEST_SCHEMA_VERSION"],
         "triton_version": triton_version,
         "vendored_triton_commit": triton_commit,
         "expected_llvm_project_commit": expected_llvm_commit,
@@ -343,9 +341,7 @@ def write_build_info(destination, cmake_dir=None, core_library=None):
 
 def get_cmake_build_dir() -> Path:
     return Path(
-        os.environ.get(
-            "TRITON_ANCHOR_CMAKE_BUILD_DIR", BASE_DIR / DEFAULT_BUILD_SUBDIR
-        )
+        os.environ.get("TRITON_ANCHOR_CMAKE_BUILD_DIR", BASE_DIR / DEFAULT_BUILD_SUBDIR)
     ).resolve()
 
 
@@ -502,8 +498,9 @@ class CMakeBuild(build_ext):
         if os.environ.get("TRITON_EXTRA_LLVM_TARGETS"):
             # Parse env var with flexible delimiters (space, semicolon, colon)
             import re
+
             targets_str = os.environ.get("TRITON_EXTRA_LLVM_TARGETS")
-            targets = re.split(r'[;\s:]+', targets_str.strip())
+            targets = re.split(r"[;\s:]+", targets_str.strip())
             targets = [t for t in targets if t]  # Filter empty strings
             # CMake expects a semicolon-separated list as a single argument
             cmake_args.append(f"-DTRITON_EXTRA_LLVM_TARGETS={';'.join(targets)}")

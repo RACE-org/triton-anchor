@@ -76,9 +76,7 @@ class ProtocolFieldStatus(str, Enum):
     ACCEPTED_WITH_DEPRECATION_DIAGNOSTIC = (
         "accepted_with_structured_deprecation_diagnostic"
     )
-    EXPLICIT_PROTOCOL_INCOMPATIBILITY = (
-        "explicit_protocol_incompatibility"
-    )
+    EXPLICIT_PROTOCOL_INCOMPATIBILITY = "explicit_protocol_incompatibility"
     COMPATIBLE = "compatible"
     FORBIDDEN = "forbidden"
 
@@ -107,9 +105,7 @@ class ProtocolFieldPolicy:
             else None
         )
         removed = (
-            _protocol_version(self.removed_in)
-            if self.removed_in is not None
-            else None
+            _protocol_version(self.removed_in) if self.removed_in is not None else None
         )
         if deprecated is not None and deprecated < introduced:
             raise ValueError("Protocol field cannot be deprecated before introduction")
@@ -119,7 +115,9 @@ class ProtocolFieldPolicy:
             if removed <= deprecated:
                 raise ValueError("Protocol field removal must follow deprecation")
             if removed.major <= introduced.major:
-                raise ValueError("Protocol field removal requires a later major version")
+                raise ValueError(
+                    "Protocol field removal requires a later major version"
+                )
 
 
 @dataclass(frozen=True)
@@ -204,9 +202,7 @@ def consume_protocol_field(
     consumer_version = _protocol_version(consumer_protocol_version)
     introduced_version = _protocol_version(policy.introduced_in)
     removed_version = (
-        _protocol_version(policy.removed_in)
-        if policy.removed_in is not None
-        else None
+        _protocol_version(policy.removed_in) if policy.removed_in is not None else None
     )
     deprecated_version = (
         _protocol_version(policy.deprecated_in)
@@ -215,9 +211,7 @@ def consume_protocol_field(
     )
 
     if producer_version.major != consumer_version.major:
-        expected = (
-            f">={consumer_version.major}.0,<{consumer_version.major + 1}.0"
-        )
+        expected = f">={consumer_version.major}.0,<{consumer_version.major + 1}.0"
         error = BackendPluginProtocolError(
             expected,
             producer_protocol_version,

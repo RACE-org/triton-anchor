@@ -284,9 +284,7 @@ def validate_triton_requirement(
     plugin: BackendPluginManifest, environment: CoreEnvironment
 ) -> CompatibilityReport:
     """Validate the W3 Triton version and optional exact commit example."""
-    checks = list(
-        validate_triton_version_requirement(plugin, environment).checks
-    )
+    checks = list(validate_triton_version_requirement(plugin, environment).checks)
     if plugin.requires_triton.commit is not None:
         checks.append(
             _exact_check(
@@ -343,8 +341,7 @@ def _distribution_wheel_tags(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Install the backend from a wheel containing one or more Tag "
-                "headers."
+                "Install the backend from a wheel containing one or more Tag headers."
             ),
         )
 
@@ -381,7 +378,9 @@ def _validate_distribution_platform(
     supported_tags: Optional[Iterable[Tag]],
 ) -> CompatibilityCheck:
     wheel_tags = _distribution_wheel_tags(plugin, distribution)
-    current_tags = set(supported_tags) if supported_tags is not None else set(sys_tags())
+    current_tags = (
+        set(supported_tags) if supported_tags is not None else set(sys_tags())
+    )
     actual = ",".join(sorted(str(tag) for tag in wheel_tags))
     if wheel_tags.isdisjoint(current_tags):
         raise BackendPluginCompatibilityError(
@@ -391,8 +390,7 @@ def _validate_distribution_platform(
             plugin_id=plugin.plugin_id,
             entry_point=plugin.entry_point,
             remediation=(
-                "Install a backend wheel built for the current Python ABI and "
-                "platform."
+                "Install a backend wheel built for the current Python ABI and platform."
             ),
         )
     return CompatibilityCheck(
