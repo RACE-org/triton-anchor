@@ -5,9 +5,9 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, triton_v3.6]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, triton_v3.6]
 
 # 同一分支上新的推送自动取消旧的运行
 concurrency:
@@ -23,9 +23,13 @@ jobs:
   lint:
     name: "Lint & Style"
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
+          # Pull requests must lint the event head, never GitHub's synthetic merge SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           submodules: false          # 不拉取 triton submodule
 
       - uses: actions/setup-python@v5
@@ -33,13 +37,21 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install lint tools
-        run: pip install ruff
+        run: pip install 'ruff==0.15.22' 'tomli==2.2.1'
 
-      - name: Ruff check (lint)
-        run: ruff check python/ tests/ --output-format=github
+      - name: Run deterministic T6.3 Ruff release gates
+        env:
+          PRODUCTION_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          T63_RUFF_EVIDENCE_DIR: ${{ runner.temp }}/t63-ruff-evidence
+        run: bash scripts/run_t63_ruff_gates.sh
 
-      - name: Ruff format check
-        run: ruff format --check python/ tests/
+      - name: Upload Ruff gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t63-ruff-evidence
+          path: ${{ runner.temp }}/t63-ruff-evidence
+          if-no-files-found: error
 
   # ───────────── Job 2: Pure-Python unit tests ────────────────
   unit-test:
@@ -47,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
         with:

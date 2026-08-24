@@ -1,0 +1,211 @@
+{
+  "manifest_schema": "triton-anchor-t63-common-acceptance-baseline-v1",
+  "captured_at_utc": "2026-08-21T03:03:09.249414+00:00",
+  "purpose": "Freeze the independent pre-remediation Triton 3.6 T6.3 common-governance baseline without changing production code.",
+  "source": {
+    "repository": "/home/dingbl/race_workspace/triton-anchor-t63-v3.6",
+    "initial_branch": "port/t6.3-triton-v3.6",
+    "baseline_branch": "fix/t6.3-v3.6-common-governance",
+    "production_head": "735f9ee357e1e698e81785b002c1b39c925008af",
+    "target_baseline_ref": "upstream/triton_v3.6",
+    "target_baseline_commit": "9ceba3e222fd2c9af9cbaf6a440beb23911c197b",
+    "original_t63_commit": "b85a506656bf58b70e6093e7d48adcd6a2908f64",
+    "expected_port_commits": [
+      "498e607",
+      "735f9ee"
+    ],
+    "production_files_modified": false
+  },
+  "versions": {
+    "core": "0.2.0",
+    "backend_plugin_protocol": "1.0",
+    "manifest_schema": "1.0",
+    "triton": "3.6.0",
+    "vendored_triton_commit": "6cc4505027d7b39fe18a44a7f89085b8babb7400",
+    "llvm_commit": "a992f29451b9e140424f35ac5e20177db4afbdc0",
+    "llvm_mlir_version_fixture": "22.0.0git"
+  },
+  "scope": {
+    "class_a_included": [
+      "Registry compatibility, selection, concurrency, and reset semantics",
+      "Manifest Schema/parser structural oracle",
+      "Python lifecycle contract",
+      "native static integrity and ABI gap witnesses",
+      "fake and real entry-point pre-import sentinels"
+    ],
+    "class_b_excluded": [
+      "compiler/driver abstract surfaces and GPUTarget",
+      "public-backend adapters",
+      "Legacy automatic compatibility",
+      "exact Core wheel payload and generated full-profile layout",
+      "Triton-version-specific integration and hardware JIT"
+    ],
+    "t10_2_excluded": true
+  },
+  "v3_3_design_source": {
+    "test_commit": "fe8f2253c365f9d8799cade6428b7efebbc9b90c",
+    "use": "requirements and test-design reference only",
+    "tests_import_v3_3_worktree": false,
+    "v3_3_wheel_used": false,
+    "v3_3_llvm_build_used": false,
+    "v3_3_junit_or_pass_used": false
+  },
+  "test_files_sha256": {
+    "run_logged.py": "9150a8b4ce6f3195d6df2044c2cd924b42886f530036a31985aa2d9e989d213e",
+    "test_registry_acceptance.py": "a71ca1e4d968041700dae70b41c270cca8319f131ac774f00da62c96878868c0",
+    "test_schema_oracle_acceptance.py": "2bd5a96ffe6aa47720c3cf18ea28e5d063ff13eac67f3cbd863c05810f472ce4",
+    "test_native_abi_acceptance.py": "5cfc8285c33544b327e158b492fabbe024f340484f060b5b9715fa6bf8b35a15",
+    "test_packaging_entrypoint_e2e.py": "a43999ec29509e11d382285b3e0441da377a79f929d502fba8dbf17ef3e14e28"
+  },
+  "hash_scope": "Executable common acceptance files only; README and this self-referential manifest are excluded.",
+  "evidence": {
+    "environment_log": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/phase1-environment.log",
+      "sha256": "3c1ffed48254e8d0aad2f82c3a2a1bf457ec6b4ad2ac34fed5b5e302926714fa"
+    },
+    "baseline_log": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/phase1-common-baseline.log",
+      "sha256": "48b615741790767ca82e9c3ee43b80abfac51501f1fee09fe0fed41876b00e92"
+    },
+    "baseline_junit": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/phase1-common-baseline.xml",
+      "sha256": "b2ce90b5dfaad42c9fc9eae709f8d98970533b684c2291becb3efe5addc3062a"
+    },
+    "pytest_cache": "/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/pytest-cache-phase1-common-baseline",
+    "pytest_basetemp": "/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/pytest-tmp-phase1-common-baseline"
+  },
+  "environment": {
+    "python": "3.12.3",
+    "python_executable": "/home/dingbl/race_workspace/t63-v36-acceptance-venv/bin/python",
+    "pytest": "9.1.1",
+    "jsonschema": "4.26.0",
+    "packaging": "26.3",
+    "cmake": "4.3.4",
+    "ninja": "1.13.0.git.kitware.jobserver-pipe-1",
+    "c_compiler": "GCC 13.3.0",
+    "cxx_compiler": "G++ 13.3.0",
+    "binutils": "2.42",
+    "pythonpath": [
+      "$REPOSITORY/python",
+      "$REPOSITORY/triton/python"
+    ],
+    "source_triton_anchor": "$REPOSITORY/python/triton_anchor/__init__.py",
+    "source_triton_spec": "$REPOSITORY/triton/python/triton/__init__.py",
+    "triton_import": "FAIL: source tree has no matching built triton._C.libtriton; classified as an excluded wheel/version-specific environment issue",
+    "unset_loader_environment": [
+      "T63_CORE_WHEEL",
+      "TRITON_PASS_PLUGIN_PATH",
+      "LLVM_PASS_PLUGIN_PATH"
+    ]
+  },
+  "invocation": {
+    "exit_code": 1,
+    "cwd": "/home/dingbl/race_workspace/triton-anchor-t63-v3.6",
+    "argv": [
+      "/home/dingbl/race_workspace/t63-v36-acceptance-venv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "python/triton_anchor/tests",
+      "tests/acceptance_t63/test_registry_acceptance.py",
+      "tests/acceptance_t63/test_schema_oracle_acceptance.py",
+      "tests/acceptance_t63/test_native_abi_acceptance.py",
+      "tests/acceptance_t63/test_packaging_entrypoint_e2e.py",
+      "-ra",
+      "--basetemp=/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/pytest-tmp-phase1-common-baseline",
+      "--junitxml=/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/phase1-common-baseline.xml",
+      "-o",
+      "cache_dir=/home/dingbl/race_workspace/reports/t6.3-v3.6-evidence/pytest-cache-phase1-common-baseline"
+    ],
+    "required_environment": {
+      "PYTHONPATH": "$REPOSITORY/python:$REPOSITORY/triton/python",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONNOUSERSITE": "1",
+      "T63_CORE_WHEEL": "unset",
+      "TRITON_PASS_PLUGIN_PATH": "unset",
+      "LLVM_PASS_PLUGIN_PATH": "unset"
+    }
+  },
+  "result": {
+    "conclusion": "FAIL",
+    "collected": 157,
+    "pytest_raw": {
+      "passed": 150,
+      "failed": 7,
+      "errors": 0,
+      "skipped": 0
+    },
+    "acceptance_semantic": {
+      "pass": 147,
+      "fail": 7,
+      "blocked": 0,
+      "spec_gap": 3,
+      "not_run": 0
+    }
+  },
+  "failed_nodes": [
+    {
+      "defect": "F1",
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_every_simultaneous_compatibility_failure"
+    },
+    {
+      "defect": "F2",
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_rejects_non_none_initialize_return_value"
+    },
+    {
+      "defect": "F2",
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_shutdown_hook_contract[noncallable]"
+    },
+    {
+      "defect": "F2",
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_shutdown_hook_contract[wrong_return]"
+    },
+    {
+      "defect": "F2",
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_diagnostics_hook_contract[noncallable]"
+    },
+    {
+      "defect": "F2",
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_diagnostics_hook_contract[wrong_return]"
+    },
+    {
+      "defect": "F3",
+      "nodeid": "tests/acceptance_t63/test_schema_oracle_acceptance.py::test_public_parser_rejects_value_forbidden_by_shipped_schema"
+    }
+  ],
+  "spec_gaps": {
+    "semantic_test_nodes": [
+      "tests/acceptance_t63/test_native_abi_acceptance.py::test_native_required_symbol_name_is_not_defined_by_manifest_1_0",
+      "tests/acceptance_t63/test_native_abi_acceptance.py::test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0",
+      "tests/acceptance_t63/test_native_abi_acceptance.py::test_native_static_inspection_does_not_prove_dlopen_success"
+    ],
+    "additional_requirement_level": [
+      "capability identifier to concrete-interface semantics",
+      "priority bounds and cross-vendor tie semantics",
+      "versioned subprocess IPC/IR contract",
+      "reader/writer compatibility window for required/deprecated/removed fields",
+      "diagnostics introduction and deprecation timeline",
+      "full Schema/parser differential domain beyond the initial newline witness"
+    ]
+  },
+  "sentinels": {
+    "fake_entry_point_pre_import": "PASS",
+    "real_path_distribution_pre_import": "PASS",
+    "native_pre_dlopen": "SPEC GAP"
+  },
+  "v3_3_comparison": {
+    "reference_only": true,
+    "same": "The independently executed v3.6 common subset reproduced the same seven defect categories/nodes and three native specification-gap themes.",
+    "different": "The v3.6 run has its own 157-node A-only collection, 3.6/LLVM 22 pins, interpreter, temp tree, log, and JUnit; it excludes the v3.3 exact-wheel, Legacy, compiler/driver, and hardware nodes.",
+    "v3_3_results_are_acceptance_evidence": false
+  },
+  "audit": {
+    "developer_machine_absolute_import_paths_in_tests": [],
+    "v3_3_worktree_imports": [],
+    "t10_2_or_conformance_imports": [],
+    "xfail_nodes": [],
+    "failure_tests_removed_relaxed_or_skipped": false,
+    "cache_inside_worktree": false,
+    "test_temporary_distributions_inside_worktree": false
+  }
+}

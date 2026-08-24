@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib
 import json
 from .._C.libtriton import get_cache_invalidating_env_vars, ir
-from ..backends import backends
+from ..backends import make_backend as _make_selected_backend
 from ..backends.compiler import Language
 from ..backends.compiler import BaseBackend, GPUTarget
 from .. import __version__, knobs
@@ -74,7 +74,10 @@ class ASTSource:
 
     def hash(self):
         sorted_sig = [v for k, v in sorted(self.signature.items())]
-        get_key = lambda x: x.cache_key if hasattr(x, "cache_key") else str(x)
+
+        def get_key(x):
+            return x.cache_key if hasattr(x, "cache_key") else str(x)
+
         constants_key = "-".join(
             [get_key(v) for k, v in sorted(self.constants.items())]
         )
@@ -385,14 +388,7 @@ def compile(src, target=None, options=None, _env_vars=None):
 
 
 def make_backend(target: GPUTarget) -> BaseBackend:
-    actives = [
-        x.compiler for x in backends.values() if x.compiler.supports_target(target)
-    ]
-    if len(actives) != 1:
-        raise RuntimeError(
-            f"{len(actives)} compatible backends for target ({target.backend}) ({actives}). There should only be one."
-        )
-    return actives[0](target)
+    return _make_selected_backend(target)
 
 
 class LazyDict:
