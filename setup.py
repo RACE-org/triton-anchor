@@ -557,7 +557,9 @@ setup(
     packages=(
         find_namespace_packages(where="triton/python", include=["triton", "triton.*"])
         + find_namespace_packages(
-            where="python", include=["triton_anchor", "triton_anchor.*"]
+            where="python",
+            include=["triton_anchor", "triton_anchor.*"],
+            exclude=["triton_anchor.tests", "triton_anchor.tests.*"],
         )
     ),
     install_requires=["packaging>=21"],
