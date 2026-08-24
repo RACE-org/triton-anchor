@@ -1,23 +1,22 @@
-# ADR-0002 Conformance Annex：T6.3 / Triton 3.6 发布门禁候选证据
+# ADR-0002 Conformance Annex：T6.3 / Triton 3.6 发布门禁最终绑定
 
-- Annex 状态：**Second fresh rerun proposed evidence — pending new evidence commit and binding review**
+- Annex 状态：**Final binding accepted**
 - ADR 决策状态：`APPROVED`
-- 实现绑定：`UNBOUND`
-- Release 状态：**NOT ACCEPTED**
+- 实现绑定：`BOUND`
+- Release 状态：**CONDITIONAL PASS**
 - 证据日期：2026-08-24
 - 适用 ADR：`0002-t63-triton-v36-release-gates.md`
 - `PRODUCTION_CANDIDATE_SHA`：`b06daeb4042aa61e4c729bf05198e523ae368622`
 - `PRODUCTION_CANDIDATE_TREE`：`74d8b6b8e863cc0474618e556ce78b0b3adfa10b`
-- `EVIDENCE_COMMIT_SHA`：`PENDING_BINDING`
-- 上一轮 docs-only evidence commit：`6bbc65d6933633b0ba5ae4822dfbe1e487e261b9`
+- `EVIDENCE_COMMIT_SHA`：`1f3ec300da7a2f4e3ac23d02d59b500a4ce49377`
+- 被第二轮 `E` 替换的旧 evidence commit：`6bbc65d6933633b0ba5ae4822dfbe1e487e261b9`
 - 硬件分类：`BLOCKED`
-- 当前结论：**所有必需软件执行门禁 PASS；等待第二次绑定确认**
+- 当前结论：**所有必需软件执行门禁 PASS；最终分类 CONDITIONAL PASS**
 
-> 当前 tracked annex 来自上一轮 docs-only `E=6bbc65d…`；该提交不是第二轮 fresh evidence
-> commit，不能被本轮绑定。本文更新后仍须形成满足 ADR topology 的新 docs-only `E`，且不
-> 自写 `E` 或 `A` 的 commit SHA。发布责任人确认 exact candidate、artifact、新 `E` 与本轮
-> fresh evidence 后，才允许由 `A` 写入 `EVIDENCE_COMMIT_SHA=E`，把 ADR 改为
-> `APPROVED + BOUND / Accepted`。
+> Evidence commit `E=1f3ec300da7a2f4e3ac23d02d59b500a4ce49377` 冻结候选
+> `I`、wheel 与 fresh evidence。本 binding commit `A` 只更新这份 annex 的绑定
+> 状态；文档绑定 `I` 与 `E`，不自写 `A` 的 commit SHA。`A` 的完整 SHA
+> 由提交后的机械验证和最终报告记录。
 
 ## 1. 结论与状态边界
 
@@ -28,13 +27,13 @@
 | `QA-CI-001` | PASS | Ruff 0.15.22 真实四门、CI policy 与 100 个回归节点全部通过 |
 | `AUTH-F4/F5/F6` | CLOSED | 第一次批准已关闭规范设计缺口，当前实现测试通过 |
 | `PKG-TESTS` | CLOSED | production wheel 与 RECORD 中 tests member 为 0 |
-| `AUTH-SHA` | **SPEC GAP** | 仍需发布责任人第二次确认 `I`、`E`、wheel 与新鲜证据 |
+| `AUTH-SHA` | **CLOSED** | 发布责任人已精确确认 `I`、`E`、wheel 与 fresh evidence |
 | 真实硬件 | **BLOCKED** | 无匹配设备与 candidate hardware backend，未执行 vector-add |
-| 当前 release 结论 | **NOT ACCEPTED** | `APPROVED + UNBOUND`；不能写 FULL/CONDITIONAL PASS |
+| 当前 release 结论 | **CONDITIONAL PASS** | `APPROVED + BOUND`；hardware 仍为 BLOCKED，禁止写 FULL PASS |
 
 因此，本 annex 证明可执行软件范围 `FAIL=0` 且没有未决的软件 oracle/实现缺口；正式
-release authority 仍为 `SPEC_GAP=1 (AUTH-SHA)`。若第二次确认完成并形成绑定提交 `A`，
-由于硬件为 BLOCKED，最终结论上限是 **CONDITIONAL PASS**，不得是 FULL PASS。
+release authority 为 `SPEC_GAP=0`，`AUTH-SHA=CLOSED`。由于硬件为 BLOCKED，
+最终结论是 **CONDITIONAL PASS**，不得是 FULL PASS。
 
 第一次批准主体记录为“T6.3 发布责任人/维护者；姓名或公开 handle 未提供”，日期为
 2026-08-24，批准范围为 D-01～D-12 与 ADR 全文；原始确认语句保存在 ADR-0002 §15。
@@ -49,7 +48,10 @@ release authority 仍为 `SPEC_GAP=1 (AUTH-SHA)`。若第二次确认完成并�
 | 修复起点 | `609c3c7d1f4e6032e8b1399531d1c998b970fdb8` |
 | candidate `I` | `b06daeb4042aa61e4c729bf05198e523ae368622` |
 | candidate tree | `74d8b6b8e863cc0474618e556ce78b0b3adfa10b` |
-| 上一轮 docs-only `E` | `6bbc65d6933633b0ba5ae4822dfbe1e487e261b9`；`E^=I`，只新增本 annex |
+| evidence `E` | `1f3ec300da7a2f4e3ac23d02d59b500a4ce49377`；`E^=I`，只新增本 annex |
+| evidence tree | `f0e612cb6ec0b4f10efd88ccac658db596184fc4` |
+| binding `A` | 本提交；为避免循环自引用，不在文档内写入自身 SHA；`A^=E` |
+| 被替换的旧 evidence commit | `6bbc65d6933633b0ba5ae4822dfbe1e487e261b9`；仅作历史审计记录 |
 | Core | `0.2.0` |
 | Protocol / Schema | `1.0` / `1.0` |
 | Triton | `3.6.0` |
@@ -60,10 +62,12 @@ release authority 仍为 `SPEC_GAP=1 (AUTH-SHA)`。若第二次确认完成并�
 | F5 real Legacy fixture | SHA-256 `97402abf825cf56d800edf5f4cfa25a8513be585b2b067391d0766664d18a455` |
 
 `upstream` 是 `I` 的祖先。第二轮所有构建、pytest、coverage、Ruff 与 F4 输入均为 `I` 的
-fresh archive 或 clean candidate clone，绝不以 shared `HEAD=6bbc65d…` 作为候选。上一轮
-`E` 的 tree 为 `d71e0befa9d21a02c111b18b350add87e1fc47c3`，与 candidate tree 不同，仅因其新增
-本 annex；它在这里仅作 topology/deny-reference 记录。`609c3c7..I` 未修改
-Core/Triton/vendored/LLVM/Protocol/Schema pin，且没有 T10.2 文件。
+fresh archive 或 clean candidate clone，绝不以 docs-only commit 作为候选。正式 evidence
+`E=1f3ec300da7a2f4e3ac23d02d59b500a4ce49377`的 tree 为
+`f0e612cb6ec0b4f10efd88ccac658db596184fc4`，与 candidate tree 不同，仅因其新增本 annex。
+第二轮执行开始时 shared `HEAD=6bbc65d…` 的事实仅作绑定前历史审计记录，它从未
+作为测试输入。`609c3c7..I` 未修改 Core/Triton/vendored/LLVM/Protocol/Schema pin，
+且没有 T10.2 文件。
 
 ### 2.1 非 squash 提交序列
 
@@ -82,6 +86,8 @@ Core/Triton/vendored/LLVM/Protocol/Schema pin，且没有 T10.2 文件。
 | canonical-step binding regression | `bd4dcb347d93b22dcaccc007543ba67523eaa42e` |
 | Ruff/CI implementation | `1b369defa42a80999b6c550f76beb488a275f53c` |
 | changed-file Ruff/style | `b06daeb4042aa61e4c729bf05198e523ae368622` |
+| 第二轮 fresh evidence `E` | `1f3ec300da7a2f4e3ac23d02d59b500a4ce49377` |
+| 最终 binding `A` | 本提交；self-SHA intentionally omitted |
 
 未 squash，未 push，未创建 PR。
 
@@ -415,33 +421,67 @@ T10.2 仅作为排除范围名称出现：四套 collect manifest 与 26 条实�
 匹配均为 0；未收集、未导入、未执行，未使用其 Kit、fixture、helper、artifact 或结果，
 也不进入 node/coverage denominator。它不是 PASS、SKIP 或 BLOCKED 项。
 
-## 11. 第二次确认前的最终完整性
+## 11. 绑定前证据拓扑与完整性（历史审计）
 
-第二轮开始与 build/test evidence 封口时（本 annex 更新之前）：
+本节仅记录 binding `A` 形成前的历史状态，不描述当前绑定状态。第二轮开始与
+build/test evidence 封口时：
 
-- shared worktree：`## fix/t6.3-v3.6-release-gates`，无 tracked/untracked/cached 修改；
-- shared `HEAD=6bbc65d6933633b0ba5ae4822dfbe1e487e261b9`，`HEAD^=I`；
-- shared `HEAD^{tree}=d71e0befa9d21a02c111b18b350add87e1fc47c3`；
-- `git diff --name-status I..HEAD` 精确为新增本 annex；
-- 所有执行输入仍精确为 `I`，candidate clone 的 `HEAD/tree/index/worktree` 为
+- shared worktree 为 `fix/t6.3-v3.6-release-gates`，无 tracked/untracked/cached 修改；
+- 当时 shared `HEAD=6bbc65d6933633b0ba5ae4822dfbe1e487e261b9`，但所有执行输入均精确为
+  `I`；candidate clone 的 `HEAD/tree/index/worktree` 为
   `b06daeb4042aa61e4c729bf05198e523ae368622` /
   `74d8b6b8e863cc0474618e556ce78b0b3adfa10b`，clean；
-- `git diff --check` 与 cached diff check 均 exit 0；
-- 无 version-pin 或 T10.2 diff；
-- 没有 push 或 PR side effect。
+- 无 version-pin 或 T10.2 diff，没有 push 或 PR side effect。
 
-`6bbc65d…` 只封存上一轮 annex，不能作为第二轮 `E`。本次修改目前只更新同一个 tracked
-annex；形成第二轮 evidence commit 前，`EVIDENCE_COMMIT_SHA` 保持 `PENDING_BINDING`。
-新 `E` 提交后必须机械验证：
+第二轮 docs-only evidence commit 形成后，绑定前机械验证结果为：
 
-1. `E^` 精确等于 `I`；
-2. `I` 是 `E` 的祖先；
-3. `git diff --name-only I..E` 精确只有本 annex；
-4. 本 annex 是 tracked Git blob，`git diff --check I..E` 为 0；
-5. annex 不含 `E` 自身 SHA；
-6. worktree 再次 clean。
+1. `E=1f3ec300da7a2f4e3ac23d02d59b500a4ce49377`，且 `E^=I`：PASS；
+2. `I` 是 `E` 的祖先：PASS；
+3. `git diff --name-only I..E` 精确只有本 annex：PASS；
+4. 本 annex 是 tracked Git blob，`git diff --check I..E` 为 0：PASS；
+5. `E` 的 annex 不自写 `E` 自身 SHA：PASS；
+6. `E` 封口后 worktree clean：PASS。
 
-满足这些 topology 条件后，应向发布责任人提供 `I`、`E`、wheel identity、上述 evidence
-hash 与 hardware BLOCKED 分类，请求第二次 exact-identity 确认。在确认发生前，
-`EVIDENCE_COMMIT_SHA` 必须保持 `PENDING_BINDING`，`AUTH-SHA` 必须保持 SPEC GAP，本 ADR
-不得标记 Accepted。
+上述 topology 、wheel 与三份 evidence manifest 在 binding 前均已重新只读校验，是本次
+`AUTH-SHA=CLOSED` 的前提证据。
+
+## 12. 最终 exact-identity 绑定记录
+
+- 授权角色：发布责任人/用户明确确认；未提供姓名或公开 handle，本 annex 不自行补写；
+- 授权日期：2026-08-24；
+- `FINAL_IMPLEMENTATION_SHA`：`b06daeb4042aa61e4c729bf05198e523ae368622`；
+- `FINAL_IMPLEMENTATION_TREE`：`74d8b6b8e863cc0474618e556ce78b0b3adfa10b`；
+- `EVIDENCE_COMMIT_SHA`：`1f3ec300da7a2f4e3ac23d02d59b500a4ce49377`；
+- `CORE_WHEEL`：`triton_anchor-0.2.0-cp312-cp312-linux_x86_64.whl`；
+- `CORE_WHEEL_SHA256`：`6a639fe5b77c48a2fbe631e7961cd1d3e50ea2253cdf15152e6e3979a338d8ed`。
+
+### 12.1 绑定的 evidence manifests
+
+| 证据 | 路径 | 校验 | SHA-256 |
+|---|---|---:|---|
+| 测试证据 | `/home/dingbl/race_workspace/reports/t6.3-v3.6-full-reacceptance-I-b06daeb-20260824/final/SHA256SUMS` | 84/84 PASS | `3312f932932f6d7c8b8a328f571caaf6cc67d42078ca28051f1694c637fff0f7` |
+| 构建证据 | `/home/dingbl/race_workspace/reports/t6.3-v3.6-reacceptance-20260824/t6.3-v3.6-rerun-20260824-EZb11mPt/provenance/FINAL-SHA256SUMS` | 62/62 PASS | `16257fa47b846c2189050e7cc872474cd853ebce0ff715ebfba1ce4cb12acbef` |
+| 二级构建 seal | `/home/dingbl/race_workspace/reports/t6.3-v3.6-reacceptance-20260824/t6.3-v3.6-rerun-20260824-EZb11mPt/provenance/FINAL-SEAL-SHA256SUMS` | 7/7 PASS | `9f132b4d7118090c7ca59ed42dbc58f828b03c6bdb522a8c2abd3cd3aa497514` |
+
+### 12.2 授权语句与最终分类
+
+> 发布责任人现确认 `FINAL_IMPLEMENTATION_SHA=b06daeb4042aa61e4c729bf05198e523ae368622`、
+> `EVIDENCE_COMMIT_SHA=1f3ec300da7a2f4e3ac23d02d59b500a4ce49377` 与
+> `CORE_WHEEL_SHA256=6a639fe5b77c48a2fbe631e7961cd1d3e50ea2253cdf15152e6e3979a338d8ed`。
+> 确认全部软件门禁 PASS，真实 hardware=BLOCKED；授权创建 binding commit `A`，
+> 最终分类为 CONDITIONAL PASS，不得标记 FULL PASS。T10.2 继续明确排除。
+
+绑定后结论：
+
+- 必需软件门禁：638/638 PASS，0 FAIL/ERROR/SKIP/XFAIL；
+- coverage：3368/4418 = 76.233589859665%，满足 76.00% 门槛；
+- `ART-WHEEL-001=PASS`，`QA-CI-001=PASS`；
+- `AUTH-F4/F5/F6=CLOSED`，`PKG-TESTS=CLOSED`，`AUTH-SHA=CLOSED`；
+- `FAIL=0`，`SPEC_GAP=0`；
+- hardware execution：`BLOCKED`；
+- T10.2：`EXCLUDED`，未收集、未导入、未执行；
+- release：`APPROVED + BOUND / Accepted`；
+- final classification：`CONDITIONAL PASS`；`FULL PASS` 禁止。
+
+Binding commit `A` 不把自身 SHA 写入本 annex。`A` 提交后必须由最终报告记录完整
+SHA，并机械证明 `A^=E`、`A^^=I`、`E..A` 只修改本 annex、worktree clean。
