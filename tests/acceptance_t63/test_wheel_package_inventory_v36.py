@@ -233,12 +233,14 @@ def test_elf_policy_rejects_adversarial_origin_and_needed_values(
     current_cmake = (
         REPO_ROOT / "csrc/tools/triton-shared-opt/CMakeLists.txt"
     ).read_text(encoding="utf-8")
-    configured_cmake = current_cmake.replace(
-        "PROPERTIES OUTPUT_NAME triton-shared-opt",
-        "PROPERTIES OUTPUT_NAME triton-shared-opt BUILD_WITH_INSTALL_RPATH ON",
+    without_policy = current_cmake.replace("  BUILD_WITH_INSTALL_RPATH ON\n", "")
+    configured_cmake = without_policy.replace(
+        "set_target_properties(triton-shared-opt PROPERTIES",
+        "set_target_properties(triton-shared-opt PROPERTIES "
+        "BUILD_WITH_INSTALL_RPATH ON",
         1,
     )
-    assert configured_cmake != current_cmake
+    assert configured_cmake != without_policy
     assert target_uses_build_install_rpath(
         configured_cmake,
         "triton-shared-opt",
