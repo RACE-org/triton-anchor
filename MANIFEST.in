@@ -1,3 +1,4 @@
 recursive-include triton *.h *.cpp *.cc *.td *.txt *.cmake
 recursive-include csrc *.h *.cpp *.cc *.td *.txt
 include triton/TRITON_VERSION
+recursive-include python/triton_anchor *.json

@@ -1,0 +1,236 @@
+{
+  "manifest_schema": "triton-anchor-t63-acceptance-baseline-v1",
+  "captured_at_utc": "2026-08-20T10:55:10.199112+00:00",
+  "purpose": "Freeze the pre-remediation Triton 3.3 T6.3 acceptance baseline without changing production behavior.",
+  "source": {
+    "repository": "/home/dingbl/race_workspace/triton-anchor-t63-v3.3",
+    "preflight_captured_branch": "port/t6.3-triton-v3.3",
+    "baseline_reproduction_branch": "fix/t6.3-v3.3-common-governance",
+    "commit_target_branch": "fix/t6.3-v3.3-common-governance",
+    "source_head": "444ead1ac0b314d971dfef6f2592e5f091d38690",
+    "target_baseline_ref": "upstream/triton_v3.3",
+    "target_baseline_commit": "31b073040a6d11afa63c7a062d24d546e3dd887d",
+    "original_t63_commit": "b85a506656bf58b70e6093e7d48adcd6a2908f64"
+  },
+  "versions": {
+    "core": "0.2.0",
+    "backend_plugin_protocol": "1.0",
+    "manifest_schema": "1.0",
+    "triton": "3.3.0",
+    "vendored_triton_commit": "523a1b235b213bc192f2d5a8999add5bf2d0fea5",
+    "llvm_commit": "a66376b0dc3b2ea8a84fda26faca287980986f78"
+  },
+  "test_files_sha256": {
+    "packaging_wheel_acceptance.py": "c484608989ef31867269cdc49404853db4a173a1fc7a8eae771f74677688fedc",
+    "run_logged.py": "9150a8b4ce6f3195d6df2044c2cd924b42886f530036a31985aa2d9e989d213e",
+    "test_native_abi_acceptance.py": "b32a6a0051e3d7206ef2bce4cd7f7e4d88ceb9659a9c236a183db8d5fb1044a5",
+    "test_packaging_entrypoint_e2e.py": "ed4998dc6f7f38755ff117a35b7265c6f53339370cd48ccff93d8802b598362e",
+    "test_packaging_wheel.py": "4d5ae224b77a1ee06b92dbe4a0562671aa86ec4952484a1cbe1cc90918c26e25",
+    "test_registry_acceptance.py": "81b7abe04355716af4c330cbeeebe9835ccba998408c12820174681b8933da33",
+    "test_schema_oracle_acceptance.py": "2bd5a96ffe6aa47720c3cf18ea28e5d063ff13eac67f3cbd863c05810f472ce4",
+    "test_triton_integration_acceptance.py": "e0cee8d1e8737961d39e4d5087d770ae50468db3eac35a84744062e4a0530d48",
+    "triton_integration_probe.py": "24ed59613aee6160a4233583c8942aad1b595e33005ad86773ade3d959263d9d"
+  },
+  "hash_scope": "Executable Python baseline files only. README.md and this manifest are excluded to avoid documentation churn and self-reference.",
+  "evidence": {
+    "acceptance_report": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-triton-v3.3-acceptance.md",
+      "sha256": "32300f0709abb96aea51f24d04b76fc62a3270b1e938600325e56c3db1993f35"
+    },
+    "original_canonical_log": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-evidence/canonical_acceptance_final.log",
+      "sha256": "8205b1d88be6ad4919a315e7bf4876577bcccebf13db316aff1d7a811728d63e"
+    },
+    "original_canonical_junit": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-evidence/canonical_acceptance_final.xml",
+      "sha256": "bb818e2ad12f6fa08de5ab77757f8eb397a6f2a376e379a4331eb6a3ed512a2c"
+    },
+    "phase1_reproduction_log": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-evidence/phase1_baseline.log",
+      "sha256": "600ab4e02169aad93a6561715fb798fc18d785cade4378a3f426a8f7b3516efb"
+    },
+    "phase1_reproduction_junit": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-evidence/phase1_baseline.xml",
+      "sha256": "57e9267efc7539c8d0393407d17ae8d5d915939eb4bdace447b0d3c0cbef3211"
+    },
+    "preflight_log": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-evidence/phase1_preflight.log",
+      "sha256": "f2b71f8d0f12023362ac6263759696b21b2fcd448935aed2997b69bc45b870aa"
+    },
+    "exact_core_wheel": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-evidence/exact-wheel/triton_anchor-0.2.0-cp312-cp312-linux_x86_64.whl",
+      "sha256": "c0b2163eadc25c31c90d3afcd5a614cb0ce3f3e93ceb25cd296a4c57bf15eae6"
+    },
+    "exact_wheel_independent_audit": {
+      "path": "/home/dingbl/race_workspace/reports/t6.3-evidence/exact_wheel_independent_audit.log",
+      "sha256": "cb48d9e6f4607200e2027f4c3cf3873d9d98cb2853c03fe60185e5d05abe0488"
+    }
+  },
+  "environment": {
+    "os": "Ubuntu 24.04.4 LTS on WSL2 x86_64",
+    "python": "3.12.3",
+    "python_executable": "/home/dingbl/race_workspace/t63-acceptance-venv/bin/python",
+    "pytest": "9.1.1",
+    "c_compiler": "GCC 13.3.0",
+    "cxx_compiler": "G++ 13.3.0",
+    "binutils": "2.42",
+    "pythonpath": [
+      "$REPOSITORY/python",
+      "$REPOSITORY/triton/python"
+    ],
+    "source_triton_anchor": "$REPOSITORY/python/triton_anchor/__init__.py",
+    "source_triton": "$REPOSITORY/triton/python/triton/__init__.py",
+    "ambient_triton_3_8_is_dut": false,
+    "pytest_cache": "/home/dingbl/race_workspace/reports/t6.3-evidence/pytest-cache-phase1-baseline"
+  },
+  "phase1_invocation": {
+    "started_utc": "2026-08-20T10:54:36.402637+00:00",
+    "finished_utc": "2026-08-20T10:55:10.199112+00:00",
+    "duration_seconds": 33.796,
+    "exit_code": 1,
+    "cwd": "/home/dingbl/race_workspace/triton-anchor-t63-v3.3",
+    "argv": [
+      "/home/dingbl/race_workspace/t63-acceptance-venv/bin/python",
+      "-m",
+      "pytest",
+      "-q",
+      "python/triton_anchor/tests",
+      "tests/acceptance_t63/test_registry_acceptance.py",
+      "tests/acceptance_t63/test_schema_oracle_acceptance.py",
+      "tests/acceptance_t63/test_native_abi_acceptance.py",
+      "tests/acceptance_t63/test_packaging_wheel.py",
+      "tests/acceptance_t63/test_packaging_entrypoint_e2e.py",
+      "tests/acceptance_t63/test_triton_integration_acceptance.py",
+      "-ra",
+      "--junitxml=/home/dingbl/race_workspace/reports/t6.3-evidence/phase1_baseline.xml",
+      "-o",
+      "cache_dir=/home/dingbl/race_workspace/reports/t6.3-evidence/pytest-cache-phase1-baseline"
+    ],
+    "required_environment": {
+      "PYTHONPATH": "/home/dingbl/race_workspace/triton-anchor-t63-v3.3/python:/home/dingbl/race_workspace/triton-anchor-t63-v3.3/triton/python",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "T63_CORE_WHEEL": "/home/dingbl/race_workspace/reports/t6.3-evidence/exact-wheel/triton_anchor-0.2.0-cp312-cp312-linux_x86_64.whl"
+    },
+    "inherited_environment_fully_captured": false,
+    "environment_note": "run_logged.py records the child argv; required inherited variables are frozen explicitly above."
+  },
+  "exact_wheel_facts": {
+    "bytes": 158865325,
+    "zip_members": 268,
+    "record_rows": 268,
+    "record_hash_and_size_validation": "PASS",
+    "libtriton_sha256": "sha256:28d82794126692c238d0082993528d6b334dfc9c505f9c289fe2e6ccb8b45f62",
+    "core_abi_fingerprint": "sha256:13066b3151e6414917959e7c18afebc0d7110a40a97cfd8b4a53d9ef00ba9d85",
+    "strict_archive_validation": "FAIL",
+    "missing_member": "triton_anchor/language/ext/__init__.py"
+  },
+  "canonical_result": {
+    "conclusion": "FAIL",
+    "collected": 177,
+    "decidable_required": 173,
+    "pass_rate_percent": 92.49,
+    "pytest_raw": {
+      "passed": 163,
+      "failed": 13,
+      "errors": 0,
+      "skipped": 1
+    },
+    "acceptance_semantic": {
+      "pass": 160,
+      "fail": 13,
+      "blocked": 1,
+      "not_run": 0,
+      "spec_gap": 3
+    },
+    "blocked_node": "tests/acceptance_t63/test_triton_integration_acceptance.py::test_triton_integration_actual_hardware_jit_launch"
+  },
+  "failed_nodes": [
+    {
+      "defect": "F1",
+      "in_phase1_scope": true,
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_every_simultaneous_compatibility_failure"
+    },
+    {
+      "defect": "F2",
+      "in_phase1_scope": true,
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_rejects_non_none_initialize_return_value"
+    },
+    {
+      "defect": "F2",
+      "in_phase1_scope": true,
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_shutdown_hook_contract[noncallable]"
+    },
+    {
+      "defect": "F2",
+      "in_phase1_scope": true,
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_shutdown_hook_contract[wrong_return]"
+    },
+    {
+      "defect": "F2",
+      "in_phase1_scope": true,
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_diagnostics_hook_contract[noncallable]"
+    },
+    {
+      "defect": "F2",
+      "in_phase1_scope": true,
+      "nodeid": "tests/acceptance_t63/test_registry_acceptance.py::test_registry_reports_invalid_diagnostics_hook_contract[wrong_return]"
+    },
+    {
+      "defect": "F3",
+      "in_phase1_scope": true,
+      "nodeid": "tests/acceptance_t63/test_schema_oracle_acceptance.py::test_public_parser_rejects_value_forbidden_by_shipped_schema"
+    },
+    {
+      "defect": "F4",
+      "in_phase1_scope": false,
+      "nodeid": "tests/acceptance_t63/test_packaging_wheel.py::test_built_wheel_payload_and_provenance"
+    },
+    {
+      "defect": "F4",
+      "in_phase1_scope": false,
+      "nodeid": "tests/acceptance_t63/test_packaging_wheel.py::test_every_source_python_package_is_declared_for_the_wheel"
+    },
+    {
+      "defect": "F5",
+      "in_phase1_scope": false,
+      "nodeid": "tests/acceptance_t63/test_triton_integration_acceptance.py::test_triton_integration_legacy_entry_point_remains_in_public_mapping"
+    },
+    {
+      "defect": "F5",
+      "in_phase1_scope": false,
+      "nodeid": "tests/acceptance_t63/test_triton_integration_acceptance.py::test_triton_integration_legacy_compiler_make_backend_regression"
+    },
+    {
+      "defect": "F5",
+      "in_phase1_scope": false,
+      "nodeid": "tests/acceptance_t63/test_triton_integration_acceptance.py::test_triton_integration_legacy_runtime_driver_and_reset_regression"
+    },
+    {
+      "defect": "F6",
+      "in_phase1_scope": false,
+      "nodeid": "tests/acceptance_t63/test_triton_integration_acceptance.py::test_triton_integration_rejects_v30_abstract_classes_before_selection"
+    }
+  ],
+  "spec_gaps": {
+    "semantic_test_nodes": [
+      "tests/acceptance_t63/test_native_abi_acceptance.py::test_native_required_symbol_name_is_not_defined_by_manifest_1_0",
+      "tests/acceptance_t63/test_native_abi_acceptance.py::test_native_plugin_cxx_abi_is_not_attested_by_manifest_1_0",
+      "tests/acceptance_t63/test_native_abi_acceptance.py::test_native_static_inspection_does_not_prove_dlopen_success"
+    ],
+    "additional_requirement_level": [
+      "capability identifier to concrete interface mapping",
+      "priority bounds and cross-vendor semantics",
+      "versioned subprocess IPC/IR contract",
+      "required-field version bumps and reader/writer compatibility window",
+      "diagnostics deprecation timeline independent of implementation"
+    ]
+  },
+  "audit": {
+    "developer_machine_absolute_import_paths": [],
+    "t10_2_or_conformance_imports": [],
+    "xfail_nodes": [],
+    "failure_tests_removed_relaxed_or_skipped": false,
+    "cache_inside_worktree": false,
+    "t10_2_excluded": true
+  }
+}
