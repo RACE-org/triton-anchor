@@ -19,6 +19,7 @@ from triton_anchor import (
     AnchorIRValidationReport,
     StructuredAnchorIRValidator,
     format_anchor_ir_validation_report,
+    resolve_anchor_ir_policy,
 )
 from triton_anchor import _anchor_ir_text_isolation as text_isolation
 from triton_anchor import anchor_ir_cli
@@ -56,6 +57,180 @@ module attributes {
   }
 }
 """
+
+
+def _stdout_logging_native_stub(tmp_path: Path, monkeypatch) -> dict[str, str]:
+    """Install a child-only native stub that writes Sophgo-style stdout."""
+
+    package = tmp_path / "native-stdout-stub" / "triton" / "_C"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "libtriton.py").write_text(
+        '''import atexit
+import os
+
+
+def _noise(stage):
+    if os.environ.get("TRITON_SOPHGO_ARCH") == "sg2260e":
+        os.write(1, ("Arch sg2260e specified by env var [%s]\\n" % stage).encode())
+
+
+def _report(policy, ir_text):
+    diagnostics = []
+    if "smt.injected" in ir_text:
+        diagnostics.append({
+            "code": "AIR-LINALG-001",
+            "severity": "error",
+            "message": "forbidden test operation",
+            "hint": "remove smt.injected",
+            "spec_version": policy["spec_version"],
+            "track": policy["track"],
+            "phase": policy["phase"],
+            "object_kind": "operation",
+            "object_name": "smt.injected",
+            "operation_path": "builtin.module/region[0]/block[0]/smt.injected#0",
+            "object_path": "",
+            "location": None,
+        })
+    return {
+        "valid": not diagnostics,
+        "spec_version": policy["spec_version"],
+        "track": policy["track"],
+        "phase": policy["phase"],
+        "diagnostics": diagnostics,
+    }
+
+
+class _IR:
+    class _Context:
+        pass
+
+    def context(self):
+        _noise("context")
+        return self._Context()
+
+    def load_dialects(self, _context):
+        _noise("ir.load_dialects")
+
+
+class _Anchor:
+    def load_dialects(self, _context):
+        _noise("anchor.load_dialects")
+
+    def validate_anchor_ir_text(self, ir_text, _context, policy, _source_name):
+        _noise("validate")
+        return _report(policy, ir_text)
+
+    def normalize_anchor_ir_text(self, ir_text, _context, policy, _source_name):
+        _noise("normalize")
+        return {
+            "validation_report": _report(policy, ir_text),
+            "normalized_text": "module {\\n}\\n",
+        }
+
+
+_noise("import")
+atexit.register(lambda: _noise("atexit"))
+anchor = _Anchor()
+ir = _IR()
+''',
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    python_root = Path(__file__).resolve().parents[2]
+    entries = [str(package.parents[1]), str(python_root)]
+    current_pythonpath = environment.get("PYTHONPATH")
+    if current_pythonpath:
+        entries.append(current_pythonpath)
+    environment["PYTHONPATH"] = os.pathsep.join(entries)
+    environment["TRITON_DEFAULT_BACKEND"] = "sophgo"
+    environment["TRITON_SOPHGO_ARCH"] = "sg2260e"
+    monkeypatch.setenv("PYTHONPATH", environment["PYTHONPATH"])
+    monkeypatch.setenv("TRITON_DEFAULT_BACKEND", "sophgo")
+    monkeypatch.setenv("TRITON_SOPHGO_ARCH", "sg2260e")
+    return environment
+
+
+@pytest.mark.parametrize("action", ["validate", "normalize"])
+def test_worker_stdout_is_one_json_when_native_layer_logs(
+    action,
+    tmp_path,
+    monkeypatch,
+):
+    environment = _stdout_logging_native_stub(tmp_path, monkeypatch)
+    policy = resolve_anchor_ir_policy(
+        spec_version=ANCHOR_IR_SPEC_VERSION,
+        track=AnchorIRTrack.LINALG,
+        phase=AnchorIRPhase.PRE_HOOK,
+    ).to_dict()
+    request = {
+        "protocol_version": "anchor-ir-text-worker/1.0.0",
+        "action": action,
+        "ir_text": "module {}",
+        "policy": policy,
+        "source_name": "sophgo-stdout.mlir",
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "triton_anchor._anchor_ir_text_worker"],
+        input=json.dumps(request),
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stderr == ""
+    response = json.loads(completed.stdout)
+    assert set(response) == {"protocol_version", "result"}
+    assert response["protocol_version"] == "anchor-ir-text-worker/1.0.0"
+    assert "Arch sg2260e" not in completed.stdout
+
+
+def test_native_stdout_does_not_break_python_api_or_cli(
+    tmp_path,
+    monkeypatch,
+):
+    environment = _stdout_logging_native_stub(tmp_path, monkeypatch)
+    validator = StructuredAnchorIRValidator()
+    valid_report = validator.validate_text(
+        VALID_IR,
+        spec_version=ANCHOR_IR_SPEC_VERSION,
+        track=AnchorIRTrack.LINALG,
+        phase=AnchorIRPhase.PRE_HOOK,
+        source_name="sophgo-valid.mlir",
+    )
+    invalid_report = validator.validate_text(
+        INVALID_IR,
+        spec_version=ANCHOR_IR_SPEC_VERSION,
+        track=AnchorIRTrack.LINALG,
+        phase=AnchorIRPhase.PRE_HOOK,
+        source_name="sophgo-invalid.mlir",
+    )
+
+    assert valid_report.valid
+    assert not invalid_report.valid
+    assert invalid_report.diagnostics[0].code == "AIR-LINALG-001"
+
+    for name, text, expected_exit in (
+        ("valid.mlir", VALID_IR, 0),
+        ("invalid.mlir", INVALID_IR, 1),
+    ):
+        source = tmp_path / name
+        source.write_text(text, encoding="utf-8")
+        completed = subprocess.run(
+            _command(source, "json"),
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        assert completed.returncode == expected_exit
+        assert completed.stderr == ""
+        assert json.loads(completed.stdout)["valid"] is (expected_exit == 0)
+        assert "Arch sg2260e" not in completed.stdout
 
 
 def _command(
