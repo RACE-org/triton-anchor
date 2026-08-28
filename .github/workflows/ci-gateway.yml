@@ -151,23 +151,28 @@ jobs:
             let targetRef = '';
             let reason = '';
             let deleteTaskRef = false;
+            let cancellationLabel = '';
 
             if (action === 'closed') {
               targetRef = pull.base.ref;
               reason = 'pull request closed';
               deleteTaskRef = true;
+              cancellationLabel = 'cancel-closed';
             } else if (action === 'converted_to_draft') {
               targetRef = pull.base.ref;
               reason = 'pull request converted to draft';
               deleteTaskRef = true;
+              cancellationLabel = 'cancel-draft';
             } else if (action === 'synchronize' && externalFork) {
               targetRef = pull.base.ref;
               reason = 'external fork head changed; maintainer authorization expired';
               deleteTaskRef = false;
+              cancellationLabel = 'cancel-stale';
             } else if (action === 'edited' && previousBaseRef) {
               targetRef = previousBaseRef;
               reason = 'pull request retargeted';
               deleteTaskRef = externalFork;
+              cancellationLabel = 'cancel-retarget';
             } else {
               core.info('This event does not require lifecycle cancellation.');
               return;
@@ -177,6 +182,12 @@ jobs:
             if (!shaPattern.test(pull.head.sha)) {
               throw new Error('The lifecycle event did not contain a valid head SHA');
             }
+            const previousHeadSha = context.payload.before || '';
+            const currentHeadSha = pull.head.sha;
+            const runTitle =
+              action === 'synchronize' && shaPattern.test(previousHeadSha)
+                ? `PR ${pull.number} | from:${previousHeadSha.slice(0, 7)} | to:${currentHeadSha.slice(0, 7)} | cancel-stale`
+                : `PR ${pull.number} | h:${currentHeadSha.slice(0, 7)} | ${cancellationLabel}`;
 
             const inspectCancellationWorker = async (ref, requireCrossBranch) => {
               if (!ref) {
@@ -274,7 +285,7 @@ jobs:
                     context: process.env.STATUS_CONTEXT,
                     cancellation_reason: reason,
                     delete_task_ref: String(deleteTaskRef && worker.ref === cleanupRef),
-                    run_title: `PR ${pull.number} | h:${pull.head.sha.slice(0, 7)} | cancel`,
+                    run_title: runTitle,
                   },
                 });
                 core.info(
@@ -366,6 +377,21 @@ jobs:
                 context: hasMergeResult
                   ? process.env.STATUS_CONTEXT
                   : `${process.env.STATUS_CONTEXT}/routing`,
+                description: description.slice(0, 140),
+                target_url: statusTarget,
+              });
+            };
+            const publishRoutingStatus = async (state, description) => {
+              if (!shaPattern.test(headSha)) {
+                core.warning('Cannot publish routing status because no valid head SHA is available.');
+                return;
+              }
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: headSha,
+                state,
+                context: `${process.env.STATUS_CONTEXT}/routing`,
                 description: description.slice(0, 140),
                 target_url: statusTarget,
               });
@@ -494,12 +520,11 @@ jobs:
                 ? (sameRepository ? 'same-repository-event' : 'external-fork-environment')
                 : `manual-maintainer:${context.actor}`;
 
-              await publishStatus(
-                'pending',
-                requiresApproval
-                  ? 'external fork Local CI is waiting for environment approval'
-                  : 'local CI authorization and routing in progress'
-              );
+              const routingDescription = requiresApproval
+                ? 'external fork Local CI is waiting for environment approval'
+                : 'local CI authorization and routing in progress';
+              await publishRoutingStatus('pending', routingDescription);
+              await publishStatus('pending', routingDescription);
               core.setOutput('should_route', 'true');
               core.setOutput('requires_approval', requiresApproval ? 'true' : 'false');
               core.setOutput('pr_number', String(prNumber));
@@ -515,7 +540,11 @@ jobs:
                 `PR ${prNumber} | h:${pull.head.sha.slice(0, 7)} m:${testedSha.slice(0, 7)} | dispatch`
               );
             } catch (error) {
-              await publishStatus('error', `failed to authorize local CI: ${error.message}`);
+              const description = `failed to authorize local CI: ${error.message}`;
+              await publishStatus('error', description);
+              if (shaPattern.test(testedSha)) {
+                await publishRoutingStatus('error', description);
+              }
               throw error;
             }
 
@@ -661,6 +690,17 @@ jobs:
                 sha: process.env.TESTED_SHA,
                 state: 'error',
                 context: process.env.STATUS_CONTEXT,
+                description: description.slice(0, 140),
+                target_url: statusTarget,
+              });
+            };
+            const markRoutingStatus = async (state, description) => {
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: process.env.EXPECTED_HEAD_SHA,
+                state,
+                context: `${process.env.STATUS_CONTEXT}/routing`,
                 description: description.slice(0, 140),
                 target_url: statusTarget,
               });
@@ -845,6 +885,10 @@ jobs:
                   run_title: process.env.RUN_TITLE,
                 },
               });
+              await markRoutingStatus(
+                'success',
+                `local CI dispatched to worker ${worker.ref}`
+              );
               core.info(
                 `Dispatched PR #${prNumber} to worker ${worker.ref} at ${worker.revision}.`
               );
@@ -1064,19 +1108,31 @@ jobs:
       - name: Mark routing failure
         uses: actions/github-script@v7
         env:
-          SHA: ${{ needs.prepare-route.outputs.tested_sha }}
+          HEAD_SHA: ${{ needs.prepare-route.outputs.head_sha }}
+          TESTED_SHA: ${{ needs.prepare-route.outputs.tested_sha }}
           STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
         with:
           script: |
-            await github.rest.repos.createCommitStatus({
-              ...context.repo,
-              sha: process.env.SHA,
-              state: 'error',
-              context: process.env.STATUS_CONTEXT,
-              description: 'local CI routing did not authorize this revision',
-              target_url:
-                `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-            });
+            const targetUrl =
+              `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await Promise.all([
+              github.rest.repos.createCommitStatus({
+                ...context.repo,
+                sha: process.env.TESTED_SHA,
+                state: 'error',
+                context: process.env.STATUS_CONTEXT,
+                description: 'local CI routing did not authorize this revision',
+                target_url: targetUrl,
+              }),
+              github.rest.repos.createCommitStatus({
+                ...context.repo,
+                sha: process.env.HEAD_SHA,
+                state: 'error',
+                context: `${process.env.STATUS_CONTEXT}/routing`,
+                description: 'local CI routing failed',
+                target_url: targetUrl,
+              }),
+            ]);
 
   validate-dispatch:
     name: Validate PR dispatch request

@@ -156,7 +156,9 @@ def test_codex_snapshot_does_not_clean_or_audit_source_container():
     assert "dump_artifacts.py" not in runner
     assert "snapshot_prune" not in runner
     assert "snapshot_hygiene" not in runner
-    assert 'docker commit "${LOCAL_CI_CONTAINER}" "${ephemeral_image}"' in runner
+    assert "docker commit \\" in runner
+    assert '"${LOCAL_CI_CONTAINER}" "${ephemeral_image}"' in runner
+    assert "LABEL triton-anchor.role=codex-ai-snapshot" in runner
     assert "export TRITON_DUMP_DIR=/tmp/triton-anchor-codex-dump" in runner
     assert "`${ARTIFACT_DIR}/failure-ir/`" in failure_prompt
     assert "不要搜索" in failure_prompt

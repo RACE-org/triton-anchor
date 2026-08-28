@@ -493,7 +493,7 @@ pytest tests/ -v
 
 ### 9.3 CI
 
-项目已配置 [GitHub Actions CI](.github/workflows/ci.yml)，每次 push / PR 自动运行：
+项目已配置 [GitHub Actions Basic CI](.github/workflows/ci_basic.yml)，每次 push / PR 自动运行：
 
 | Job | 内容 | 矩阵 |
 |-----|------|------|

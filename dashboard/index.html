@@ -25,6 +25,7 @@
     <nav class="view-tabs" aria-label="Dashboard views">
       <button class="tab-button active" type="button" data-view="operators">全量算子测试</button>
       <button class="tab-button" type="button" data-view="performance">后端与性能</button>
+      <button class="tab-button" type="button" data-view="worker">Worker 运行状态</button>
     </nav>
 
     <main>
@@ -157,6 +158,71 @@
             <div id="irMetrics" class="performance-list"></div>
           </section>
         </div>
+      </section>
+
+      <section id="workerView" class="view" aria-labelledby="workerHeading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LOCAL CI WORKER</p>
+            <h2 id="workerHeading">Worker 运行状态</h2>
+          </div>
+          <div class="run-identity worker-identity">
+            <span id="workerProfile">--</span>
+            <code id="workerId">--</code>
+            <span id="workerSnapshotAt">快照 --</span>
+          </div>
+        </div>
+
+        <div id="workerMetrics" class="metric-band worker-metric-band" aria-label="Worker summary"></div>
+
+        <div class="worker-layout">
+          <section class="performance-panel" aria-labelledby="activeTaskHeading">
+            <div class="panel-heading">
+              <h3 id="activeTaskHeading">当前任务</h3>
+              <span id="activeTaskState">--</span>
+            </div>
+            <dl id="activeTaskDetails" class="fact-list"></dl>
+          </section>
+
+          <section class="performance-panel" aria-labelledby="pollerHeading">
+            <div class="panel-heading">
+              <h3 id="pollerHeading">Poller</h3>
+              <span id="pollerState">--</span>
+            </div>
+            <dl id="pollerDetails" class="fact-list"></dl>
+          </section>
+
+          <section class="performance-panel" aria-labelledby="containerHeading">
+            <div class="panel-heading">
+              <h3 id="containerHeading">运行容器</h3>
+              <span id="containerState">--</span>
+            </div>
+            <dl id="containerDetails" class="fact-list"></dl>
+          </section>
+        </div>
+
+        <div class="table-shell worker-storage-shell">
+          <table>
+            <thead>
+              <tr>
+                <th>存储位置</th>
+                <th>配置路径</th>
+                <th>文件夹大小</th>
+                <th>占磁盘总量</th>
+              </tr>
+            </thead>
+            <tbody id="workerStorageRows"></tbody>
+          </table>
+          <div id="workerStorageEmpty" class="empty-state" hidden>当前没有可用的存储数据。</div>
+        </div>
+
+        <section class="performance-panel last-result-panel" aria-labelledby="lastResultHeading">
+          <div class="panel-heading">
+            <h3 id="lastResultHeading">最近任务结果</h3>
+            <span id="lastResultState">--</span>
+          </div>
+          <dl id="lastResultDetails" class="fact-list fact-list-wide"></dl>
+        </section>
       </section>
 
       <section id="loadError" class="load-error" hidden>

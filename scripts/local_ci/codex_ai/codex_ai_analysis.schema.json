@@ -203,14 +203,23 @@
             "type": "object",
             "properties": {
               "command": {"type": "string"},
-              "purpose": {"type": "string", "maxLength": 120},
+              "role": {
+                "type": "string",
+                "description": "validation 表示测试、构建或 lint 等正式验证；diagnostic 表示搜索、日志检查或环境探查。",
+                "enum": ["validation", "diagnostic"]
+              },
+              "purpose": {
+                "type": "string",
+                "description": "简洁且稳定的验证目标；只有目标和覆盖范围等价的命令才使用相同文本。",
+                "maxLength": 120
+              },
               "evidence": {"type": "string"},
               "failure_classification": {
                 "type": "string",
                 "enum": ["none", "product", "flaky", "infrastructure", "unknown"]
               }
             },
-            "required": ["command", "purpose", "evidence", "failure_classification"],
+            "required": ["command", "role", "purpose", "evidence", "failure_classification"],
             "additionalProperties": false
           }
         }

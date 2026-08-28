@@ -42,10 +42,12 @@ class StaleResultError(RuntimeError):
 
 CODEX_COMMENT_MARKER = "<!-- triton-anchor-codex-ai-comment -->"
 CODEX_COMMENT_SHA_MARKER_PREFIX = "triton-anchor-codex-ai-comment-sha"
+MAX_CODEX_PR_COMMENT_LENGTH = 58_000
 FINDING_ID_RE = re.compile(r"^AI-[0-9]{3,}$")
 GITHUB_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 INTERNAL_COMMENT_ID_RE = re.compile(
-    r"\b(AI|TEST|RUN)-0*([1-9][0-9]*)\b[ \t]*",
+    r"(?<![A-Za-z0-9_.-])(AI|TEST|RUN)-0*([1-9][0-9]*)"
+    r"(?![A-Za-z0-9_.-])[ \t]*",
     re.IGNORECASE,
 )
 PUBLIC_COMMENT_ID_TEMPLATES = {
@@ -55,11 +57,43 @@ PUBLIC_COMMENT_ID_TEMPLATES = {
 }
 INTERNAL_COMMENT_TERM_REPLACEMENTS = (
     (
+        re.compile(r"结构化报告未通过 schema、固定格式或中文内容校验"),
+        "自动审查结果整理阶段未能生成公开摘要",
+    ),
+    (
+        re.compile(r"Codex 审查语义载荷未满足公开结构契约"),
+        "Codex 自动审查结果整理阶段未能生成公开摘要",
+    ),
+    (
+        re.compile(r"Codex 自动审查没有获得可由 Runner 核验的命令与证据记录"),
+        "Codex 自动审查未形成可确认的验证或诊断记录",
+    ),
+    (
+        re.compile(r"Runner 生成的可信报告输入校验失败"),
+        "Codex 自动审查结果汇总阶段未能核对代码差异与执行记录",
+    ),
+    (
+        re.compile(r"Runner 生成报告时内部契约校验失败"),
+        "Codex 自动审查报告生成阶段未完成",
+    ),
+    (
+        re.compile(r"Runner 读取报告执行事实失败"),
+        "Codex 自动审查验证结果汇总阶段未完成",
+    ),
+    (
+        re.compile(r"没有形成可由 Runner 核验的完整执行结论"),
+        "验证与诊断结果汇总未完成",
+    ),
+    (
         re.compile(r"\bCodex AI (?:CI|代码审查)\b[ \t]*", re.IGNORECASE),
         "Codex AI 自动审查",
     ),
     (
-        re.compile(r"(?:确定性[ \t]+)?\bLocal CI\b[ \t]*", re.IGNORECASE),
+        re.compile(
+            r"(?:确定性[ \t]+)?\bLocal CI\b"
+            r"(?![ \t]+[A-Za-z0-9_.-])[ \t]*",
+            re.IGNORECASE,
+        ),
         "本地确定性 CI 检查",
     ),
     (
@@ -67,37 +101,26 @@ INTERNAL_COMMENT_TERM_REPLACEMENTS = (
         "本地确定性 CI 检查",
     ),
 )
-CODEX_EXECUTION_STATUS_LABELS = {
-    "pass": "完成",
-    "fail": "未完成",
-    "skipped": "未运行",
-    "not_reported": "未报告",
-}
-CODEX_VERDICT_LABELS = {
-    "pass": "通过",
-    "warning": "警告",
-    "fail": "失败",
-    "not_run": "未运行",
-    "unknown": "未知",
-}
 CODEX_FAILURE_REASON_LABELS = {
     "codex_cli_unavailable": "Codex AI 自动审查工具在当前环境中不可用",
     "credential_validation_failed": "Codex 审查凭据校验未通过",
     "prompt_render_failed": "Codex 审查输入准备失败",
+    "container_prepare_timeout": "Codex 审查运行环境准备超时",
     "timeout": "Codex 自动审查执行超时",
+    "startup_timeout": "Codex 自动审查启动超时",
     "missing_completion_marker": "Codex 自动审查没有完整结束",
     "missing_turn_completed": "Codex 自动审查没有完整结束",
-    "no_command_executed": "Codex 自动审查没有获得可由 Runner 核验的命令与证据记录",
-    "analysis_contract_failed": "Codex 审查语义载荷未满足公开结构契约",
-    "schema_validation_failed": "Codex 审查语义载荷未满足公开结构契约",
-    "trusted_report_input_failed": "Runner 生成的可信报告输入校验失败",
-    "report_contract_failed": "Runner 生成报告时内部契约校验失败",
-    "report_metadata_failed": "Runner 读取报告执行事实失败",
-    "invalid_finding_location": "Codex 问题定位信息校验未通过",
+    "no_command_executed": "Codex 自动审查未形成可确认的验证或诊断记录",
+    "analysis_contract_failed": "Codex 自动审查结果整理阶段未能生成公开摘要",
+    "schema_validation_failed": "Codex 自动审查结果整理阶段未能生成公开摘要",
+    "trusted_report_input_failed": "Codex 自动审查结果汇总阶段未能核对代码差异与执行记录",
+    "report_contract_failed": "Codex 自动审查报告生成阶段未完成",
+    "report_metadata_failed": "Codex 自动审查验证结果汇总阶段未完成",
+    "invalid_finding_location": "Codex 自动审查的问题代码位置无法确认",
     "container_setup_failed": "Codex 审查运行环境启动失败",
     "checkout_or_diff_failed": "Codex 审查代码或差异准备失败",
     "prerequisite_failed": "Codex 审查运行环境缺少必要组件",
-    "codex_execution_failed": "Codex 自动审查执行异常",
+    "codex_execution_failed": "Codex 自动审查没有完整结束",
 }
 
 REPORTABLE_STAGES = (
@@ -110,12 +133,15 @@ REPORTABLE_STAGES = (
     ("pass_profile", "pass_profile_status", "pass-profile", "Pass profiling"),
     ("ir_serialization", "ir_serialization_status", "ir-serialization", "IR serialization"),
 )
-REQUIRED_STAGE_IDS = (
+FRONTEND_REQUIRED_STAGE_IDS = (
     "frontend_build",
     "frontend_smoke",
+)
+BACKEND_REQUIRED_STAGE_IDS = (
     "backend_rebuild",
     "backend_smoke_jit",
 )
+REQUIRED_STAGE_IDS = FRONTEND_REQUIRED_STAGE_IDS + BACKEND_REQUIRED_STAGE_IDS
 
 
 @dataclass(frozen=True)
@@ -172,6 +198,8 @@ class LocalCIResult:
     stage_statuses: dict[str, str]
     codex_ai: CodexAIResult
     publish_manifest: PublishManifest | None = None
+    execution_mode: str = "full"
+    backend_stages_enabled: bool = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -275,6 +303,24 @@ def parse_summary_value(summary: str, key: str) -> str:
         if line.startswith(prefix):
             return line.split(":", 1)[1].strip()
     return ""
+
+
+def parse_summary_bool(summary: str, key: str) -> bool | None:
+    value = parse_summary_value(summary, key).strip().lower()
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
+def normalized_codex_execution_status(
+    execution_status: str, failure_code: str
+) -> str:
+    normalized = execution_status.strip().lower() or "not_reported"
+    if normalized == "pass" and failure_code.strip():
+        return "fail"
+    return normalized
 
 
 def parse_publish_manifest(manifest_json: str, target: Target, run_id: str) -> PublishManifest | None:
@@ -616,6 +662,13 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
         args.gitee_results_branch,
         gitee_token,
     ) or ""
+    codex_report_markdown = gitee_content(
+        args.gitee_owner,
+        args.gitee_repo,
+        f"{rel_dir}/codex-ai-report.md",
+        args.gitee_results_branch,
+        gitee_token,
+    ) or ""
 
     codex_document: dict[str, object] = {}
     parse_failure = ""
@@ -669,6 +722,10 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
             parse_summary_value(codex_summary, "failure_reason") or failure_reason
         )
 
+    execution_status = normalized_codex_execution_status(
+        execution_status, failure_code
+    )
+
     if execution_status == "skipped":
         if constraint_status == "not_reported":
             constraint_status = "not_applicable"
@@ -677,7 +734,14 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
     elif execution_status == "not_reported":
         failure_reason = failure_reason or "未找到 Codex AI CI 结果。"
 
-    has_report = bool(codex_summary or codex_comment or codex_report) or execution_status in {"pass", "fail"}
+    missing_expected_files = (
+        publish_manifest.missing_expected_files if publish_manifest else ()
+    )
+    report_marked_missing = any(
+        name.rsplit("/", 1)[-1] == "codex-ai-report.md"
+        for name in missing_expected_files
+    )
+    has_report = bool(codex_report_markdown.strip()) and not report_marked_missing
     report_url = (
         gitee_file_url(
             args.gitee_web_url,
@@ -702,11 +766,53 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
         validation_purposes_from_report(codex_report),
     )
     exit_code = parse_summary_status(summary)
+    execution_mode = parse_summary_value(summary, "execution_mode") or "full"
+    backend_profile_value = parse_summary_value(
+        summary, "backend_stages_enabled"
+    ).strip().lower()
+    parsed_backend_stages_enabled = parse_summary_bool(
+        summary, "backend_stages_enabled"
+    )
+    backend_stages_enabled = (
+        parsed_backend_stages_enabled
+        if parsed_backend_stages_enabled is not None
+        else True
+    )
+    codex_only_pr = execution_mode == "codex_only" and bool(
+        re.fullmatch(r"ci/pr-[0-9]+/.+", target.task_ref)
+    )
+    if codex_only_pr:
+        required_stage_ids = tuple(
+            stage_id for stage_id, _, _, _ in REPORTABLE_STAGES
+        )
+    elif backend_stages_enabled:
+        required_stage_ids = REQUIRED_STAGE_IDS
+    else:
+        required_stage_ids = FRONTEND_REQUIRED_STAGE_IDS
+    accepted_statuses = {"skipped"} if codex_only_pr else {"pass", "success"}
     missing_required = [
         stage_id
-        for stage_id in REQUIRED_STAGE_IDS
-        if stage_statuses.get(stage_id, "").strip().lower() not in {"pass", "success"}
+        for stage_id in required_stage_ids
+        if stage_statuses.get(stage_id, "").strip().lower() not in accepted_statuses
     ]
+    if not codex_only_pr and not backend_stages_enabled:
+        for stage_id, _, _, _ in REPORTABLE_STAGES:
+            if stage_id in FRONTEND_REQUIRED_STAGE_IDS:
+                continue
+            if stage_statuses.get(stage_id, "").strip().lower() != "skipped":
+                missing_required.append(f"{stage_id}_must_be_skipped")
+    if execution_mode != "full" and not codex_only_pr:
+        missing_required.append("valid_execution_mode")
+    if (
+        execution_mode == "full"
+        and backend_profile_value
+        and parsed_backend_stages_enabled is None
+    ):
+        missing_required.append("valid_backend_stages_enabled")
+    if not codex_only_pr:
+        for stage_id in required_stage_ids:
+            if stage_statuses.get(stage_id, "").strip().lower() == "skipped":
+                stage_statuses[stage_id] = "fail"
     if exit_code == 0 and missing_required:
         print(
             "Local CI summary claimed success but required stages did not pass: "
@@ -725,6 +831,8 @@ def read_local_ci_result(args: argparse.Namespace, target: Target, gitee_token: 
         stage_statuses,
         codex_ai,
         publish_manifest,
+        execution_mode,
+        backend_stages_enabled,
     )
 
 
@@ -761,13 +869,75 @@ def public_comment_text(
     return public_text
 
 
-def public_status_label(value: str, labels: dict[str, str]) -> str:
-    return labels.get(value.strip().lower(), "未知")
+def normalize_generated_comment_body(
+    body: str, validation_purposes: tuple[tuple[str, str], ...]
+) -> str:
+    parts = re.split(r"(?=^### )", body, flags=re.MULTILINE)
+    normalized: list[str] = []
+    for part in parts:
+        heading = part.splitlines()[0].strip() if part.splitlines() else ""
+        if heading in {"### 需要处理的问题", "### 变更文件"}:
+            normalized.append(part)
+        else:
+            normalized.append(public_comment_text(part, validation_purposes))
+    return "".join(normalized)
 
 
 def public_failure_reason(failure_code: str) -> str:
     return CODEX_FAILURE_REASON_LABELS.get(
-        failure_code.strip().lower(), "Codex 自动审查执行异常"
+        failure_code.strip().lower(), "Codex 自动审查没有完整结束"
+    )
+
+
+def normalize_docs_only_comment(body: str) -> str:
+    policy_line = "- 本地确定性 CI 检查：本次仅含文档变更，按策略未执行确定性 CI。"
+    body = re.sub(
+        r"(?m)^- 本地确定性(?: CI 检查|门禁)：[^\n]*$",
+        policy_line,
+        body,
+        count=1,
+    )
+    body = body.replace(
+        "本地确定性 CI 检查已通过",
+        "本次仅含文档变更，按策略未执行确定性 CI",
+    )
+    return body.replace(
+        "本地确定性门禁已通过",
+        "本次仅含文档变更，按策略未执行确定性 CI",
+    )
+
+
+def normalize_comment_execution_status(body: str, execution_status: str) -> str:
+    body = re.sub(
+        r"(?m)^- Codex 执行状态：\*\*[^\n*]+\*\*。?\n?",
+        "",
+        body,
+    )
+    body = body.replace(
+        "- Codex AI 审查结论：**警告**",
+        "- Codex AI 审查结论：**需关注（非阻塞）**",
+    ).replace(
+        "- Codex 建议性结论（非阻塞）：**警告**",
+        "- Codex AI 审查结论：**需关注（非阻塞）**",
+    )
+    if execution_status == "pass":
+        return re.sub(
+            r"(?m)^- Codex 建议性结论（非阻塞）：",
+            "- Codex AI 审查结论：",
+            body,
+        )
+    body = re.sub(
+        r"(?m)^- Codex 建议性结论（非阻塞）：[^\n]*\n?",
+        "",
+        body,
+    )
+    body = re.sub(
+        r"(?m)^- Codex AI 审查结论：[^\n]*\n?",
+        "",
+        body,
+    )
+    return body.replace(
+        "Codex AI 自动审查已完成", "Codex AI 自动审查未完成"
     )
 
 
@@ -780,14 +950,60 @@ def codex_pr_commit_marker(target: Target) -> str:
     return f"<!-- {CODEX_COMMENT_SHA_MARKER_PREFIX}:{target.sha} -->"
 
 
+def limit_codex_pr_comment_body(body: str) -> str:
+    if len(body) <= MAX_CODEX_PR_COMMENT_LENGTH:
+        return body
+
+    changed_heading = "\n### 变更文件\n"
+    if changed_heading in body:
+        changed_start = body.index(changed_heading)
+        details_end = body.find("\n</details>", changed_start)
+        if details_end >= 0:
+            tail_start = details_end + len("\n</details>")
+            body = (
+                body[:changed_start]
+                + changed_heading
+                + "\n变更文件较多，公开评论已按长度上限省略文件表；"
+                "完整清单保留在本次任务结果产物中。\n"
+                + body[tail_start:]
+            )
+    if len(body) <= MAX_CODEX_PR_COMMENT_LENGTH:
+        return body
+
+    anchor = "\n### 可点击代码定位\n"
+    if anchor not in body:
+        anchor = "\n### 验证情况\n"
+    if anchor in body:
+        tail = body[body.index(anchor) :]
+        notice = "\n\n（前文已按评论长度上限截断。）\n"
+        available = max(MAX_CODEX_PR_COMMENT_LENGTH - len(notice) - len(tail), 0)
+        body = body[:available].rstrip() + notice + tail
+    if len(body) <= MAX_CODEX_PR_COMMENT_LENGTH:
+        return body
+
+    footer_start = body.rfind("\n---\n")
+    footer = body[footer_start:] if footer_start >= 0 else ""
+    notice = "\n\n（评论已按长度上限截断，完整信息保留在任务结果产物中。）\n"
+    available = max(
+        MAX_CODEX_PR_COMMENT_LENGTH - len(notice) - len(footer),
+        0,
+    )
+    return body[:available].rstrip() + notice + footer
+
+
 def codex_pr_comment_body(target: Target, result: LocalCIResult) -> str:
-    body = public_comment_text(
+    body = normalize_generated_comment_body(
         result.codex_ai.comment_markdown.strip(),
         result.codex_ai.validation_purposes,
     )
     if not body:
         return ""
-    report_url = result.codex_ai.report_url or result.target_url
+    execution_status = normalized_codex_execution_status(
+        result.codex_ai.execution_status, result.codex_ai.failure_code
+    )
+    body = normalize_comment_execution_status(body, execution_status)
+    if result.execution_mode == "codex_only":
+        body = normalize_docs_only_comment(body)
     location_links = github_finding_location_links(target, result.codex_ai.finding_locations)
     if location_links:
         validation_heading = "\n### 验证情况\n"
@@ -799,29 +1015,42 @@ def codex_pr_comment_body(target: Target, result: LocalCIResult) -> str:
             )
         else:
             body = f"{body}\n\n{location_links}"
-    execution_label = public_status_label(
-        result.codex_ai.execution_status, CODEX_EXECUTION_STATUS_LABELS
-    )
-    verdict_label = public_status_label(result.codex_ai.verdict, CODEX_VERDICT_LABELS)
+    execution_label = {
+        "pass": "完成",
+        "fail": "未完成",
+        "skipped": "未运行",
+        "not_reported": "未完成",
+    }.get(execution_status, "未完成")
     metadata_lines = [
         f"- 测试提交：`{target.sha[:12]}`",
-        f"- Codex 自动审查状态：{execution_label}；结论：{verdict_label}",
+        f"- Codex 执行状态：{execution_label}",
     ]
-    if result.codex_ai.failure_code:
-        metadata_lines.append(
-            f"- 未完成原因：{public_failure_reason(result.codex_ai.failure_code)}"
-        )
+    if execution_status != "pass":
+        if execution_status == "skipped":
+            metadata_lines.append("- 状态说明：本次任务按策略未运行 Codex 自动审查。")
+        elif result.codex_ai.failure_code:
+            metadata_lines.append(
+                f"- 未完成原因：{public_failure_reason(result.codex_ai.failure_code)}"
+            )
+        elif execution_status == "not_reported":
+            metadata_lines.append("- 未完成原因：尚未收到 Codex 自动审查结果。")
+        else:
+            metadata_lines.append("- 未完成原因：Codex 自动审查没有完整结束。")
     if result.publish_manifest and result.publish_manifest.missing_expected_files:
         missing = ", ".join(result.publish_manifest.missing_expected_files)
         metadata_lines.append(f"- 结果发布提醒：缺少预期结果文件 `{missing}`")
-    metadata_lines.append(f"- [查看完整 Codex AI 自动审查报告]({report_url})")
-    return (
+    if result.codex_ai.report_url:
+        metadata_lines.append(
+            f"- [查看完整 Codex AI 自动审查报告]({result.codex_ai.report_url})"
+        )
+    comment_body = (
         f"{body}\n\n"
         f"---\n\n"
         f"{chr(10).join(metadata_lines)}\n\n"
         f"{CODEX_COMMENT_MARKER}\n"
         f"{codex_pr_commit_marker(target)}\n"
     )
+    return limit_codex_pr_comment_body(comment_body)
 
 
 def github_finding_location_links(
@@ -931,7 +1160,9 @@ def post_stage_statuses(
 
 
 def codex_advisory_description(codex_ai: CodexAIResult) -> str:
-    execution_status = codex_ai.execution_status.strip().lower()
+    execution_status = normalized_codex_execution_status(
+        codex_ai.execution_status, codex_ai.failure_code
+    )
     verdict = codex_ai.verdict.strip().upper()
     test_status = codex_ai.test_status.strip().lower()
     constraint_status = codex_ai.constraint_status.strip().lower()
@@ -942,7 +1173,7 @@ def codex_advisory_description(codex_ai: CodexAIResult) -> str:
             return f"Codex AI 未完成：{public_failure_reason(codex_ai.failure_code)}（非阻塞）"
         return "Codex AI 未完成（非阻塞）"
     if verdict == "FAIL":
-        return "Codex AI 建议性结论：失败（非阻塞）"
+        return "Codex AI 审查结论：失败（非阻塞）"
     if test_status == "insufficient_evidence":
         return "Codex AI 测试证据不足（非阻塞）"
     if test_status == "stable_failure":
@@ -954,10 +1185,10 @@ def codex_advisory_description(codex_ai: CodexAIResult) -> str:
     if test_status == "test_generation_error":
         return "Codex AI 测试生成失败（非阻塞）"
     if verdict == "WARNING":
-        return "Codex AI 建议性结论：警告（非阻塞）"
+        return "Codex AI 审查结论：需关注（非阻塞）"
     if constraint_status == "warning":
         return "Codex AI 测试约束警告（非阻塞）"
-    return "Codex AI 建议性结论：通过（非阻塞）"
+    return "Codex AI 审查结论：通过（非阻塞）"
 
 
 def post_codex_advisory_status(

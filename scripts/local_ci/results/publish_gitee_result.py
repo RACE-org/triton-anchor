@@ -31,6 +31,28 @@ from result_paths import (  # noqa: E402
 )
 
 
+class PublishBudgetExceeded(RuntimeError):
+    pass
+
+
+class PublishBudget:
+    def __init__(self, max_bytes: int) -> None:
+        if max_bytes <= 0:
+            raise ValueError("GITEE result size limit must be positive")
+        self.max_bytes = max_bytes
+        self.used_bytes = 0
+
+    def copy(self, source: Path, destination: Path) -> None:
+        size = source.stat().st_size
+        if size > self.max_bytes or self.used_bytes + size > self.max_bytes:
+            raise PublishBudgetExceeded(
+                f"Gitee result payload exceeds {self.max_bytes} bytes at {source}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        self.used_bytes += size
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--owner", required=True, help="Source Gitee code repository owner for commit comments.")
@@ -48,6 +70,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exit-code", required=True, type=int)
     parser.add_argument("--results-branch", default="local-ci-results")
     parser.add_argument("--context", default="local-ci/sophgo-cmodel")
+    parser.add_argument("--execution-mode", default="full")
+    parser.add_argument("--ci-profile", default="unavailable")
+    parser.add_argument("--llvm-hash", default="unavailable")
+    parser.add_argument(
+        "--backend-stages-enabled", choices=("true", "false"), default="true"
+    )
+    parser.add_argument("--backend-skip-reason", default="")
+    parser.add_argument(
+        "--max-publish-bytes",
+        type=int,
+        default=int(os.getenv("GITEE_RESULT_MAX_BYTES", "268435456")),
+    )
     return parser.parse_args()
 
 
@@ -255,7 +289,13 @@ def build_publish_manifest(
     )
 
 
-def copy_results(run_dir: Path, target_dir: Path, args: argparse.Namespace, rel_dir: Path) -> Path | None:
+def copy_results(
+    run_dir: Path,
+    target_dir: Path,
+    args: argparse.Namespace,
+    rel_dir: Path,
+    budget: PublishBudget,
+) -> Path | None:
     artifact_dir_text = discover_artifact_dir(run_dir / "local-ci.log")
     artifact_dir = map_container_path(artifact_dir_text)
     if not artifact_dir or not artifact_dir.exists():
@@ -270,18 +310,18 @@ def copy_results(run_dir: Path, target_dir: Path, args: argparse.Namespace, rel_
     for file_name in PUBLISHED_ARTIFACT_FILES:
         source = artifact_dir / file_name
         if source.is_file():
-            shutil.copy2(source, target_dir / file_name)
+            budget.copy(source, target_dir / file_name)
             copied.append(file_name)
 
     for file_name in PUBLISHED_RUN_FILES:
         source = run_dir / file_name
         if source.is_file():
-            shutil.copy2(source, target_dir / file_name)
+            budget.copy(source, target_dir / file_name)
             copied.append(file_name)
 
     result_json = run_dir / "result.json"
     if result_json.is_file():
-        shutil.copy2(result_json, target_dir / "result.json")
+        budget.copy(result_json, target_dir / "result.json")
         copied.append("result.json")
 
     for required_file in REQUIRED_RESULT_FILES:
@@ -491,7 +531,13 @@ def write_ir_serialization_dashboard(worktree: Path, limit: int = 100) -> tuple[
     return markdown_path, csv_path
 
 
-def write_fallback_results(run_dir: Path, target_dir: Path, args: argparse.Namespace, rel_dir: Path) -> Path:
+def write_fallback_results(
+    run_dir: Path,
+    target_dir: Path,
+    args: argparse.Namespace,
+    rel_dir: Path,
+    budget: PublishBudget,
+) -> Path:
     if target_dir.exists():
         shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -500,11 +546,20 @@ def write_fallback_results(run_dir: Path, target_dir: Path, args: argparse.Names
     for file_name in ("local-ci.log", "result.json", *PUBLISHED_RUN_FILES):
         source = run_dir / file_name
         if source.is_file():
-            shutil.copy2(source, target_dir / file_name)
+            budget.copy(source, target_dir / file_name)
             copied.append(file_name)
 
     artifact_dir_text = discover_artifact_dir(run_dir / "local-ci.log") or "unavailable"
     tested_sha_kind = "pr_merge" if args.source_branch.startswith("ci/pr-") else "commit"
+    backend_stages_enabled = args.backend_stages_enabled == "true"
+    deterministic_stages_skipped = args.execution_mode == "codex_only"
+    frontend_status = "skipped" if deterministic_stages_skipped else "unavailable"
+    backend_status = (
+        "skipped"
+        if deterministic_stages_skipped or not backend_stages_enabled
+        else "unavailable"
+    )
+    backend_skip_reason = " ".join(args.backend_skip_reason.split())
     summary_lines = [
         "schema: triton-anchor-local-ci/v3",
         f"status: {args.exit_code}",
@@ -514,7 +569,20 @@ def write_fallback_results(run_dir: Path, target_dir: Path, args: argparse.Names
         f"actual_checkout_sha: unavailable",
         f"branch: {args.source_branch}",
         f"run_id: {args.run_id}",
+        f"execution_mode: {args.execution_mode}",
+        f"ci_profile: {args.ci_profile or 'unavailable'}",
+        f"llvm_hash: {args.llvm_hash or 'unavailable'}",
+        f"backend_stages_enabled: {args.backend_stages_enabled}",
+        f"backend_skip_reason: {backend_skip_reason}",
         f"artifact_dir: {artifact_dir_text}",
+        f"frontend_build_status: {frontend_status}",
+        f"frontend_smoke_status: {frontend_status}",
+        f"backend_rebuild_status: {backend_status}",
+        f"backend_smoke_jit_status: {backend_status}",
+        f"flaggems_status: {backend_status}",
+        f"compile_time_status: {backend_status}",
+        f"pass_profile_status: {backend_status}",
+        f"ir_serialization_status: {backend_status}",
         "note: artifact directory was unavailable; published host-side local-ci logs.",
         f"copied_files: {', '.join(copied) if copied else 'none'}",
     ]
@@ -533,6 +601,67 @@ def write_fallback_results(run_dir: Path, target_dir: Path, args: argparse.Names
         artifact_dir=None,
         copied=copied,
         missing_expected=missing_expected,
+        fallback=True,
+    )
+    return target_dir
+
+
+def write_size_limit_result(
+    run_dir: Path, target_dir: Path, args: argparse.Namespace, rel_dir: Path
+) -> Path:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    result = {
+        "sha": args.sha,
+        "target_sha": args.sha,
+        "tested_sha": args.sha,
+        "status": 88,
+        "failure_code": "gitee_result_size_limit",
+        "run_dir": str(run_dir),
+    }
+    (run_dir / "gitee-result-size-limit.json").write_text(
+        json.dumps(
+            {
+                "schema": "triton-anchor-local-ci-output-limit/v1",
+                "failure_code": "gitee_result_size_limit",
+                "limit_bytes": args.max_publish_bytes,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (target_dir / "result.json").write_text(
+        json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    (target_dir / "delivery-summary.txt").write_text(
+        "\n".join(
+            (
+                "schema: triton-anchor-local-ci/v3",
+                "status: 88",
+                f"target_sha: {args.sha}",
+                f"tested_sha: {args.sha}",
+                f"branch: {args.source_branch}",
+                f"run_id: {args.run_id}",
+                "failure_code: gitee_result_size_limit",
+                f"publish_limit_bytes: {args.max_publish_bytes}",
+                "note: oversized result files were not published.",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    build_publish_manifest(
+        target_dir,
+        args=args,
+        rel_dir=rel_dir,
+        artifact_dir_text="unavailable",
+        artifact_dir=None,
+        copied=["delivery-summary.txt", "result.json"],
+        missing_expected=[],
         fallback=True,
     )
     return target_dir
@@ -564,6 +693,11 @@ def post_commit_comment(owner: str, repo: str, sha: str, token: str, body: str) 
 
 def main() -> int:
     args = parse_args()
+    try:
+        publish_budget = PublishBudget(args.max_publish_bytes)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     token = os.getenv("GITEE_TOKEN", "")
     if not token:
         print("GITEE_TOKEN is not set; cannot publish Gitee result branch.", file=sys.stderr)
@@ -619,10 +753,25 @@ def main() -> int:
             run_git(["checkout", "-q", "--orphan", args.results_branch], worktree, git_env)
 
         target_dir = worktree / rel_dir
-        copied_result_dir = copy_results(run_dir, target_dir, args, rel_dir)
-        if copied_result_dir is None:
-            print("Artifact result directory was unavailable; publishing fallback host logs.", file=sys.stderr)
-            copied_result_dir = write_fallback_results(run_dir, target_dir, args, rel_dir)
+        try:
+            copied_result_dir = copy_results(
+                run_dir, target_dir, args, rel_dir, publish_budget
+            )
+            if copied_result_dir is None:
+                print(
+                    "Artifact result directory was unavailable; publishing fallback host logs.",
+                    file=sys.stderr,
+                )
+                copied_result_dir = write_fallback_results(
+                    run_dir, target_dir, args, rel_dir, publish_budget
+                )
+        except PublishBudgetExceeded as exc:
+            print(str(exc), file=sys.stderr)
+            args.exit_code = 88
+            status_text = "failed"
+            copied_result_dir = write_size_limit_result(
+                run_dir, target_dir, args, rel_dir
+            )
 
         compile_cache_dir = publish_compile_time_cache(worktree, copied_result_dir, args.sha)
         if compile_cache_dir is not None:

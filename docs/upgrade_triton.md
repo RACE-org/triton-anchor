@@ -298,7 +298,7 @@ triton-anchor 不使用 in-tree 后端，将文件简化为只保留 entry_point
 | 纯 Python 单元测试 | `PYTHONPATH=python python3 -m pytest python/triton_anchor/tests/ -v --tb=short` | 全部通过 |
 | wheel 构建 | `uv build --wheel --no-build-isolation` | 使用目标 LLVM 完成编译和链接 |
 | 安装后冒烟 | `python3 tests/test_smoke.py` | 导入、C++ 绑定、Dialect、AnchorIR、TTIR pipeline 和 AST → TTIR 全部通过 |
-| CI/等价检查 | 运行 `.github/workflows/ci.yml` 定义的检查 | `lint` 和 Python 3.9/3.10/3.11/3.12 `unit-test` 全部通过 |
+| CI/等价检查 | 运行 `.github/workflows/ci_basic.yml` 定义的检查 | `lint` 和 Python 3.9/3.10/3.11/3.12 `unit-test` 全部通过 |
 
 测试必须在干净虚拟环境中安装本次新构建的 wheel，不能复用旧的可编辑安装。日志中记录以下版本：
 

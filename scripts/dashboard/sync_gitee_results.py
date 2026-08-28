@@ -586,7 +586,6 @@ def sync_dashboard(
             main_runs, backend_name, profile, results_web_url, results_branch
         ),
     )
-
     manifest_path = output_dir / "manifest.json"
     manifest = read_json(manifest_path)
     if manifest is None:

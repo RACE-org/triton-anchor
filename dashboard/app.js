@@ -3,12 +3,17 @@ const state = {
   fullTest: null,
   backends: null,
   performance: null,
+  workerHealth: null,
+  workerHealthError: "",
   query: "",
   status: "all",
   stage: "all",
   page: 1,
   pageSize: 50,
 };
+
+let workerHealthRefreshTimer = null;
+let workerHealthRefreshPromise = null;
 
 const statusLabels = {
   passed: "通过",
@@ -20,6 +25,14 @@ const statusLabels = {
   warning: "警告",
   pending: "运行中",
   stale: "已过期",
+  healthy: "正常",
+  busy: "执行中",
+  degraded: "异常",
+  offline: "离线",
+  idle: "空闲",
+  polling: "轮询中",
+  running: "执行中",
+  not_run: "尚未轮询",
   unknown: "未知",
   disabled: "未启用",
 };
@@ -40,6 +53,11 @@ function normalizeStatus(value) {
   const status = String(value || "unknown").toLowerCase();
   if (status === "success") return "passed";
   if (status === "failure" || status === "error") return "failed";
+  if (status === "healthy" || status === "idle") return "passed";
+  if (status === "busy" || status === "polling" || status === "running") return "pending";
+  if (status === "degraded") return "warning";
+  if (status === "offline") return "failed";
+  if (status === "not_run") return "unknown";
   return status;
 }
 
@@ -72,6 +90,100 @@ function formatDuration(ms) {
   return `${value.toFixed(2)} ms`;
 }
 
+function formatElapsed(seconds) {
+  if (seconds === null || seconds === undefined || seconds === "") return "--";
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "--";
+  if (value < 60) return `${Math.floor(value)} 秒`;
+  if (value < 3600) return `${Math.floor(value / 60)} 分 ${Math.floor(value % 60)} 秒`;
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  return `${hours} 小时 ${minutes} 分`;
+}
+
+function formatBytes(bytes) {
+  if (bytes === null || bytes === undefined || bytes === "") return "--";
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return "--";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let scaled = value;
+  let index = 0;
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024;
+    index += 1;
+  }
+  const digits = index === 0 || scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  return `${scaled.toFixed(digits)} ${units[index]}`;
+}
+
+function formatLimit(value, unit) {
+  if (value === null || value === undefined || value === "" || Number(value) <= 0) {
+    return "未设置";
+  }
+  return `${value} ${unit}`;
+}
+
+function formatByteLimit(bytes) {
+  return Number(bytes) > 0 ? formatBytes(bytes) : "未设置";
+}
+
+function formatCpuUsage(cpuPercent, cpuLimit) {
+  const rawPercent = Number.parseFloat(String(cpuPercent ?? "").replace(/%$/, ""));
+  const limit = Number(cpuLimit);
+  const hasUsage = Number.isFinite(rawPercent) && rawPercent >= 0;
+  const hasLimit = Number.isFinite(limit) && limit > 0;
+
+  if (!hasUsage) {
+    return {
+      summary: "--",
+      detail: formatLimit(cpuLimit, "CPU"),
+      used: "--",
+      utilization: "--",
+    };
+  }
+
+  const usedCpus = rawPercent / 100;
+  const used = `${usedCpus.toFixed(2)} CPU`;
+  if (!hasLimit) {
+    return {
+      summary: "--",
+      detail: formatLimit(cpuLimit, "CPU"),
+      used,
+      utilization: "--",
+    };
+  }
+
+  const utilization = `${((usedCpus / limit) * 100).toFixed(2)}%`;
+  return {
+    summary: utilization,
+    detail: formatLimit(limit, "CPU"),
+    used,
+    utilization,
+  };
+}
+
+function shortSha(value) {
+  return value ? String(value).slice(0, 12) : "--";
+}
+
+function renderFactList(target, rows, emptyText = "暂无数据。") {
+  if (!rows.length) {
+    $(target).innerHTML = `<p class="fact-empty">${escapeHtml(emptyText)}</p>`;
+    return;
+  }
+  $(target).innerHTML = rows
+    .map(([label, value, kind]) => {
+      let rendered = escapeHtml(value === null || value === undefined || value === "" ? "--" : value);
+      if (kind === "code") {
+        rendered = `<code title="${escapeHtml(value || "")}">${escapeHtml(value || "--")}</code>`;
+      } else if (kind === "status") {
+        rendered = statusBadge(value);
+      }
+      return `<div class="fact-row"><dt>${escapeHtml(label)}</dt><dd>${rendered}</dd></div>`;
+    })
+    .join("");
+}
+
 function safeExternalUrl(value) {
   if (!value) return "";
   try {
@@ -88,13 +200,106 @@ async function fetchJson(path) {
   return response.json();
 }
 
+function decodeBase64Utf8(value) {
+  const binary = atob(String(value || "").replaceAll(/\s/g, ""));
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+async function fetchLiveWorkerHealth() {
+  const source = state.manifest.live_sources?.worker_health;
+  if (!source?.url || source.kind !== "gitee_contents_api") {
+    throw new Error("Worker health live source is not configured");
+  }
+  const response = await fetchJson(source.url);
+  if (response.encoding !== "base64" || typeof response.content !== "string") {
+    throw new Error("Gitee worker health response is invalid");
+  }
+  const document = JSON.parse(decodeBase64Utf8(response.content));
+  if (document.schema !== "triton-anchor-local-ci-worker-health/v1") {
+    throw new Error("Worker health snapshot schema is invalid");
+  }
+  return document;
+}
+
+function secondsSince(value) {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return null;
+  return Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+}
+
+function workerHealthForDisplay(document) {
+  const health = document && typeof document === "object" ? document : {};
+  const snapshotAge = secondsSince(health.collected_at);
+  const staleSeconds = Number(
+    state.manifest?.live_sources?.worker_health?.stale_seconds || 1200,
+  );
+  const poller = health.poller && typeof health.poller === "object" ? health.poller : {};
+  const task = health.active_task && typeof health.active_task === "object"
+    ? health.active_task
+    : null;
+  const stale = health.data_mode === "live"
+    && (snapshotAge === null || snapshotAge > staleSeconds);
+  return {
+    ...health,
+    state: stale ? "offline" : health.state,
+    snapshot_age_seconds: snapshotAge,
+    poller: {
+      ...poller,
+      heartbeat_age_seconds: secondsSince(poller.heartbeat_at),
+    },
+    active_task: task
+      ? { ...task, elapsed_seconds: secondsSince(task.started_at) }
+      : null,
+  };
+}
+
+async function refreshWorkerHealth() {
+  if (workerHealthRefreshPromise) return workerHealthRefreshPromise;
+  if (state.workerHealth?.data_mode !== "live") {
+    $("#workerSnapshotAt").textContent = "正在读取最新快照...";
+  }
+  workerHealthRefreshPromise = fetchLiveWorkerHealth()
+    .then((document) => {
+      state.workerHealth = document;
+      state.workerHealthError = "";
+    })
+    .catch((error) => {
+      state.workerHealthError = error instanceof Error ? error.message : String(error);
+      console.warn("Unable to refresh worker health", error);
+    })
+    .finally(() => {
+      workerHealthRefreshPromise = null;
+      renderWorkerHealth();
+    });
+  return workerHealthRefreshPromise;
+}
+
+function setWorkerHealthRefreshEnabled(enabled) {
+  if (workerHealthRefreshTimer !== null) {
+    window.clearInterval(workerHealthRefreshTimer);
+    workerHealthRefreshTimer = null;
+  }
+  if (!enabled) return;
+  refreshWorkerHealth();
+  const refreshSeconds = Math.max(
+    60,
+    Number(state.manifest.live_sources?.worker_health?.refresh_seconds || 300),
+  );
+  workerHealthRefreshTimer = window.setInterval(() => {
+    if (document.visibilityState === "visible") refreshWorkerHealth();
+  }, refreshSeconds * 1000);
+}
+
 async function loadData() {
   state.manifest = await fetchJson("data/manifest.json");
   const sources = state.manifest.sources;
-  [state.fullTest, state.backends, state.performance] = await Promise.all([
+  [state.fullTest, state.backends, state.performance, state.workerHealth] = await Promise.all([
     fetchJson(`data/${sources.full_test}`),
     fetchJson(`data/${sources.backend_status}`),
     fetchJson(`data/${sources.performance}`),
+    fetchJson(`data/${sources.worker_health}`),
   ]);
 }
 
@@ -275,6 +480,160 @@ function renderPerformance() {
   );
 }
 
+function renderWorkerHealth() {
+  const health = workerHealthForDisplay(state.workerHealth);
+  const poller = health.poller || {};
+  const task = health.active_task;
+  const container = health.container || {};
+  const limits = container.limits || {};
+  const stats = container.stats || {};
+  const lastResult = health.last_result;
+  const cpuUsage = formatCpuUsage(stats.cpu_percent, limits.cpus);
+
+  $("#workerProfile").textContent = health.profile || "unknown";
+  $("#workerId").textContent = health.worker_id || "--";
+  const snapshotLabel = health.collected_at
+    ? `快照 ${formatDate(health.collected_at)}（${formatElapsed(health.snapshot_age_seconds)}前）`
+    : "快照 --";
+  $("#workerSnapshotAt").textContent = state.workerHealthError
+    ? `${snapshotLabel} · 刷新失败`
+    : snapshotLabel;
+
+  const metrics = [
+    {
+      label: "Worker 状态",
+      value: statusBadge(health.state || "unknown"),
+      detail: health.data_mode === "live" ? "实时快照" : "暂无快照",
+      html: true,
+    },
+    {
+      label: "Poller 心跳",
+      value: formatElapsed(poller.heartbeat_age_seconds),
+      detail: formatDate(poller.heartbeat_at),
+    },
+    {
+      label: "发现 task ref",
+      value: Number.isInteger(poller.task_ref_count) ? poller.task_ref_count : "--",
+      detail: `最近轮询 ${formatDate(poller.last_poll_finished_at)}`,
+    },
+    {
+      label: "容器 CPU",
+      value: cpuUsage.summary,
+      detail: cpuUsage.detail,
+    },
+    {
+      label: "容器内存",
+      value: stats.memory_percent || "--",
+      detail: stats.memory_usage || `限制 ${formatByteLimit(limits.memory_bytes)}`,
+    },
+  ];
+  $("#workerMetrics").innerHTML = metrics
+    .map(
+      (metric) => `
+        <div class="metric-item">
+          <span class="metric-label">${escapeHtml(metric.label)}</span>
+          <span class="metric-value worker-metric-value">${metric.html ? metric.value : escapeHtml(metric.value)}</span>
+          <span class="metric-detail worker-metric-detail">${escapeHtml(metric.detail)}</span>
+        </div>`,
+    )
+    .join("");
+
+  const activeTaskState = task
+    ? "busy"
+    : health.state === "healthy"
+      ? "idle"
+      : health.state || "unknown";
+  $("#activeTaskState").innerHTML = statusBadge(activeTaskState);
+  renderFactList(
+    "#activeTaskDetails",
+    task
+      ? [
+          ["阶段", task.stage],
+          ["任务分支", task.branch, "code"],
+          ["SHA", shortSha(task.sha), "code"],
+          ["Run ID", task.run_id, "code"],
+          ["Profile", task.profile],
+          ["执行模式", task.execution_mode],
+          ["开始时间", formatDate(task.started_at)],
+          ["已运行", formatElapsed(task.elapsed_seconds)],
+        ]
+      : [],
+    "当前没有正在执行的任务。",
+  );
+
+  const pollerStatus = poller.alive ? poller.state || "unknown" : health.state === "offline" ? "offline" : "unknown";
+  $("#pollerState").innerHTML = statusBadge(pollerStatus);
+  renderFactList("#pollerDetails", [
+    ["进程", poller.alive ? "运行中" : "未确认"],
+    ["PID", poller.pid],
+    ["启动时间", formatDate(poller.started_at)],
+    ["最后心跳", formatDate(poller.heartbeat_at)],
+    ["心跳距今", formatElapsed(poller.heartbeat_age_seconds)],
+    ["最近轮询", poller.last_poll_status || "unknown", "status"],
+    ["轮询结束", formatDate(poller.last_poll_finished_at)],
+    ["错误码", poller.last_error_code || "--", "code"],
+  ]);
+
+  const containerStatus = !container.available
+    ? "unknown"
+    : container.running
+      ? "healthy"
+      : "offline";
+  $("#containerState").innerHTML = statusBadge(containerStatus);
+  renderFactList("#containerDetails", [
+    ["名称", container.name || "--", "code"],
+    ["Docker 状态", container.status || "unknown", "status"],
+    ["启动时间", formatDate(container.started_at)],
+    ["重启次数", container.restart_count],
+    [
+      "OOM killed",
+      typeof container.oom_killed === "boolean" ? (container.oom_killed ? "是" : "否") : "--",
+    ],
+    ["CPU 使用", cpuUsage.used],
+    ["CPU 限制", formatLimit(limits.cpus, "CPU")],
+    ["CPU 限额利用率", cpuUsage.utilization],
+    ["内存限制", formatByteLimit(limits.memory_bytes)],
+    ["PID 限制", formatLimit(limits.pids, "PID")],
+    ["当前 PID", stats.pids || "--"],
+    ["Block I/O", stats.block_io || "--"],
+    ["Network I/O", stats.network_io || "--"],
+  ]);
+
+  const storageRows = Array.isArray(health.storage) ? health.storage : [];
+  $("#workerStorageRows").innerHTML = storageRows
+    .map(
+      (row) => `
+        <tr>
+          <td><strong>${escapeHtml(row.label || "--")}</strong></td>
+          <td><code title="${escapeHtml(row.path || "")}">${escapeHtml(row.path || "--")}</code></td>
+          <td>${formatBytes(row.directory_bytes)}</td>
+          <td>${row.directory_percent === null || row.directory_percent === undefined ? "--" : `${escapeHtml(row.directory_percent)}%`}</td>
+        </tr>`,
+    )
+    .join("");
+  $("#workerStorageEmpty").hidden = storageRows.length !== 0;
+
+  $("#lastResultState").innerHTML = statusBadge(lastResult?.status || "unknown");
+  renderFactList(
+    "#lastResultDetails",
+    lastResult
+      ? [
+          ["任务分支", lastResult.branch, "code"],
+          ["SHA", shortSha(lastResult.sha), "code"],
+          ["Run ID", lastResult.run_id, "code"],
+          ["Profile", lastResult.profile],
+          ["结果", lastResult.status, "status"],
+          ["退出码", lastResult.exit_code],
+          ["发布退出码", lastResult.publish_status],
+          ["错误码", lastResult.failure_code || "--", "code"],
+          ["开始时间", formatDate(lastResult.started_at)],
+          ["结束时间", formatDate(lastResult.finished_at)],
+        ]
+      : [],
+    "还没有可展示的任务结果。",
+  );
+}
+
 function downloadFilteredXlsx() {
   const headers = ["序号", "算子名称", "测试状态", "失败阶段", "耗时(ms)"];
   const rows = filteredOperators().map((row) => [
@@ -298,7 +657,15 @@ function bindEvents() {
       $$(".tab-button").forEach((item) => item.classList.toggle("active", item === button));
       $$(".view").forEach((view) => view.classList.remove("active"));
       $(`#${button.dataset.view}View`).classList.add("active");
+      setWorkerHealthRefreshEnabled(button.dataset.view === "worker");
     });
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    const workerButton = $('.tab-button[data-view="worker"]');
+    if (document.visibilityState === "visible" && workerButton?.classList.contains("active")) {
+      refreshWorkerHealth();
+    }
   });
 
   $("#operatorSearch").addEventListener("input", (event) => {
@@ -344,10 +711,12 @@ async function initialize() {
     renderOperators();
     renderBackends();
     renderPerformance();
+    renderWorkerHealth();
     bindEvents();
   } catch (error) {
     $("#operatorsView").classList.remove("active");
     $("#performanceView").classList.remove("active");
+    $("#workerView").classList.remove("active");
     $("#loadError").hidden = false;
     $("#loadErrorMessage").textContent = error instanceof Error ? error.message : String(error);
   }

@@ -65,6 +65,28 @@ def test_v2_metadata_records_pr_merge_identity() -> None:
     assert canonical["head_sha"] == HEAD_SHA
     assert canonical["target_branch"] == "main"
     assert canonical["worker_revision_sha"] == "d" * 40
+    assert canonical["execution_mode"] == "full"
+
+
+def test_v2_metadata_validates_execution_mode() -> None:
+    canonical, warnings = metadata.validate_document(
+        v2_document(execution_mode="codex_only"),
+        expected_task_ref=TASK_REF,
+        expected_target_sha=TESTED_SHA,
+        expected_base_sha=BASE_SHA,
+        expected_head_sha=HEAD_SHA,
+    )
+
+    assert warnings == []
+    assert canonical["execution_mode"] == "codex_only"
+    with pytest.raises(metadata.MetadataError, match="execution_mode"):
+        metadata.validate_document(
+            v2_document(execution_mode="skip_all"),
+            expected_task_ref=TASK_REF,
+            expected_target_sha=TESTED_SHA,
+            expected_base_sha=BASE_SHA,
+            expected_head_sha=HEAD_SHA,
+        )
 
 
 @pytest.mark.parametrize(

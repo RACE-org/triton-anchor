@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -351,6 +352,67 @@ def added_lines(patch: str) -> Iterator[tuple[int, str]]:
             current_line += 1
 
 
+def git_output(repository: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    return completed.stdout
+
+
+def restore_missing_patches(
+    files: list[dict[str, object]],
+    repository: Path,
+    comparison_base_sha: str,
+    expected_head_sha: str,
+    tested_sha: str,
+) -> list[dict[str, object]]:
+    missing = [
+        item
+        for item in files
+        if not isinstance(item.get("patch"), str)
+        and item.get("status") != "removed"
+        and requires_text_scan(str(item.get("filename", "")))
+    ]
+    if not missing:
+        return files
+
+    checked_out_sha = git_output(repository, "rev-parse", "HEAD").strip()
+    if checked_out_sha != tested_sha:
+        raise RuntimeError("diff fallback did not check out the frozen merge result")
+
+    parents = git_output(
+        repository, "show", "-s", "--format=%P", tested_sha
+    ).strip().split()
+    if parents != [comparison_base_sha, expected_head_sha]:
+        raise RuntimeError("diff fallback merge parents do not match the authorized base/head")
+
+    restored: list[dict[str, object]] = []
+    for original in files:
+        item = dict(original)
+        filename = str(item.get("filename", ""))
+        if original in missing:
+            patch = git_output(
+                repository,
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--unified=3",
+                comparison_base_sha,
+                tested_sha,
+                "--",
+                filename,
+            )
+            if any(HUNK.match(line) for line in patch.splitlines()):
+                item["patch"] = patch
+        restored.append(item)
+    return restored
+
+
 def scan(files: list[dict[str, object]]) -> tuple[list[Finding], list[Finding]]:
 
     blocking: list[Finding] = []
@@ -471,6 +533,13 @@ def main() -> int:
     parser.add_argument(
         "--expected-head-sha", default=os.environ.get("EXPECTED_HEAD_SHA", "")
     )
+    parser.add_argument(
+        "--comparison-base-sha", default=os.environ.get("COMPARISON_BASE_SHA", "")
+    )
+    parser.add_argument("--tested-sha", default=os.environ.get("TESTED_SHA", ""))
+    parser.add_argument(
+        "--diff-repository", default=os.environ.get("DIFF_REPOSITORY", "")
+    )
     args = parser.parse_args()
 
     if (
@@ -492,6 +561,28 @@ def main() -> int:
         args.expected_head_sha,
     )
     files = fetch_pr_files(api_url, args.repository, args.pr_number, args.token)
+    if any(
+        not isinstance(item.get("patch"), str)
+        and item.get("status") != "removed"
+        and requires_text_scan(str(item.get("filename", "")))
+        for item in files
+    ):
+        if (
+            not args.comparison_base_sha
+            or not args.tested_sha
+            or not args.diff_repository
+        ):
+            raise RuntimeError(
+                "text diff fallback requires comparison base SHA, tested SHA, "
+                "and diff repository"
+            )
+        files = restore_missing_patches(
+            files,
+            Path(args.diff_repository),
+            args.comparison_base_sha,
+            args.expected_head_sha,
+            args.tested_sha,
+        )
     require_pr_head(
         api_url,
         args.repository,

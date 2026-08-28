@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -94,7 +95,10 @@ class CodexCommentTests(unittest.TestCase):
                 (
                     "## Codex AI 代码审查\n\n"
                     "> 这是非阻塞的辅助审查；确定性 CI 结果仍是合入门禁。\n\n"
-                    "### 审查摘要\n\n发现一个问题。\n\nCodex AI CI 已完成，Local CI 已通过。\n\n"
+                    "### 审查摘要\n\n"
+                    "- Codex 执行状态：**完成**。\n"
+                    "- Codex 建议性结论（非阻塞）：**警告**\n\n"
+                    "发现一个问题。\n\nCodex AI CI 已完成，Local CI 已通过。\n\n"
                     "### 贡献者目标与实现情况\n\n实现不完整。\n\n"
                     "### 需要处理的问题\n\n#### 1. [中风险] 示例问题\n\n"
                     "### 验证情况\n\nRUN-001 稳定复现问题。\n\n"
@@ -177,18 +181,127 @@ class CodexCommentTests(unittest.TestCase):
         self.assertIn("### 变更文件", body)
         self.assertIn("- 测试提交：", body)
         self.assertIn("`aaaaaaaaaaaa`", body)
-        self.assertIn("Codex 自动审查状态：完成", body)
-        self.assertIn("结论：警告", body)
-        self.assertNotIn("Runner 命令与证据校验", body)
         self.assertIn("缓存版本失配定向测试稳定复现问题", body)
-        self.assertNotIn("RUN-001", body)
         self.assertIn("Codex AI 自动审查已完成，本地确定性 CI 检查已通过", body)
-        self.assertNotIn("Codex AI CI", body)
-        self.assertNotIn("Local CI", body)
-        self.assertIn("查看完整 Codex AI 自动审查报告", body)
-        self.assertIn(self.result.codex_ai.report_url, body)
+        self.assertIn("Codex AI 审查结论：**需关注（非阻塞）**", body)
+        main, footer = body.split("\n---\n", 1)
+        self.assertNotIn("Codex 执行状态", main)
+        self.assertIn("Codex 执行状态：完成", footer)
+        self.assertNotIn("Codex 建议性结论", body)
         self.assertIn(bridge.CODEX_COMMENT_MARKER, body)
         self.assertIn(bridge.codex_pr_commit_marker(self.target), body)
+
+    def test_docs_only_comment_keeps_policy_skip_semantics(self) -> None:
+        codex_ai = replace(
+            self.result.codex_ai,
+            comment_markdown=(
+                "## Codex AI 自动审查\n\n"
+                "> Codex AI 自动审查仅供参考且不阻塞合入。\n\n"
+                "### 审查摘要\n\n"
+                "- Codex 建议性结论（非阻塞）：**警告**\n\n"
+                "本地确定性 CI 检查已通过。\n\n"
+                "- 本地确定性 CI 检查：已通过；Codex AI 自动审查只提供补充意见。\n\n"
+                "### 验证情况\n\n本次只检查文档。\n"
+            ),
+        )
+        result = replace(
+            self.result,
+            codex_ai=codex_ai,
+            execution_mode="codex_only",
+        )
+
+        body = bridge.codex_pr_comment_body(self.target, result)
+
+        self.assertIn("本次仅含文档变更，按策略未执行确定性 CI", body)
+        self.assertNotIn("本地确定性 CI 检查：已通过", body)
+        self.assertNotIn("本地确定性 CI 检查已通过", body)
+        self.assertIn("Codex AI 审查结论：**需关注（非阻塞）**", body)
+        footer = body.split("\n---\n", 1)[1]
+        self.assertNotIn("本地确定性", footer)
+        self.assertIn("Codex 执行状态：完成", footer)
+
+    def test_footer_keeps_failure_reason_without_repeating_status_or_verdict(self) -> None:
+        cases = (
+            (
+                "PASS",
+                "WARNING",
+                "",
+                "Codex 执行状态：完成",
+                "",
+            ),
+            (
+                "fail",
+                "FAIL",
+                "timeout",
+                "Codex 执行状态：未完成",
+                "未完成原因：Codex 自动审查执行超时",
+            ),
+            (
+                "pass",
+                "FAIL",
+                "startup_timeout",
+                "Codex 执行状态：未完成",
+                "未完成原因：Codex 自动审查启动超时",
+            ),
+            (
+                "skipped",
+                "NOT_RUN",
+                "",
+                "Codex 执行状态：未运行",
+                "状态说明：本次任务按策略未运行 Codex 自动审查",
+            ),
+            (
+                "not_reported",
+                "UNKNOWN",
+                "",
+                "Codex 执行状态：未完成",
+                "未完成原因：尚未收到 Codex 自动审查结果",
+            ),
+        )
+        for execution_status, verdict, failure_code, expected_status, reason in cases:
+            with self.subTest(
+                execution_status=execution_status,
+                failure_code=failure_code,
+            ):
+                codex_ai = replace(
+                    self.result.codex_ai,
+                    execution_status=execution_status,
+                    verdict=verdict,
+                    failure_code=failure_code,
+                )
+                body = bridge.codex_pr_comment_body(
+                    self.target, replace(self.result, codex_ai=codex_ai)
+                )
+                main, footer = body.split("\n---\n", 1)
+                self.assertNotIn("Codex 自动审查状态", footer)
+                self.assertNotIn("Codex 执行状态", main)
+                self.assertIn(expected_status, footer)
+                self.assertNotIn("建议性结论", footer)
+                if reason:
+                    self.assertIn(reason, footer)
+                    self.assertNotIn("Codex AI 自动审查已完成", body)
+                    self.assertNotIn("Codex AI 审查结论", body)
+                else:
+                    self.assertNotIn("未完成原因", footer)
+                    self.assertIn(
+                        "Codex AI 审查结论：**需关注（非阻塞）**", body
+                    )
+
+    def test_footer_only_links_nonempty_report_url(self) -> None:
+        for report_url, expected in (
+            (self.result.codex_ai.report_url, True),
+            ("", False),
+        ):
+            with self.subTest(report_url=report_url):
+                result = replace(
+                    self.result,
+                    codex_ai=replace(self.result.codex_ai, report_url=report_url),
+                )
+                body = bridge.codex_pr_comment_body(self.target, result)
+                self.assertEqual(
+                    "查看完整 Codex AI 自动审查报告" in body,
+                    expected,
+                )
 
     def test_comment_body_links_findings_to_the_reviewed_commit(self) -> None:
         with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/repo"}):
@@ -207,6 +320,48 @@ class CodexCommentTests(unittest.TestCase):
             f"{self.target.sha}/python/example.py#L17-L18",
             body,
         )
+
+    def test_final_comment_does_not_rewrite_real_ids_in_evidence_or_paths(self) -> None:
+        comment = self.result.codex_ai.comment_markdown.replace(
+            "#### 1. [中风险] 示例问题",
+            "#### 1. [中风险] 示例问题\n\n- 核心证据：常量 `AI-001` 保持不变。",
+        ).replace(
+            "<details></details>",
+            "<details>\n\n| `docs/AI-001.md` | 修改 | 说明 | 影响 |\n\n</details>",
+        )
+        result = replace(
+            self.result,
+            codex_ai=replace(self.result.codex_ai, comment_markdown=comment),
+        )
+
+        body = bridge.codex_pr_comment_body(self.target, result)
+
+        self.assertIn("常量 `AI-001` 保持不变", body)
+        self.assertIn("`docs/AI-001.md`", body)
+
+    def test_final_comment_length_keeps_links_sections_and_footer(self) -> None:
+        oversized_comment = self.result.codex_ai.comment_markdown.replace(
+            "<details></details>",
+            "<details>\n" + ("| `very-long.py` | 修改 | 说明 | 影响 |\n" * 2_000) + "</details>",
+        )
+        result = replace(
+            self.result,
+            codex_ai=replace(
+                self.result.codex_ai,
+                comment_markdown=oversized_comment,
+            ),
+        )
+
+        with mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "owner/repo"}):
+            body = bridge.codex_pr_comment_body(self.target, result)
+
+        self.assertLessEqual(len(body), bridge.MAX_CODEX_PR_COMMENT_LENGTH)
+        self.assertIn("### 可点击代码定位", body)
+        self.assertIn("### 验证情况", body)
+        self.assertIn("### 变更文件", body)
+        self.assertIn("公开评论已按长度上限省略文件表", body)
+        self.assertIn(bridge.CODEX_COMMENT_MARKER, body)
+        self.assertIn(bridge.codex_pr_commit_marker(self.target), body)
 
     def test_wide_finding_range_keeps_clickable_location(self) -> None:
         locations = bridge.finding_locations_from_report(
@@ -499,6 +654,7 @@ class CodexCommentTests(unittest.TestCase):
                 "测试生成失败",
             ),
             (changed(verdict="FAIL", test_status="passed"), "失败"),
+            (changed(verdict="WARNING", test_status="passed"), "需关注"),
             (
                 changed(
                     verdict="PASS",
@@ -524,14 +680,54 @@ class CodexCommentTests(unittest.TestCase):
 
     def test_new_report_failure_codes_have_stable_public_labels(self) -> None:
         expected = {
-            "analysis_contract_failed": "Codex 审查语义载荷未满足公开结构契约",
-            "trusted_report_input_failed": "Runner 生成的可信报告输入校验失败",
-            "report_contract_failed": "Runner 生成报告时内部契约校验失败",
-            "report_metadata_failed": "Runner 读取报告执行事实失败",
+            "container_prepare_timeout": "Codex 审查运行环境准备超时",
+            "startup_timeout": "Codex 自动审查启动超时",
+            "analysis_contract_failed": "Codex 自动审查结果整理阶段未能生成公开摘要",
+            "schema_validation_failed": "Codex 自动审查结果整理阶段未能生成公开摘要",
+            "trusted_report_input_failed": "Codex 自动审查结果汇总阶段未能核对代码差异与执行记录",
+            "report_contract_failed": "Codex 自动审查报告生成阶段未完成",
+            "report_metadata_failed": "Codex 自动审查验证结果汇总阶段未完成",
         }
         for code, label in expected.items():
             with self.subTest(code=code):
-                self.assertEqual(bridge.public_failure_reason(code), label)
+                public_label = bridge.public_failure_reason(code)
+                self.assertEqual(public_label, label)
+                self.assertNotRegex(public_label, r"Runner|schema|语义载荷|内部契约")
+
+    def test_internal_failure_terms_are_rewritten_in_public_comment(self) -> None:
+        cases = (
+            (
+                "结构化报告未通过 schema、固定格式或中文内容校验。",
+                "自动审查结果整理阶段未能生成公开摘要。",
+            ),
+            (
+                "Codex 审查语义载荷未满足公开结构契约。",
+                "Codex 自动审查结果整理阶段未能生成公开摘要。",
+            ),
+            (
+                "Runner 生成的可信报告输入校验失败。",
+                "Codex 自动审查结果汇总阶段未能核对代码差异与执行记录。",
+            ),
+            (
+                "Runner 生成报告时内部契约校验失败。",
+                "Codex 自动审查报告生成阶段未完成。",
+            ),
+            (
+                "Runner 读取报告执行事实失败。",
+                "Codex 自动审查验证结果汇总阶段未完成。",
+            ),
+        )
+        for original, expected in cases:
+            with self.subTest(original=original):
+                public_text = bridge.public_comment_text(original)
+                self.assertEqual(public_text, expected)
+                self.assertNotRegex(
+                    public_text, r"Runner|schema|语义载荷|内部契约"
+                )
+        self.assertEqual(
+            bridge.public_comment_text("Local CI profile 与 Local CI Gateway"),
+            "Local CI profile 与 Local CI Gateway",
+        )
 
     def test_codex_ai_output_is_single_line_json(self) -> None:
         encoded = bridge.codex_ai_output_json(self.result)
@@ -596,6 +792,7 @@ class CodexCommentTests(unittest.TestCase):
             if path.endswith("/delivery-summary.txt"):
                 return (
                     "status: 0\n"
+                    "backend_stages_enabled: true\n"
                     "frontend_build_status: pass\n"
                     "frontend_smoke_status: pass\n"
                     "backend_rebuild_status: pass\n"
@@ -647,6 +844,8 @@ class CodexCommentTests(unittest.TestCase):
                         ]
                     }
                 )
+            if path.endswith("/codex-ai-report.md"):
+                return "# Codex AI 自动审查报告\n"
             return None
 
         gitee_content.side_effect = content
@@ -664,6 +863,8 @@ class CodexCommentTests(unittest.TestCase):
         self.assertEqual(result.codex_ai.verdict, "WARNING")
         self.assertEqual(result.codex_ai.test_status, "stable_failure")
         self.assertEqual(result.codex_ai.constraint_status, "warning")
+        self.assertTrue(result.backend_stages_enabled)
+        self.assertEqual(result.execution_mode, "full")
         self.assertIn("/blob/local-ci-results/", result.codex_ai.report_url)
         self.assertTrue(result.codex_ai.report_url.endswith("codex-ai-report.md"))
         self.assertEqual(
@@ -674,24 +875,166 @@ class CodexCommentTests(unittest.TestCase):
         assert result.publish_manifest is not None
         self.assertEqual(result.publish_manifest.target_sha, self.target.sha)
 
+    def test_read_result_only_links_existing_full_report(self) -> None:
+        cases = (
+            ("# Codex AI 自动审查报告\n", (), True),
+            (None, (), False),
+            ("# Codex AI 自动审查报告\n", ("codex-ai-report.md",), False),
+        )
+        for report_markdown, missing_files, expected_url in cases:
+            with self.subTest(
+                report_exists=report_markdown is not None,
+                missing_files=missing_files,
+            ):
+
+                def content(*_args: object) -> str | None:
+                    path = str(_args[2])
+                    if path.endswith("latest.txt"):
+                        return "report-run\n"
+                    if path.endswith("publish-manifest.json"):
+                        return json.dumps(
+                            {
+                                "schema": "triton-anchor-local-ci-publish-manifest/v1",
+                                "status": "passed",
+                                "target_sha": self.target.sha,
+                                "tested_sha": self.target.sha,
+                                "run_id": "report-run",
+                                "missing_expected_files": list(missing_files),
+                                "fallback": False,
+                            }
+                        )
+                    if path.endswith("delivery-summary.txt"):
+                        return (
+                            "status: 0\n"
+                            "backend_stages_enabled: true\n"
+                            f"target_sha: {self.target.sha}\n"
+                            "run_id: report-run\n"
+                            "frontend_build_status: pass\n"
+                            "frontend_smoke_status: pass\n"
+                            "backend_rebuild_status: pass\n"
+                            "backend_smoke_jit_status: pass\n"
+                        )
+                    if path.endswith("codex-ai-ci-summary.txt"):
+                        return "status: pass\nreport_verdict: PASS\n"
+                    if path.endswith("codex-ai-comment.md"):
+                        return "## Codex AI 自动审查\n"
+                    if path.endswith("codex-ai-report.md"):
+                        return report_markdown
+                    return None
+
+                args = SimpleNamespace(
+                    gitee_owner="owner",
+                    gitee_repo="results",
+                    gitee_results_branch="local-ci-results",
+                    gitee_web_url="https://gitee.example/results",
+                )
+                with mock.patch.object(
+                    bridge, "gitee_content", side_effect=content
+                ):
+                    result = bridge.read_local_ci_result(args, self.target, "token")
+
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertEqual(bool(result.codex_ai.report_url), expected_url)
+
+    def test_required_stages_follow_trusted_backend_profile(self) -> None:
+        cases = (
+            ("true", "pass", "pass", "pass", "pass", 0, "pass", True),
+            ("true", "pass", "pass", "pass", "not_run", 1, "pass", True),
+            ("false", "pass", "pass", "skipped", "skipped", 0, "skipped", False),
+            ("false", "pass", "pass", "fail", "skipped", 1, "fail", False),
+            ("false", "skipped", "pass", "skipped", "skipped", 1, "skipped", False),
+            ("true", "pass", "pass", "skipped", "skipped", 1, "fail", True),
+            (None, "pass", "pass", "skipped", "skipped", 1, "fail", True),
+            ("invalid", "pass", "pass", "pass", "pass", 1, "pass", True),
+        )
+        for (
+            profile_value,
+            frontend_build,
+            frontend_smoke,
+            backend_rebuild,
+            backend_smoke,
+            expected_exit,
+            expected_backend_status,
+            expected_backend_enabled,
+        ) in cases:
+            with self.subTest(profile_value=profile_value, expected_exit=expected_exit):
+                profile_line = (
+                    f"backend_stages_enabled: {profile_value}\n"
+                    if profile_value is not None
+                    else ""
+                )
+                dependent_status = (
+                    "skipped" if profile_value == "false" else "disabled"
+                )
+
+                def content(*_args: object) -> str | None:
+                    path = str(_args[2])
+                    if path.endswith("latest.txt"):
+                        return "profile-run\n"
+                    if path.endswith("delivery-summary.txt"):
+                        return (
+                            "status: 0\n"
+                            f"target_sha: {self.target.sha}\n"
+                            "run_id: profile-run\n"
+                            f"{profile_line}"
+                            f"frontend_build_status: {frontend_build}\n"
+                            f"frontend_smoke_status: {frontend_smoke}\n"
+                            f"backend_rebuild_status: {backend_rebuild}\n"
+                            f"backend_smoke_jit_status: {backend_smoke}\n"
+                            f"flaggems_status: {dependent_status}\n"
+                            f"compile_time_status: {dependent_status}\n"
+                            f"pass_profile_status: {dependent_status}\n"
+                            f"ir_serialization_status: {dependent_status}\n"
+                        )
+                    return None
+
+                args = SimpleNamespace(
+                    gitee_owner="owner",
+                    gitee_repo="results",
+                    gitee_results_branch="local-ci-results",
+                    gitee_web_url="https://gitee.example/results",
+                )
+                with mock.patch.object(
+                    bridge, "gitee_content", side_effect=content
+                ):
+                    result = bridge.read_local_ci_result(args, self.target, "token")
+
+                self.assertIsNotNone(result)
+                assert result is not None
+                self.assertEqual(result.exit_code, expected_exit)
+                self.assertEqual(
+                    result.stage_statuses["backend_rebuild"],
+                    expected_backend_status,
+                )
+                self.assertEqual(
+                    result.backend_stages_enabled,
+                    expected_backend_enabled,
+                )
+
     @mock.patch.object(bridge, "gitee_content")
-    def test_success_is_forced_to_fail_when_required_stage_is_missing(
+    def test_codex_only_pr_accepts_explicitly_skipped_stages(
         self,
         gitee_content: mock.Mock,
     ) -> None:
         def content(*_args: object) -> str | None:
             path = str(_args[2])
             if path.endswith("latest.txt"):
-                return "run-2\n"
+                return "run-3\n"
             if path.endswith("delivery-summary.txt"):
                 return (
                     "status: 0\n"
+                    "execution_mode: codex_only\n"
                     f"target_sha: {self.target.sha}\n"
-                    "run_id: run-2\n"
-                    "frontend_build_status: pass\n"
-                    "frontend_smoke_status: pass\n"
-                    "backend_rebuild_status: pass\n"
-                    "backend_smoke_jit_status: not_run\n"
+                    "run_id: run-3\n"
+                    "frontend_build_status: skipped\n"
+                    "frontend_smoke_status: skipped\n"
+                    "backend_rebuild_status: skipped\n"
+                    "backend_smoke_jit_status: skipped\n"
+                    "flaggems_status: skipped\n"
+                    "compile_time_status: skipped\n"
+                    "pass_profile_status: skipped\n"
+                    "ir_serialization_status: skipped\n"
                 )
             return None
 
@@ -705,7 +1048,16 @@ class CodexCommentTests(unittest.TestCase):
         result = bridge.read_local_ci_result(args, self.target, "token")
         self.assertIsNotNone(result)
         assert result is not None
-        self.assertEqual(result.exit_code, 1)
+        self.assertEqual(result.exit_code, 0)
+
+        push_target = bridge.Target(
+            "feature", "ci/push/feature", self.target.sha, "feature"
+        )
+        push_result = bridge.read_local_ci_result(args, push_target, "token")
+        self.assertIsNotNone(push_result)
+        assert push_result is not None
+        self.assertEqual(push_result.exit_code, 1)
+        self.assertEqual(push_result.stage_statuses["frontend_build"], "fail")
 
 
 if __name__ == "__main__":

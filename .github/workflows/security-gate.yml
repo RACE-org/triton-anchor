@@ -102,11 +102,22 @@ jobs:
           persist-credentials: false
           sparse-checkout: scripts/ci
 
+      - name: Check out exact merge result for diff fallback
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tested_sha }}
+          path: security-candidate
+          fetch-depth: 2
+          persist-credentials: false
+
       - name: Scan added lines for credentials and network access
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          COMPARISON_BASE_SHA: ${{ inputs.comparison_base_sha }}
+          TESTED_SHA: ${{ inputs.tested_sha }}
+          DIFF_REPOSITORY: ${{ github.workspace }}/security-candidate
         run: python3 trusted-security/scripts/ci/scan_pr_security.py --mode block
 
   codeql-analysis:
@@ -159,9 +170,20 @@ jobs:
           persist-credentials: false
           sparse-checkout: scripts/ci
 
+      - name: Check out exact merge result for diff fallback
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tested_sha }}
+          path: security-candidate
+          fetch-depth: 2
+          persist-credentials: false
+
       - name: Report non-blocking findings
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+          COMPARISON_BASE_SHA: ${{ inputs.comparison_base_sha }}
+          TESTED_SHA: ${{ inputs.tested_sha }}
+          DIFF_REPOSITORY: ${{ github.workspace }}/security-candidate
         run: python3 trusted-security/scripts/ci/scan_pr_security.py --mode warn

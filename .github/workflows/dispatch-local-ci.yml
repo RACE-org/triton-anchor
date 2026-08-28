@@ -208,6 +208,29 @@ jobs:
           fi
           git checkout --detach "${TESTED_SHA}"
 
+      - name: Classify PR execution mode
+        id: execution
+        if: ${{ steps.meta.outputs.pr_number != '' }}
+        env:
+          BASE_SHA: ${{ steps.meta.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.meta.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          execution_mode=codex_only
+          changed=false
+          while IFS= read -r -d '' path; do
+            changed=true
+            case "${path}" in
+              scripts/local_ci/codex_ai/*) execution_mode=full; break ;;
+              docs/*|*.md|*.markdown|*.rst) ;;
+              *) execution_mode=full; break ;;
+            esac
+          done < <(git diff --name-only -z --no-renames "${BASE_SHA}...${HEAD_SHA}")
+          if [[ "${changed}" != true ]]; then
+            execution_mode=full
+          fi
+          echo "execution_mode=${execution_mode}" >> "${GITHUB_OUTPUT}"
+
       - name: Push task and metadata refs to Gitee
         env:
           GH_TOKEN: ${{ github.token }}
@@ -227,6 +250,7 @@ jobs:
           TARGET_BRANCH: ${{ steps.meta.outputs.target_branch }}
           PR_NUMBER: ${{ steps.meta.outputs.pr_number }}
           CAPTURED_AT: ${{ steps.meta.outputs.started_at }}
+          EXECUTION_MODE: ${{ steps.execution.outputs.execution_mode || 'full' }}
         run: |
           set -euo pipefail
           [ -n "${GITEE_TOKEN}" ] || { echo "GITEE_TOKEN is empty"; exit 1; }
@@ -247,6 +271,7 @@ jobs:
             jq -n \
               --arg schema triton-anchor-local-ci-task-metadata/v2 \
               --arg event_kind pull_request \
+              --arg execution_mode "${EXECUTION_MODE}" \
               --arg task_ref "${TASK_REF}" \
               --arg base_task_ref "${BASE_TASK_REF}" \
               --arg head_task_ref "${HEAD_TASK_REF}" \
@@ -262,7 +287,7 @@ jobs:
               --arg title "$(jq -r '.title // ""' <<< "${pr_payload}")" \
               --arg description "$(jq -r '.body // ""' <<< "${pr_payload}")" \
               --arg captured_at "${CAPTURED_AT}" \
-              '{schema:$schema,event_kind:$event_kind,task_ref:$task_ref,base_task_ref:$base_task_ref,head_task_ref:$head_task_ref,target_sha:$target_sha,tested_sha:$tested_sha,tested_ref:$tested_ref,tested_sha_kind:$tested_sha_kind,worker_revision_sha:$worker_revision_sha,base_branch:$base_branch,base_sha:$base_sha,head_branch:$head_branch,head_sha:$head_sha,head_repo:$head_repo,target_branch:$target_branch,pr_number:($pr_number|tonumber),title:($title[0:500]),description:($description[0:8000]),title_truncated:(($title|length)>500),description_truncated:(($description|length)>8000),captured_at:$captured_at}' > "${metadata_file}"
+              '{schema:$schema,event_kind:$event_kind,execution_mode:$execution_mode,task_ref:$task_ref,base_task_ref:$base_task_ref,head_task_ref:$head_task_ref,target_sha:$target_sha,tested_sha:$tested_sha,tested_ref:$tested_ref,tested_sha_kind:$tested_sha_kind,worker_revision_sha:$worker_revision_sha,base_branch:$base_branch,base_sha:$base_sha,head_branch:$head_branch,head_sha:$head_sha,head_repo:$head_repo,target_branch:$target_branch,pr_number:($pr_number|tonumber),title:($title[0:500]),description:($description[0:8000]),title_truncated:(($title|length)>500),description_truncated:(($description|length)>8000),captured_at:$captured_at}' > "${metadata_file}"
             blob="$(git hash-object -w "${metadata_file}")"
             tree="$(printf '100644 blob %s\ttask-metadata.json\n' "${blob}" | git mktree)"
             commit="$(printf 'Local CI metadata for PR #%s\n' "${PR_NUMBER}" | git commit-tree "${tree}")"

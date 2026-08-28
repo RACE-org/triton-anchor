@@ -51,6 +51,8 @@ PERFORMANCE_SCRIPT_DIR="${RUNNER_ROOT}/deterministic_ci/performance"
 FLAGGEMS_SCRIPT_DIR="${RUNNER_ROOT}/deterministic_ci/flaggems"
 DUMP_ARTIFACT_TOOL="${RUNNER_ROOT}/shared/dump_artifacts.py"
 TASK_TMP_TOOL="${RUNNER_ROOT}/shared/task_tmp.py"
+CAPPED_TEE_TOOL="${RUNNER_ROOT}/shared/capped_tee.py"
+OUTPUT_LIMIT_TOOL="${RUNNER_ROOT}/shared/output_limits.py"
 # shellcheck disable=SC1091
 source "${RUNNER_ROOT}/shared/path_utils.sh"
 
@@ -66,12 +68,50 @@ LOCAL_CI_BASE_SHA="${LOCAL_CI_BASE_SHA:-}"
 LOCAL_CI_BASE_REF="${LOCAL_CI_BASE_REF:-}"
 TRUSTED_ANCHOR_ENVSETUP="${TRUSTED_ANCHOR_ENVSETUP:-${RUNNER_ROOT}/trusted/envsetup.sh}"
 LOCAL_CI_GIT_ASKPASS=""
-BACKEND_PROFILE="${BACKEND_PROFILE:-sophgo-cmodel}"
-EXPECTED_TRITON_BACKEND="${EXPECTED_TRITON_BACKEND:-sophgo}"
-BACKEND_PATH="${BACKEND_PATH:-${WORKSPACE}/triton-sophgo-backend}"
-BACKEND_ENVSETUP="${BACKEND_ENVSETUP:-envsetup.sh}"
-BACKEND_ENVSETUP_ARGS="${BACKEND_ENVSETUP_ARGS:-PIO_CMODEL}"
-BACKEND_TEST_COMMAND="${BACKEND_TEST_COMMAND:-python3 tests/test_smoke.py && python3 tests/test_jit.py}"
+LOCAL_CI_PROFILE_NAME="${LOCAL_CI_PROFILE_NAME:-${BACKEND_PROFILE:-sophgo-cmodel}}"
+LOCAL_CI_LLVM_HASH="${LOCAL_CI_LLVM_HASH:-unknown}"
+RUN_BACKEND_STAGES="${RUN_BACKEND_STAGES:-true}"
+BACKEND_SKIP_REASON="${BACKEND_SKIP_REASON:-}"
+FRONTEND_ONLY_BACKEND_SKIP_REASON="当前没有部署可供测试的厂商后端，未执行后端构建、JIT、FlagGems 和性能验证。"
+if [[ ! "${LOCAL_CI_LLVM_HASH}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "LOCAL_CI_LLVM_HASH must be selected by the Local CI poller." >&2
+  exit 2
+fi
+case "${RUN_BACKEND_STAGES}" in
+  true)
+    BACKEND_PROFILE="${BACKEND_PROFILE:-}"
+    EXPECTED_TRITON_BACKEND="${EXPECTED_TRITON_BACKEND:-}"
+    BACKEND_PATH="${BACKEND_PATH:-}"
+    BACKEND_ENVSETUP="${BACKEND_ENVSETUP:-}"
+    BACKEND_ENVSETUP_ARGS="${BACKEND_ENVSETUP_ARGS:-}"
+    BACKEND_TEST_COMMAND="${BACKEND_TEST_COMMAND:-}"
+    BACKEND_UNINSTALL_PACKAGES="${BACKEND_UNINSTALL_PACKAGES:-}"
+    BACKEND_WHEEL_PATTERN="${BACKEND_WHEEL_PATTERN:-}"
+    for required_backend_value in \
+      BACKEND_PROFILE EXPECTED_TRITON_BACKEND BACKEND_PATH \
+      BACKEND_TEST_COMMAND BACKEND_WHEEL_PATTERN; do
+      if [[ -z "${!required_backend_value}" ]]; then
+        echo "RUN_BACKEND_STAGES=true requires ${required_backend_value} from the selected profile." >&2
+        exit 2
+      fi
+    done
+    ;;
+  false)
+    BACKEND_SKIP_REASON="${FRONTEND_ONLY_BACKEND_SKIP_REASON}"
+    BACKEND_PROFILE="${BACKEND_PROFILE:-${LOCAL_CI_PROFILE_NAME}}"
+    EXPECTED_TRITON_BACKEND="${EXPECTED_TRITON_BACKEND-}"
+    BACKEND_PATH="${BACKEND_PATH-}"
+    BACKEND_ENVSETUP="${BACKEND_ENVSETUP-}"
+    BACKEND_ENVSETUP_ARGS="${BACKEND_ENVSETUP_ARGS-}"
+    BACKEND_TEST_COMMAND="${BACKEND_TEST_COMMAND-}"
+    BACKEND_UNINSTALL_PACKAGES="${BACKEND_UNINSTALL_PACKAGES-}"
+    BACKEND_WHEEL_PATTERN="${BACKEND_WHEEL_PATTERN-}"
+    ;;
+  *)
+    echo "RUN_BACKEND_STAGES must be true or false." >&2
+    exit 2
+    ;;
+esac
 RUN_FLAGGEMS_TESTS="${RUN_FLAGGEMS_TESTS:-false}"
 FLAGGEMS_CLONE_DIR="${FLAGGEMS_CLONE_DIR:-${WORKSPACE}/FlagGems}"
 FLAGGEMS_REF="${FLAGGEMS_REF:-}"
@@ -99,6 +139,10 @@ SOURCE_ENVSETUP="${SOURCE_ENVSETUP:-1}"
 FRONTEND_BUILD_MODE="${FRONTEND_BUILD_MODE:-fresh}"
 FRONTEND_BUILD_COMMAND="${FRONTEND_BUILD_COMMAND:-}"
 LOCAL_CI_ARTIFACT_ROOT="${LOCAL_CI_ARTIFACT_ROOT:-${WORKSPACE}/local-ci-artifacts}"
+LOCAL_CI_LOG_MAX_BYTES="${LOCAL_CI_LOG_MAX_BYTES:-536870912}"
+LOCAL_CI_ARTIFACT_FILE_MAX_BYTES="${LOCAL_CI_ARTIFACT_FILE_MAX_BYTES:-2147483648}"
+LOCAL_CI_ARTIFACT_MAX_BYTES="${LOCAL_CI_ARTIFACT_MAX_BYTES:-5368709120}"
+LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS="${LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS:-15}"
 RUN_COMPILE_BENCHMARK="${RUN_COMPILE_BENCHMARK:-true}"
 COMPILE_BENCHMARK_KERNELS="${COMPILE_BENCHMARK_KERNELS:-add,mm,softmax,layernorm}"
 COMPILE_BENCHMARK_REPEAT="${COMPILE_BENCHMARK_REPEAT:-5}"
@@ -135,6 +179,19 @@ FLAGGEMS_STATUS="disabled"
 if [[ "${RUN_FLAGGEMS_TESTS}" == "true" ]]; then
   FLAGGEMS_STATUS="not_run"
 fi
+if [[ "${RUN_BACKEND_STAGES}" == "false" ]]; then
+  RUN_FLAGGEMS_TESTS="false"
+  RUN_COMPILE_BENCHMARK="false"
+  RUN_PASS_PROFILE="false"
+  RUN_IR_SERIALIZATION_BENCHMARK="false"
+  INSTALL_FLAGGEMS_PACKAGES="0"
+  BACKEND_REBUILD_STATUS="skipped"
+  BACKEND_SMOKE_JIT_STATUS="skipped"
+  FLAGGEMS_STATUS="skipped"
+  COMPILE_TIME_STATUS="skipped"
+  PASS_PROFILE_STATUS="skipped"
+  IR_SERIALIZATION_STATUS="skipped"
+fi
 LOCAL_CI_RESULT_STATUS=0
 TRITON_DUMP_CLEANUP_STATUS="not_run"
 MAX_JOBS="${MAX_JOBS:-1}"
@@ -151,14 +208,19 @@ LOCAL_CI_TASK_TMP_DIR="${LOCAL_CI_TASK_TMP_ROOT}/tmp"
 LOCAL_CI_TASK_DUMP_ROOT="${LOCAL_CI_TASK_TMP_ROOT}/dump"
 LOCAL_CI_TASK_CREDENTIAL_DIR="${LOCAL_CI_TASK_TMP_ROOT}/credentials"
 LOCAL_CI_TASK_BENCHMARK_ROOT="${LOCAL_CI_TASK_TMP_ROOT}/benchmark"
+LOCAL_CI_OUTPUT_LIMIT_REPORT="${LOCAL_CI_TASK_TMP_ROOT}/output-limit.json"
 TMPDIR="${LOCAL_CI_TASK_TMP_DIR}"
 FAILURE_IR_ARTIFACT_DIR="${DELIVERY_ARTIFACT_DIR}/failure-ir"
+LOCAL_CI_FAILURE_CODE=""
+OUTPUT_LIMIT_MONITOR_PID=""
 
 export WORKSPACE ANCHOR_DIR BACKEND_PROFILE EXPECTED_TRITON_BACKEND BACKEND_PATH
 export BACKEND_ENVSETUP BACKEND_ENVSETUP_ARGS BACKEND_TEST_COMMAND
+export BACKEND_UNINSTALL_PACKAGES BACKEND_WHEEL_PATTERN
 export RUN_FLAGGEMS_TESTS FLAGGEMS_CLONE_DIR FLAGGEMS_REF FLAGGEMS_PIP_PACKAGES FLAGGEMS_TEST_MODE FLAGGEMS_SAMPLE_SIZE FLAGGEMS_RANDOM_SEED FLAGGEMS_TEST_OP FLAGGEMS_TEST_COMMAND FLAGGEMS_PYTEST_ARGS FLAGGEMS_IDLE_TIMEOUT_SECONDS FLAGGEMS_TOTAL_TIMEOUT_SECONDS FLAGGEMS_FULL_TIMEOUT_EXTENSION_SECONDS FLAGGEMS_FULL_HARD_TIMEOUT_SECONDS FLAGGEMS_CLEAR_CACHE FLAGGEMS_WHITELIST FLAGGEMS_FULL_LIST FLAGGEMS_SELECTED_FILE
 export LLVM_BUILD_DIR PPL_ROOT PYTHON_BIN PYTHON_VENV_ACTIVATE FRONTEND_BUILD_MODE GITHUB_SHA="${target_sha}" GITHUB_REF="refs/heads/${GITEE_BRANCH}"
 export BACKEND_PROFILE MAX_JOBS CMAKE_BUILD_PARALLEL_LEVEL NINJAFLAGS UV_LINK_MODE
+export LOCAL_CI_PROFILE_NAME LOCAL_CI_LLVM_HASH RUN_BACKEND_STAGES BACKEND_SKIP_REASON
 export LOCAL_CI_TASK_TMP_ROOT TMPDIR
 
 if [[ ! -r "${TASK_TMP_TOOL}" ]]; then
@@ -176,9 +238,74 @@ if [[ "${artifact_path}" == "${task_tmp_path}" || "${artifact_path}" == "${task_
   exit 2
 fi
 mkdir -p "${DELIVERY_ARTIFACT_DIR}"
+: > "${DELIVERY_ARTIFACT_DIR}/.local-ci-artifact-root"
+
+for limit_name in \
+  LOCAL_CI_LOG_MAX_BYTES LOCAL_CI_ARTIFACT_FILE_MAX_BYTES \
+  LOCAL_CI_ARTIFACT_MAX_BYTES LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS; do
+  if [[ ! "${!limit_name}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${limit_name} must be a positive integer." >&2
+    exit 2
+  fi
+done
+
+capped_tee() {
+  local output="$1"
+  "${PYTHON_BIN}" "${CAPPED_TEE_TOOL}" \
+    --output "${output}" \
+    --max-bytes "${LOCAL_CI_LOG_MAX_BYTES}" \
+    --marker "${LOCAL_CI_OUTPUT_LIMIT_REPORT}"
+}
+
+check_output_limits() {
+  "${PYTHON_BIN}" "${OUTPUT_LIMIT_TOOL}" check \
+    --root "${DELIVERY_ARTIFACT_DIR}" \
+    --max-log-bytes "${LOCAL_CI_LOG_MAX_BYTES}" \
+    --max-file-bytes "${LOCAL_CI_ARTIFACT_FILE_MAX_BYTES}" \
+    --max-total-bytes "${LOCAL_CI_ARTIFACT_MAX_BYTES}" \
+    --report "${LOCAL_CI_OUTPUT_LIMIT_REPORT}"
+}
+
+start_output_limit_monitor() {
+  local owner_pid="${BASHPID}"
+  (
+    while kill -0 "${owner_pid}" >/dev/null 2>&1; do
+      sleep "${LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS}"
+      if ! check_output_limits; then
+        echo "Local CI artifact output limit exceeded; terminating task." >&2
+        kill -TERM -- "-${owner_pid}" >/dev/null 2>&1 || \
+          kill -TERM "${owner_pid}" >/dev/null 2>&1 || true
+        return 0
+      fi
+    done
+  ) &
+  OUTPUT_LIMIT_MONITOR_PID="$!"
+}
+
+stop_output_limit_monitor() {
+  if [[ -n "${OUTPUT_LIMIT_MONITOR_PID}" ]]; then
+    kill "${OUTPUT_LIMIT_MONITOR_PID}" >/dev/null 2>&1 || true
+    wait "${OUTPUT_LIMIT_MONITOR_PID}" 2>/dev/null || true
+    OUTPUT_LIMIT_MONITOR_PID=""
+  fi
+}
 
 use_uv() {
   [[ "${PACKAGE_TOOL}" == "uv" ]] || { [[ "${PACKAGE_TOOL}" == "auto" ]] && command -v uv >/dev/null 2>&1; }
+}
+
+prune_uv_cache_for_ci() {
+  local prune_status=0
+  if ! command -v uv >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Pruning unused uv CI cache entries."
+  uv cache prune --ci || prune_status=$?
+  if [[ ${prune_status} -ne 0 ]]; then
+    echo "Warning: uv cache prune --ci failed with exit code ${prune_status}; Local CI result is unchanged." >&2
+  fi
+  return 0
 }
 
 setup_gitee_git_auth() {
@@ -233,6 +360,7 @@ validated_anchor_checkout_path() {
     "${LLVM_BUILD_DIR}" \
     "${PPL_ROOT}" \
     "${LOCAL_CI_ARTIFACT_ROOT}"; do
+    [[ -n "${protected}" ]] || continue
     protected_path="$(realpath -m -- "${protected}")"
     if [[ "${anchor_path}" == "${protected_path}" \
       || "${anchor_path}" == "${protected_path}"/* \
@@ -420,7 +548,7 @@ run_logged() {
   (
     export TRITON_DUMP_DIR="${task_dump_dir}"
     "$@"
-  ) 2>&1 | tee "${log_file}"
+  ) 2>&1 | capped_tee "${log_file}"
   pipeline_statuses=("${PIPESTATUS[@]}")
   for pipeline_status in "${pipeline_statuses[@]}"; do
     if [[ ${pipeline_status} -ne 0 ]]; then
@@ -448,7 +576,7 @@ frontend_package_installed() {
 uninstall_installed_frontend() {
   if ! frontend_package_installed; then
     echo "No previously installed triton-anchor distribution found." \
-      | tee "${DELIVERY_ARTIFACT_DIR}/frontend-uninstall.log"
+      | capped_tee "${DELIVERY_ARTIFACT_DIR}/frontend-uninstall.log"
     return 0
   fi
 
@@ -523,25 +651,40 @@ rebuild_backend() {
 
 rebuild_backend_command() {
   set -euo pipefail
+  local backend_wheel=""
   if use_uv; then
     uv pip install scikit-build-core pybind11
-    uv pip uninstall triton-sophgo-backend triton_sophgo_backend || true
+    if [[ -n "${BACKEND_UNINSTALL_PACKAGES}" ]]; then
+      # shellcheck disable=SC2086
+      uv pip uninstall ${BACKEND_UNINSTALL_PACKAGES} || true
+    fi
     rm -rf build dist *.egg-info
     uv build --wheel --no-build-isolation
-    uv pip install --force-reinstall dist/triton_sophgo_backend-*.whl
   else
     "${PYTHON_BIN}" -m pip install scikit-build-core pybind11 build
-    "${PYTHON_BIN}" -m pip uninstall -y triton-sophgo-backend triton_sophgo_backend || true
+    if [[ -n "${BACKEND_UNINSTALL_PACKAGES}" ]]; then
+      # shellcheck disable=SC2086
+      "${PYTHON_BIN}" -m pip uninstall -y ${BACKEND_UNINSTALL_PACKAGES} || true
+    fi
     rm -rf build dist *.egg-info
     "${PYTHON_BIN}" -m build --wheel --no-isolation
-    "${PYTHON_BIN}" -m pip install --force-reinstall dist/triton_sophgo_backend-*.whl
   fi
 
-  backend_wheel="$(find dist -maxdepth 1 -name 'triton_sophgo_backend-*.whl' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {print $2}')"
-  if [[ -n "${backend_wheel}" ]]; then
-    cp "${backend_wheel}" "${DELIVERY_ARTIFACT_DIR}/"
-    ls -lh "${backend_wheel}" "${DELIVERY_ARTIFACT_DIR}/$(basename "${backend_wheel}")"
+  backend_wheel="$(
+    find dist -maxdepth 1 -type f -name "${BACKEND_WHEEL_PATTERN}" \
+      -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {print $2}'
+  )"
+  if [[ -z "${backend_wheel}" ]]; then
+    echo "Backend build did not produce a wheel matching ${BACKEND_WHEEL_PATTERN}." >&2
+    return 1
   fi
+  if use_uv; then
+    uv pip install --force-reinstall "${backend_wheel}"
+  else
+    "${PYTHON_BIN}" -m pip install --force-reinstall "${backend_wheel}"
+  fi
+  cp "${backend_wheel}" "${DELIVERY_ARTIFACT_DIR}/"
+  ls -lh "${backend_wheel}" "${DELIVERY_ARTIFACT_DIR}/$(basename "${backend_wheel}")"
 }
 
 source_python_venv() {
@@ -702,8 +845,8 @@ run_compile_benchmark() {
   fi
   if ! run_logged compile-benchmark timeout "${COMPILE_BENCHMARK_TIMEOUT}" \
     "${PYTHON_BIN}" "${PERFORMANCE_SCRIPT_DIR}/compile_benchmark.py" \
-      --backend "${EXPECTED_TRITON_BACKEND:-sophgo}" \
-      --vendor "${EXPECTED_TRITON_BACKEND:-sophgo}" \
+      --backend "${EXPECTED_TRITON_BACKEND}" \
+      --vendor "${EXPECTED_TRITON_BACKEND}" \
       --flaggems-root "${FLAGGEMS_CLONE_DIR}" \
       --kernels "${COMPILE_BENCHMARK_KERNELS}" \
       --repeat "${COMPILE_BENCHMARK_REPEAT}" \
@@ -731,7 +874,7 @@ run_compile_benchmark() {
       --threshold "${COMPILE_BENCHMARK_THRESHOLD}" \
       --output-json "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.json" \
       --output-markdown "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.md" \
-      2>&1 | tee "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.log"; then
+      2>&1 | capped_tee "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.log"; then
       COMPILE_TIME_STATUS="fail"
       return 1
     fi
@@ -774,8 +917,8 @@ run_pass_profile() {
   fi
   if ! run_logged pass-profile timeout "${PASS_PROFILE_TIMEOUT}" \
     "${PYTHON_BIN}" "${PERFORMANCE_SCRIPT_DIR}/pass_profile_benchmark.py" \
-      --backend "${EXPECTED_TRITON_BACKEND:-sophgo}" \
-      --vendor "${EXPECTED_TRITON_BACKEND:-sophgo}" \
+      --backend "${EXPECTED_TRITON_BACKEND}" \
+      --vendor "${EXPECTED_TRITON_BACKEND}" \
       --flaggems-root "${FLAGGEMS_CLONE_DIR}" \
       --kernels "${PASS_PROFILE_KERNELS}" \
       --repeat "${PASS_PROFILE_REPEAT}" \
@@ -808,7 +951,7 @@ run_pass_profile() {
       --output-json "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.json" \
       --output-csv "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.csv" \
       --output-markdown "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.md" \
-      2>&1 | tee "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.log"; then
+      2>&1 | capped_tee "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.log"; then
       PASS_PROFILE_STATUS="fail"
       return 1
     fi
@@ -850,8 +993,8 @@ run_ir_serialization_benchmark() {
   fi
   if ! run_logged ir-serialization timeout "${IR_SERIALIZATION_TIMEOUT}" \
     "${PYTHON_BIN}" "${PERFORMANCE_SCRIPT_DIR}/ir_serialization_benchmark.py" \
-      --backend "${EXPECTED_TRITON_BACKEND:-sophgo}" \
-      --vendor "${EXPECTED_TRITON_BACKEND:-sophgo}" \
+      --backend "${EXPECTED_TRITON_BACKEND}" \
+      --vendor "${EXPECTED_TRITON_BACKEND}" \
       --flaggems-root "${FLAGGEMS_CLONE_DIR}" \
       --kernels "${IR_SERIALIZATION_KERNELS}" \
       --repeat "${IR_SERIALIZATION_REPEAT}" \
@@ -883,7 +1026,7 @@ run_ir_serialization_benchmark() {
       --output-json "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.json" \
       --output-csv "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.csv" \
       --output-markdown "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.md" \
-      2>&1 | tee "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.log"; then
+      2>&1 | capped_tee "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.log"; then
       IR_SERIALIZATION_STATUS="fail"
       return 1
     fi
@@ -900,6 +1043,9 @@ run_ir_serialization_benchmark() {
 
 git_commit() {
   local repo="$1"
+  if [[ -z "${repo}" ]]; then
+    return 0
+  fi
   git -C "${repo}" rev-parse HEAD 2>/dev/null || true
 }
 
@@ -936,6 +1082,10 @@ write_summary() {
     echo "frontend_checkout_mode: ${FRONTEND_CHECKOUT_MODE}"
     echo "frontend_build_cache_preserved: ${FRONTEND_BUILD_CACHE_PRESERVED}"
     echo "frontend_uninstall_before_build: true"
+    echo "ci_profile: ${LOCAL_CI_PROFILE_NAME}"
+    echo "llvm_hash: ${LOCAL_CI_LLVM_HASH}"
+    echo "backend_stages_enabled: ${RUN_BACKEND_STAGES}"
+    echo "backend_skip_reason: ${BACKEND_SKIP_REASON}"
     echo "backend_profile: ${BACKEND_PROFILE}"
     echo "expected_backend: ${EXPECTED_TRITON_BACKEND}"
     echo "backend_path: ${BACKEND_PATH}"
@@ -955,6 +1105,10 @@ write_summary() {
     echo "flaggems_total_timeout_seconds: ${FLAGGEMS_TOTAL_TIMEOUT_SECONDS}"
     echo "flaggems_full_timeout_extension_seconds: ${FLAGGEMS_FULL_TIMEOUT_EXTENSION_SECONDS}"
     echo "flaggems_full_hard_timeout_seconds: ${FLAGGEMS_FULL_HARD_TIMEOUT_SECONDS}"
+    echo "failure_code: ${LOCAL_CI_FAILURE_CODE}"
+    echo "log_max_bytes: ${LOCAL_CI_LOG_MAX_BYTES}"
+    echo "artifact_file_max_bytes: ${LOCAL_CI_ARTIFACT_FILE_MAX_BYTES}"
+    echo "artifact_max_bytes: ${LOCAL_CI_ARTIFACT_MAX_BYTES}"
     echo "llvm_build_dir: ${LLVM_BUILD_DIR}"
     echo "ppl_root: ${PPL_ROOT}"
     echo "artifact_dir: ${DELIVERY_ARTIFACT_DIR}"
@@ -990,11 +1144,17 @@ finalize_running_statuses() {
 
 required_stages_passed() {
   local status
-  for status in \
-    "${FRONTEND_BUILD_STATUS}" \
-    "${FRONTEND_SMOKE_STATUS}" \
-    "${BACKEND_REBUILD_STATUS}" \
-    "${BACKEND_SMOKE_JIT_STATUS}"; do
+  local required_statuses=(
+    "${FRONTEND_BUILD_STATUS}"
+    "${FRONTEND_SMOKE_STATUS}"
+  )
+  if [[ "${RUN_BACKEND_STAGES}" == "true" ]]; then
+    required_statuses+=(
+      "${BACKEND_REBUILD_STATUS}"
+      "${BACKEND_SMOKE_JIT_STATUS}"
+    )
+  fi
+  for status in "${required_statuses[@]}"; do
     case "${status}" in
       pass|success) ;;
       *) return 1 ;;
@@ -1005,8 +1165,23 @@ required_stages_passed() {
 on_exit() {
   local status="$?"
   local dump_cleanup_status=0
+  local compact_status=0
   trap - EXIT
   set +e
+  stop_output_limit_monitor
+  check_output_limits || true
+  if [[ -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
+    LOCAL_CI_FAILURE_CODE="$(
+      "${PYTHON_BIN}" -c \
+        'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("failure_code", "artifact_size_limit"))' \
+        "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" 2>/dev/null || printf 'artifact_size_limit'
+    )"
+    if [[ "${LOCAL_CI_FAILURE_CODE}" == "log_size_limit" ]]; then
+      status=86
+    else
+      status=87
+    fi
+  fi
   if [[ ${status} -eq 0 && ${LOCAL_CI_RESULT_STATUS} -ne 0 ]]; then
     status="${LOCAL_CI_RESULT_STATUS}"
   fi
@@ -1016,7 +1191,7 @@ on_exit() {
     status=1
   fi
   cleanup_gitee_git_auth
-  if [[ ${status} -ne 0 ]]; then
+  if [[ ${status} -ne 0 && ! -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
     collect_failure_ir "unhandled-exit" "${LOCAL_CI_TASK_DUMP_ROOT}" || true
   fi
   prune_task_dumps || dump_cleanup_status=$?
@@ -1029,10 +1204,27 @@ on_exit() {
       status="${dump_cleanup_status}"
     fi
   fi
+  prune_uv_cache_for_ci
+  if [[ -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
+    "${PYTHON_BIN}" "${OUTPUT_LIMIT_TOOL}" compact \
+      --root "${DELIVERY_ARTIFACT_DIR}" \
+      --report "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" || compact_status=$?
+    if [[ ${compact_status} -ne 0 ]]; then
+      echo "Failed to compact output-limited artifact directory." >&2
+    fi
+  fi
   write_summary "${status}"
+  if [[ -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
+    cp "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" "${DELIVERY_ARTIFACT_DIR}/output-limit.json"
+  fi
+  if [[ -n "${LOCAL_CI_FAILURE_CODE}" ]]; then
+    echo "Local CI failure code: ${LOCAL_CI_FAILURE_CODE}" >&2
+  fi
+  echo "Artifacts are in ${DELIVERY_ARTIFACT_DIR}"
   exit "${status}"
 }
 trap on_exit EXIT
+start_output_limit_monitor
 
 if [[ ! -r "${DUMP_ARTIFACT_TOOL}" ]]; then
   echo "Dump artifact tool is missing from the trusted runner snapshot: ${DUMP_ARTIFACT_TOOL}" >&2
@@ -1131,7 +1323,7 @@ fi
   echo "Built frontend wheel: ${wheel_path}"
   ls -lh "${wheel_path}"
   sha256sum "${wheel_path}"
-} | tee "${DELIVERY_ARTIFACT_DIR}/frontend-wheel-info.log"
+} | capped_tee "${DELIVERY_ARTIFACT_DIR}/frontend-wheel-info.log"
 if use_uv; then
   run_logged frontend-install uv pip install --force-reinstall --no-deps "${wheel_path}"
 else
@@ -1150,6 +1342,7 @@ FRONTEND_BUILD_STATUS="pass"
 run_recorded_stage_in_dir FRONTEND_SMOKE_STATUS "Frontend smoke" \
   "${ANCHOR_DIR}" frontend-smoke "${PYTHON_BIN}" tests/test_smoke.py
 
+if [[ "${RUN_BACKEND_STAGES}" == "true" ]]; then
 BACKEND_REBUILD_STATUS="running"
 source_backend_env
 rebuild_backend
@@ -1237,6 +1430,9 @@ fi
 run_recorded_stage COMPILE_TIME_STATUS "Compile-time benchmark" run_compile_benchmark
 run_recorded_stage PASS_PROFILE_STATUS "Pass profile" run_pass_profile
 run_recorded_stage IR_SERIALIZATION_STATUS "IR serialization" run_ir_serialization_benchmark
+else
+  echo "Skipping backend-dependent stages: ${BACKEND_SKIP_REASON}"
+fi
 
 if [[ ${LOCAL_CI_RESULT_STATUS} -ne 0 ]]; then
   echo "Local CI finished with one or more failed stages. Artifacts are in ${DELIVERY_ARTIFACT_DIR}" >&2

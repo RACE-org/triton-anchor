@@ -46,6 +46,8 @@ GitHub 与本地服务器之间不建立入站直连。GitHub 将任务写入 Gi
 | 性能与编译质量检查 | 本地 Docker | PR、push | 比较 compile-time、Pass profile 和 IR serialization |
 | Codex AI CI | 本地服务器 | 确定性 Local CI 之后 | 结合代码差异和测试证据给出补充审查与排查建议 |
 | 结果桥接与 Dashboard | GitHub + Gitee | Local CI 完成后 | 回写 commit status、PR 评论并部署指定分支的状态页面 |
+| Worker 健康监测 | 本地服务器 + Gitee | systemd timer | 发布 poller、活动任务、容器和存储快照，供 Dashboard 按需读取 |
+| 本地资源与保留治理 | 本地服务器 | 每轮任务及每日维护 | 限制任务时长、日志和 artifact，并回收过期受管数据 |
 
 ### 1.4 为什么有些工作在 GitHub 执行，有些必须在本地执行
 
@@ -166,7 +168,7 @@ Dispatcher 将以下信息写入 Gitee：
 
 #### 步骤 6：本地 poller 执行确定性 Local CI
 
-本地 poller 主动扫描允许的 `ci/*` ref，完成锁、去重、runner 快照和任务目录准备，然后在 Docker 中按固定顺序执行：
+本地 poller 主动扫描允许的 `ci/*` ref，完成锁、去重、runner 快照和任务目录准备，并根据可信提交声明的 LLVM 版本标识选择本地服务器维护的版本 profile；无法匹配时明确失败。普通代码任务按固定顺序在选定容器中执行：
 
 ```text
 精确 checkout tested SHA
@@ -181,7 +183,7 @@ Dispatcher 将以下信息写入 Gitee：
   -> 生成 summary 和 result.json
 ```
 
-前端 build、前端 smoke、后端 rebuild、后端 smoke/JIT 是必选阶段。阶段缺失、未运行、运行中或失败，都会使确定性 Local CI 失败。
+所有 profile 都要求前端 build 和前端 smoke；后端阶段由 profile 的 `RUN_BACKEND_STAGES` 控制，frontend-only profile 将其记录为 `skipped`。docs-only PR 使用 `codex_only` 模式，不运行确定性构建。
 
 #### 步骤 7：Codex AI 进行补充审查
 
@@ -462,12 +464,13 @@ runs/ci_full/ci_full_<branch>/<sha>/<run-id>/
 
 ### 5.4 Dashboard
 
-Dashboard 从 Gitee `local-ci-results` 同步最新有效结果，并由指定 Pages 来源分支部署。页面主要展示：
+Dashboard 从 Gitee `local-ci-results` 同步最新有效结果，从 Worker 健康状态仓库读取健康快照，并由指定 Pages 来源分支部署。页面主要展示：
 
 1. 最近一次手动 full FlagGems 算子结果；
 2. 指定分支的后端健康状态；
 3. 编译时间、Pass profile 和 IR serialization 摘要；
-4. 搜索、筛选、失败阶段查看和 CSV/Excel 导出。
+4. 本地服务器上的 Worker 运行状态；
+5. 搜索、筛选、失败阶段查看和 CSV/Excel 导出。
 
 数据模式包括：
 

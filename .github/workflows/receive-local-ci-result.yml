@@ -225,7 +225,7 @@ jobs:
           status="$(python3 -c 'import json,os; print(json.loads(os.environ["STAGE_RESULTS"]).get(os.environ["STAGE_KEY"], "not_reported"))')"
           printf '### %s\n\n- Status: `%s`\n' "${STAGE_NAME}" "${status}" >> "${GITHUB_STEP_SUMMARY}"
           [ -z "${TARGET_URL}" ] || echo "- [Gitee artifacts](${TARGET_URL})" >> "${GITHUB_STEP_SUMMARY}"
-          case "${status}" in pass|success|warning) exit 0 ;; esac
+          case "${status}" in pass|success|warning|skipped) exit 0 ;; esac
           if [ "${REQUIRED_STAGE}" = true ]; then
             echo "Required stage ${STAGE_NAME} is ${status}" >&2
             exit 1

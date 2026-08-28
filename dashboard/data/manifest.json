@@ -5,7 +5,16 @@
   "sources": {
     "full_test": "full-test.json",
     "backend_status": "backend-status.json",
-    "performance": "performance.json"
+    "performance": "performance.json",
+    "worker_health": "worker-health.json"
+  },
+  "live_sources": {
+    "worker_health": {
+      "kind": "gitee_contents_api",
+      "url": "https://gitee.com/api/v5/repos/likehupochuan/triton-anchor-worker-health/contents/worker-health.json?ref=race-org-localci",
+      "refresh_seconds": 300,
+      "stale_seconds": 1200
+    }
   },
   "downloads": {
     "full_test_csv": "full-test.csv"

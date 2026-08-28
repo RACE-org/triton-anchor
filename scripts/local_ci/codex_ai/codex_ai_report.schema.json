@@ -266,12 +266,12 @@
       "properties": {
         "evidence_level": {
           "type": "string",
-          "description": "Codex 对现有验证证据是否足以支持本次审查结论的语义判断。",
+          "description": "Codex 对现有验证证据是否足以支持本次审查结论的语义判断；该字段与可信命令账本派生的执行状态相互独立。",
           "enum": ["not_needed", "sufficient", "insufficient", "test_generation_error", "unavailable"]
         },
         "status": {
           "type": "string",
-          "description": "not_run 表示 Runner 没有观察到已执行命令；只要存在已执行命令但事实仍不足，应使用 insufficient_evidence。unavailable 只用于 Codex 审查未形成可信报告的失败 fallback。",
+          "description": "状态按 purpose 聚合标记为 validation 的正式验证目标；同一目标此前失败后可由后续不同命令完成，diagnostic 命令保留为执行事实但不直接改变该状态。not_run 表示没有正式验证目标，unavailable 表示可信命令执行事实不可取得。",
           "enum": [
             "not_run",
             "passed",
@@ -306,8 +306,13 @@
             "properties": {
               "id": {"type": "string", "pattern": "^RUN-[0-9]{3,}$"},
               "command": {"type": "string"},
+              "role": {
+                "type": "string",
+                "enum": ["validation", "diagnostic", "unclassified"]
+              },
               "purpose": {
                 "type": "string",
+                "description": "简洁且稳定的验证目标；只有目标和覆盖范围等价的命令才使用相同文本。",
                 "minLength": 1,
                 "maxLength": 120,
                 "pattern": ".*[\\u3400-\\u4dbf\\u4e00-\\u9fff].*"
@@ -330,6 +335,7 @@
             "required": [
               "id",
               "command",
+              "role",
               "purpose",
               "exit_code",
               "duration_seconds",

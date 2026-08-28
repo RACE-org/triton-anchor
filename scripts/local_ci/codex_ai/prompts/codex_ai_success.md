@@ -140,7 +140,11 @@ Codex 应优先复用 `${LOCAL_CI_LOG}` 和 `${ARTIFACT_DIR}` 中已有的日志
 - 需要动态验证但现有测试、Local CI 证据和当前命令仍不足以覆盖主要风险时，`test_assessment.evidence_level` 使用 `insufficient`，不能虚报为 `sufficient`；创建测试的过程本身失败时使用 `test_generation_error`。
 - 已执行或已复用的验证足以支撑当前 AI 审查结论时，`test_assessment.evidence_level` 必须使用 `sufficient`，即使本轮没有新增测试文件；只有存在具体未关闭验证缺口并写入 `suggested_tests` 时才使用 `insufficient`，相关风险边界可以同时写入 `residual_risks`。
 - 你的 `test_assessment.evidence_level` 会作为 Codex 对证据的语义判断保留在结构化 JSON 和完整诊断报告中；PR comment 只按“验证内容与结果”“限制与未覆盖”展示具体事实。Runner 从容器工作区事实推导 `generated_test_files`，从 Codex JSONL 推导命令退出码与耗时，再独立确定 `test_execution.status`、`verdict`、所有 ID 和完成标记。Runner 不会仅因某条命令退出 0 就把你明确给出的 `insufficient` 提升为证据充分。不要输出这些 runner 字段。是否生成新测试文件不是证据充分性的必要条件。
-- `test_assessment.commands` 用于给本轮命令补充用途、证据和失败归因。Runner 以 JSONL 中实际执行的命令为准：漏报命令不会使报告失败；多报或写错的命令会被忽略。
+- `test_assessment.commands` 用于给与审查结论有关的命令补充角色、验证目标、证据和失败归因。`role=validation` 只用于测试、构建或 lint 等正式验证；搜索、日志检查和环境探查使用 `role=diagnostic`。Runner 以 JSONL 中实际执行的命令为准，并按 `purpose` 聚合同一验证目标：通过不同方式成功验证同一目标，可以关闭该目标此前的失败；同一条命令出现通过和失败仍按非确定性结果处理。不同命令只有在验证目标和覆盖范围确实等价时才使用完全相同的 `purpose`，不能为了消除失败而合并不同目标。
+- 通过且与结论无关的探索命令可以省略；与结论有关的非零退出命令必须标明为 `validation` 或 `diagnostic`。漏标不会使结构化报告失败，也不直接改变 verdict，但其用途不能作为已验证事实。多报或写错的命令会被忽略。
+- `test_assessment.summary` 按已完成的验证目标写最终状态，而不是逐条复述命令：目标已由替代方式完成时，说明最终验证结果和覆盖范围；只有切换方式本身影响可信度时才简要说明。未关闭的命令目标由 Runner 根据 `purpose` 和失败 `evidence` 汇总到公开限制，不要在 summary 中重复；不对应具体命令目标的其他未覆盖边界仍应写入 summary。只有未关闭目标使现有证据不足以支撑审查结论时，才使用 `evidence_level=insufficient`。
+- 失败命令的 `evidence` 应说明它对所属验证目标的原因和影响，供目标尚未关闭时汇总使用；原因尚未确认时应明确说明。不要使用泛化的固定结论或作无证据推断。
+- `summary`、贡献者目标与判断依据、逐文件说明、验证摘要和 `residual_risks` 会进入公开 PR comment；这些公开叙述只写审查事实、结果、影响和未覆盖范围，不得写入 `FILE-xxx`/`RUN-xxx` 等内部 ID、结构化字段名、原始 shell 命令或 `/workspace`、`/tmp` 等任务内部路径。Schema 要求的专用 ID 字段仍必须正常填写；原始命令只放在 `test_assessment.commands.command`，供完整报告和诊断记录使用。
 - `failure_classification` 不是退出状态：通过命令使用 `none`；产品失败使用 `product`；同命令至少一次通过且至少一次失败时使用 `flaky`；明确由环境、权限、网络、容器、设备或 runner 资源导致时使用 `infrastructure`；证据不足使用 `unknown`。Runner 会根据真实重复执行结果保守推导 stable/flaky/infrastructure，条件不足时使用 `insufficient_evidence`。
 - 计划但未执行的命令不要放入 `test_assessment.commands`，统一写入 `suggested_tests`。
 
@@ -168,7 +172,7 @@ Codex 应优先复用 `${LOCAL_CI_LOG}` 和 `${ARTIFACT_DIR}` 中已有的日志
 - `changed_files` 证明文件级覆盖，`behavior_coverage` 表达跨文件行为推理，两者不能互相替代，也不能复制同一套泛化句子。
 - `residual_risks` 记录已识别但当前证据无法关闭的具体风险；没有剩余风险时使用空数组，不要制造免责声明。
 - `suggested_tests` 只记录尚未执行且能关闭具体风险的验证，目标和预期覆盖必须明确；已经执行的工作写入 `test_assessment`。
-- `test_assessment.summary` 应使用可直接公开的具体事实说明复用的确定性 CI 证据、静态审查范围、已覆盖路径和观察结果；不要把尚未执行的验证或未覆盖范围混入 summary，前者写入 `suggested_tests`，由证据缺口产生的具体行为风险写入 `residual_risks`。不要把 `sufficient`、`insufficient` 或其他内部枚举改写成抽象状态断言。实际命令及其结果由 Runner 的可信账本补充。`evidence_level=sufficient` 表示这些证据足以支持当前 AI 审查结论，不代表确定性 Local CI 门禁；`not_needed` 仅表示本次不需要额外动态测试或诊断。
+- `test_assessment.summary` 应使用可直接公开的具体事实说明复用的确定性 CI 证据、静态审查范围、已覆盖路径、观察结果，以及已知验证限制或未覆盖边界。需要后续执行的具体验证仍写入 `suggested_tests`，由证据缺口产生的具体行为风险仍写入 `residual_risks`，不要在三个字段间机械重复同一句话。不要把 `sufficient`、`insufficient` 或其他内部枚举改写成抽象状态断言。实际命令及其结果由 Runner 的可信账本补充。`evidence_level=sufficient` 表示这些证据足以支持当前 AI 审查结论，不代表确定性 Local CI 门禁；`not_needed` 仅表示本次不需要额外动态测试或诊断。
 
 ## 输出要求
 
@@ -179,6 +183,6 @@ Codex 应优先复用 `${LOCAL_CI_LOG}` 和 `${ARTIFACT_DIR}` 中已有的日志
 - `change_request_assessment.evidence` 和 `test_assessment.summary` 使用字符串数组；内容应简洁，避免重复。
 - `changed_files` 使用可信 `file_id` 覆盖全部变更文件，每项包含 `summary`、`impact` 和 `validation_strategy`。
 - `behavior_coverage` 完整包含 `normal`、`boundary`、`error`、`compatibility`、`integration`，每项包含 `scope`、`strategy`、`result`。
-- `test_assessment.summary` 必须是包含 1 至 8 条中文验证依据、已覆盖内容或观察结果的数组，不要添加“Codex 说明”或“Runner 校验”等来源前缀，也不要在这里重复 `suggested_tests` 或 `residual_risks`。
+- `test_assessment.summary` 必须是包含 1 至 8 条中文验证依据、已覆盖内容、观察结果或已知验证限制的数组，不要添加“Codex 说明”或“Runner 校验”等来源前缀，也不要机械重复 `suggested_tests` 或 `residual_risks`。
 - 输出结构、字段类型、固定枚举和逐文件覆盖必须完整正确；每个 finding 的 `file_id` 和 `line` 还必须真实可定位。
 - 没有具体缺陷时 `findings` 必须为空数组，不得为了填充报告而编造问题。

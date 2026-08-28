@@ -43,6 +43,7 @@ REQUIRED_V2_FIELDS = {
     "target_branch",
     "worker_revision_sha",
 }
+OPTIONAL_V2_FIELDS = {"execution_mode"}
 
 
 class MetadataError(ValueError):
@@ -199,7 +200,7 @@ def validate_v2_document(
     expected_head_sha: str = "",
 ) -> tuple[dict[str, Any], list[str]]:
     missing = sorted(REQUIRED_V2_FIELDS - set(document))
-    extra = sorted(set(document) - REQUIRED_V2_FIELDS)
+    extra = sorted(set(document) - REQUIRED_V2_FIELDS - OPTIONAL_V2_FIELDS)
     if missing:
         fail(f"元数据缺少字段：{', '.join(missing)}")
     if extra:
@@ -255,10 +256,14 @@ def validate_v2_document(
     worker_revision_sha = validate_sha(
         document["worker_revision_sha"], "worker_revision_sha"
     )
+    execution_mode = document.get("execution_mode", "full")
+    if execution_mode not in {"full", "codex_only"}:
+        fail("execution_mode 必须是 full 或 codex_only")
 
     canonical = {
         "schema": SCHEMA_V2,
         "event_kind": "pull_request",
+        "execution_mode": execution_mode,
         "task_ref": expected_task_ref,
         "base_task_ref": f"ci/base/pr-{expected_pr_number}/{task_branch}",
         "head_task_ref": f"ci/head/pr-{expected_pr_number}/{task_branch}",

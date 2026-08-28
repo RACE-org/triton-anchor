@@ -33,11 +33,16 @@ CANONICAL_PATHS = (
     "codex_ai/prompts/codex_ai_failure.md",
     "results/publish_gitee_result.py",
     "results/bridge_gitee_to_github_status.py",
+    "maintenance/local_ci_health.py",
+    "maintenance/manage_local_ci_state.py",
     "shared/result_paths.py",
     "shared/finding_locations.py",
+    "shared/capped_tee.py",
     "shared/dump_artifacts.py",
+    "shared/output_limits.py",
     "shared/task_tmp.py",
     "shared/path_utils.sh",
+    "shared/resolve_ci_profile.py",
     "shared/validate_task_metadata.py",
     "deterministic_ci/performance/common.py",
 )
@@ -47,9 +52,11 @@ RUNTIME_DIRECTORIES = (
     "deterministic_ci",
     "codex_ai",
     "results",
+    "maintenance",
     "shared",
 )
 RUNTIME_SUFFIXES = {".json", ".py", ".sh", ".tsv"}
+SERVER_ONLY_PATHS = {"maintenance/manage_local_ci_state.py"}
 
 
 def staged_runner_requirements() -> set[str]:
@@ -95,12 +102,12 @@ def test_canonical_modules_cover_all_runtime_sources():
 
 
 def test_staged_runner_requirements_match_canonical_modules():
-    assert staged_runner_requirements() == set(CANONICAL_PATHS)
+    assert staged_runner_requirements() == set(CANONICAL_PATHS) - SERVER_ONLY_PATHS
 
 
-def test_development_guide_is_not_a_runtime_module():
+def test_development_guide_is_excluded_from_formal_package():
     guide = LOCAL_CI_ROOT / "DEVELOPMENT_GUIDE.md"
-    assert guide.is_file()
+    assert not guide.exists()
     assert "DEVELOPMENT_GUIDE.md" not in CANONICAL_PATHS
 
 

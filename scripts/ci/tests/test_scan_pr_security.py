@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scan_pr_security.py"
 SPEC = importlib.util.spec_from_file_location("scan_pr_security", SCRIPT)
@@ -91,6 +92,47 @@ class ScanSecurityTests(unittest.TestCase):
 
         self.assertIn(security.UNSCANNED_PATCH_MESSAGE, messages(blocking))
         self.assertEqual(warnings, [])
+
+    def test_missing_patch_is_restored_and_scanned(self) -> None:
+        base_sha = "1" * 40
+        head_sha = "2" * 40
+        tested_sha = "3" * 40
+        local_patch = "@@ -0,0 +1 @@\n+import requests"
+
+        with mock.patch.object(
+            security,
+            "git_output",
+            side_effect=[tested_sha, f"{base_sha} {head_sha}", local_patch],
+        ):
+            files = security.restore_missing_patches(
+                [{"filename": "large.py", "status": "added"}],
+                Path("/tmp/security-candidate"),
+                base_sha,
+                head_sha,
+                tested_sha,
+            )
+
+        blocking, _ = security.scan(files)
+        self.assertIn("new Python network module import", messages(blocking))
+
+    def test_diff_fallback_rejects_wrong_merge_parents(self) -> None:
+        base_sha = "1" * 40
+        head_sha = "2" * 40
+        tested_sha = "3" * 40
+
+        with mock.patch.object(
+            security,
+            "git_output",
+            side_effect=[tested_sha, f"{'4' * 40} {head_sha}"],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "merge parents"):
+                security.restore_missing_patches(
+                    [{"filename": "large.cpp", "status": "added"}],
+                    Path("/tmp/security-candidate"),
+                    base_sha,
+                    head_sha,
+                    tested_sha,
+                )
 
 
 if __name__ == "__main__":

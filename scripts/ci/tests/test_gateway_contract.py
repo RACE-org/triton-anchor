@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +48,17 @@ def workflow_dispatch_inputs(text: str) -> set[str]:
     return names
 
 
+def workflow_step_script(text: str, name: str) -> str:
+    marker = f"      - name: {name}\n"
+    start = text.index(marker)
+    body_start = text.index("        run: |\n", start) + len("        run: |\n")
+    body_end = text.index("\n      - name:", body_start)
+    return "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in text[body_start:body_end].splitlines()
+    )
+
+
 class GatewayV3ContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -54,6 +68,7 @@ class GatewayV3ContractTests(unittest.TestCase):
         cls.dispatcher = (ROOT / ".github/workflows/dispatch-local-ci.yml").read_text()
         cls.receiver = (ROOT / ".github/workflows/receive-local-ci-result.yml").read_text()
         cls.pages = (ROOT / ".github/workflows/backend-status-pages.yml").read_text()
+        cls.poller = (ROOT / "scripts/local_ci/poll_gitee_and_run.sh").read_text()
 
     def test_contract_v3_interface(self) -> None:
         self.assertEqual(workflow_dispatch_inputs(self.gateway), CONTRACT_INPUTS)
@@ -89,6 +104,74 @@ class GatewayV3ContractTests(unittest.TestCase):
             "description_truncated:(($description|length)>8000)",
             self.dispatcher,
         )
+
+    def test_dispatch_classifies_only_existing_codex_docs_paths(self) -> None:
+        script = workflow_step_script(self.dispatcher, "Classify PR execution mode")
+        cases = (
+            ("docs/guide.md", "codex_only"),
+            ("README.md", "codex_only"),
+            ("python/triton_anchor/example.py", "full"),
+            (".github/workflows/ci.yml", "full"),
+            ("scripts/local_ci/codex_ai/prompts/review.md", "full"),
+            ("python/old.py\ndocs/new.md", "full"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_git = root / "git"
+            fake_git.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$CHANGED_PATHS" | tr "\\n" "\\0"\n',
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o700)
+            for changed_paths, expected in cases:
+                with self.subTest(changed_paths=changed_paths):
+                    output = root / "github-output"
+                    output.unlink(missing_ok=True)
+                    env = os.environ.copy()
+                    env.update(
+                        {
+                            "BASE_SHA": "a" * 40,
+                            "HEAD_SHA": "b" * 40,
+                            "CHANGED_PATHS": changed_paths,
+                            "GITHUB_OUTPUT": str(output),
+                            "PATH": f"{root}:{env['PATH']}",
+                        }
+                    )
+                    subprocess.run(["bash", "-c", script], env=env, check=True)
+                    self.assertEqual(
+                        output.read_text(encoding="utf-8").strip(),
+                        f"execution_mode={expected}",
+                    )
+
+    def test_receiver_reports_explicitly_skipped_stages_as_success(self) -> None:
+        script = workflow_step_script(self.receiver, "Report ${{ matrix.name }}")
+        with tempfile.TemporaryDirectory() as directory:
+            env = os.environ.copy()
+            env.update(
+                {
+                    "STAGE_KEY": "frontend_build",
+                    "STAGE_NAME": "Frontend build",
+                    "REQUIRED_STAGE": "true",
+                    "STAGE_RESULTS": json.dumps({"frontend_build": "skipped"}),
+                    "TARGET_URL": "",
+                    "GITHUB_STEP_SUMMARY": str(Path(directory) / "summary.md"),
+                }
+            )
+            result = subprocess.run(["bash", "-c", script], env=env, check=False)
+        self.assertEqual(result.returncode, 0)
+
+    def test_poller_routes_codex_only_without_deterministic_ci(self) -> None:
+        self.assertIn('execution_mode="full"', self.poller)
+        self.assertIn('"${execution_mode}" == "codex_only"', self.poller)
+        self.assertIn("frontend_build_status: skipped", self.poller)
+        self.assertIn('.get("execution_mode", "full")', self.poller)
+        codex_at = self.poller.rindex("run_codex_ai_ci_for_run")
+        artifact_at = self.poller.index(
+            'echo "Artifact dir: ${nonexecuted_artifact_dir}"', codex_at
+        )
+        publish_at = self.poller.index('publish_result "${sha}"', artifact_at)
+        self.assertLess(codex_at, artifact_at)
+        self.assertLess(artifact_at, publish_at)
 
     def test_external_fork_requires_live_maintainer_authorization(self) -> None:
         self.assertIn("getCollaboratorPermissionLevel", self.gateway)

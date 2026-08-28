@@ -176,6 +176,7 @@ cat > "${valid_json}" <<'JSON'
       {
         "id": "RUN-001",
         "command": "python3 -m pytest python/tests/test_generated_cache.py",
+        "role": "validation",
         "purpose": "缓存版本失配定向测试",
         "exit_code": 0,
         "duration_seconds": 0.2,
@@ -217,7 +218,7 @@ grep -Fq "这段代码负责" "${report_md}"
 grep -Fq "## 建议测试" "${report_md}"
 grep -Fq "## 测试执行" "${report_md}"
 grep -Fq -- "- Codex 对验证证据的判断：证据充分" "${report_md}"
-grep -Fq -- "- Runner 事实校验：所执行的验证命令均通过" "${report_md}"
+grep -Fq -- "- Runner 事实校验：正式验证目标均已完成" "${report_md}"
 grep -Fq "## 测试执行约束" "${report_md}"
 grep -Fq "状态：警告" "${report_md}"
 grep -Fq "测试命令数量超过轻量约束" "${report_md}"
@@ -226,6 +227,12 @@ grep -Fq "## Codex AI 自动审查" "${comment_md}"
 grep -Fq "仅供参考且不阻塞合入" "${comment_md}"
 grep -Fq "### 审查摘要" "${comment_md}"
 grep -Fq "本地确定性 CI 检查：" "${comment_md}"
+grep -Fq "Codex AI 审查结论：" "${comment_md}"
+grep -Fq "Codex AI 审查结论：**需关注（非阻塞）**" "${comment_md}"
+if grep -Fq "Codex 执行状态" "${comment_md}"; then
+  echo "PR 评论不应显示 Codex 执行状态" >&2
+  exit 1
+fi
 grep -Fq "### 贡献者目标与实现情况" "${comment_md}"
 grep -Fq "贡献者目标：贡献者希望修复缓存命中后的状态读取逻辑" "${comment_md}"
 grep -Fq -- "- 判断依据：" "${comment_md}"
@@ -233,7 +240,10 @@ grep -Fq -- "  - 代码差异缺少版本校验。" "${comment_md}"
 grep -Fq -- "  - 缓存版本失配定向测试复现了过期状态。" "${comment_md}"
 grep -Fq "### 验证情况" "${comment_md}"
 grep -Fq -- "- 验证内容与结果：" "${comment_md}"
-grep -Fq -- "  - 缓存版本失配定向测试执行成功。" "${comment_md}"
+if grep -Fq "条执行记录" "${comment_md}"; then
+  echo "PR 评论不应根据全部命令生成固定统计文案" >&2
+  exit 1
+fi
 grep -Fq -- "- 限制与未覆盖：" "${comment_md}"
 grep -Fq -- "  - 验证覆盖了版本变化后的缓存失效路径。" "${comment_md}"
 if grep -Eq -- "^- (验证依据|执行内容|执行结果)：" "${comment_md}"; then

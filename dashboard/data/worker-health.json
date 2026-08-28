@@ -1,0 +1,28 @@
+{
+  "schema": "triton-anchor-local-ci-worker-health/v1",
+  "data_mode": "unavailable",
+  "worker_id": "",
+  "profile": "unknown",
+  "state": "unknown",
+  "collected_at": "",
+  "snapshot_age_seconds": null,
+  "poller": {
+    "alive": false,
+    "heartbeat_at": "",
+    "heartbeat_age_seconds": null,
+    "task_ref_count": 0,
+    "last_poll_status": "unknown",
+    "last_error_code": ""
+  },
+  "active_task": null,
+  "last_result": null,
+  "container": {
+    "name": "",
+    "available": false,
+    "running": false,
+    "status": "unknown",
+    "limits": {},
+    "stats": {}
+  },
+  "storage": []
+}

@@ -20,24 +20,59 @@ CODEX_AI_CI_HOME="${CODEX_AI_CI_HOME:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 CODEX_AI_CI_TIMEOUT_SECONDS="${CODEX_AI_CI_TIMEOUT_SECONDS:-3600}"
 CODEX_AI_CI_PREPARE_TIMEOUT_SECONDS="${CODEX_AI_CI_PREPARE_TIMEOUT_SECONDS:-1500}"
-CODEX_AI_CI_STARTUP_TIMEOUT_SECONDS="${CODEX_AI_CI_STARTUP_TIMEOUT_SECONDS:-600}"
+CODEX_AI_CI_STARTUP_TIMEOUT_SECONDS="${CODEX_AI_CI_STARTUP_TIMEOUT_SECONDS:-900}"
 CODEX_AI_CI_REASONING_EFFORT="${CODEX_AI_CI_REASONING_EFFORT:-medium}"
 CODEX_AI_CI_WORKSPACE_ROOT="${CODEX_AI_CI_WORKSPACE_ROOT:-${TMPDIR:-/tmp}/triton-anchor-codex-ai}"
 CODEX_AI_CI_MIN_GENERATED_TEST_CASES="${CODEX_AI_CI_MIN_GENERATED_TEST_CASES:-1}"
 CODEX_AI_CI_MAX_GENERATED_TEST_CASES="${CODEX_AI_CI_MAX_GENERATED_TEST_CASES:-15}"
 CODEX_AI_CI_MAX_GENERATED_TEST_FILES="${CODEX_AI_CI_MAX_GENERATED_TEST_FILES:-5}"
-CODEX_AI_CI_MAX_TEST_COMMANDS="${CODEX_AI_CI_MAX_TEST_COMMANDS:-30}"
-CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS="${CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS:-600}"
+CODEX_AI_CI_MAX_TEST_COMMANDS="${CODEX_AI_CI_MAX_TEST_COMMANDS:-50}"
+CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS="${CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS:-900}"
 CODEX_AI_CI_TEST_BUDGET_SECONDS="${CODEX_AI_CI_TEST_BUDGET_SECONDS:-2700}"
 CODEX_AI_CI_REPORT_RESERVE_SECONDS="${CODEX_AI_CI_REPORT_RESERVE_SECONDS:-450}"
+CODEX_AI_CI_CPUS="${CODEX_AI_CI_CPUS:-12}"
+CODEX_AI_CI_MEMORY="${CODEX_AI_CI_MEMORY:-48g}"
+CODEX_AI_CI_MEMORY_SWAP="${CODEX_AI_CI_MEMORY_SWAP:-48g}"
+CODEX_AI_CI_PIDS_LIMIT="${CODEX_AI_CI_PIDS_LIMIT:-4096}"
 LOCAL_CI_CONTAINER="${LOCAL_CI_CONTAINER:-anchor-sophgo-ci-prod}"
 LOCAL_CI_ARTIFACT_ROOT="${LOCAL_CI_ARTIFACT_ROOT:-/workspace/local-ci-artifacts}"
+LOCAL_CI_PROFILE_NAME="${LOCAL_CI_PROFILE_NAME:-legacy}"
+LOCAL_CI_LLVM_HASH="${LOCAL_CI_LLVM_HASH:-unknown}"
+LOCAL_CI_EXECUTION_MODE="${LOCAL_CI_EXECUTION_MODE:-full}"
+RUN_BACKEND_STAGES="${RUN_BACKEND_STAGES:-true}"
+BACKEND_SKIP_REASON="${BACKEND_SKIP_REASON:-}"
+FRONTEND_ONLY_BACKEND_SKIP_REASON="当前没有部署可供测试的厂商后端，未执行后端构建、JIT、FlagGems 和性能验证。"
+backend_validation_scope="full"
+if [[ "${RUN_BACKEND_STAGES}" == "false" ]]; then
+  backend_validation_scope="frontend_only"
+  BACKEND_SKIP_REASON="${FRONTEND_ONLY_BACKEND_SKIP_REASON}"
+fi
 PYTHON_VENV_ACTIVATE="${PYTHON_VENV_ACTIVATE:-/opt/venv/bin/activate}"
+LLVM_BUILD_DIR="${LLVM_BUILD_DIR:-}"
 SOURCE_ENVSETUP="${SOURCE_ENVSETUP:-1}"
+TRUSTED_ANCHOR_ENVSETUP="${TRUSTED_ANCHOR_ENVSETUP:-${LOCAL_CI_ROOT}/trusted/envsetup.sh}"
+CODEX_TEST_PYTHON_BIN="${CODEX_TEST_PYTHON_BIN:-python3}"
+PPL_ROOT="${PPL_ROOT:-}"
+PACKAGE_TOOL="${PACKAGE_TOOL:-auto}"
+FRONTEND_BUILD_MODE="${FRONTEND_BUILD_MODE:-}"
+BACKEND_PROFILE="${BACKEND_PROFILE:-}"
+EXPECTED_TRITON_BACKEND="${EXPECTED_TRITON_BACKEND:-}"
+FLAGGEMS_CLONE_DIR="${FLAGGEMS_CLONE_DIR:-}"
+MAX_JOBS="${MAX_JOBS:-1}"
+CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-1}"
+NINJAFLAGS="${NINJAFLAGS:--j1}"
+UV_LINK_MODE="${UV_LINK_MODE:-copy}"
+LOCAL_CI_RUN_ID="${LOCAL_CI_RUN_ID:-}"
 ANCHOR_DIR="${ANCHOR_DIR:-/workspace/triton-anchor}"
-BACKEND_PATH="${BACKEND_PATH:-/workspace/triton-sophgo-backend}"
-BACKEND_ENVSETUP="${BACKEND_ENVSETUP:-envsetup.sh}"
-BACKEND_ENVSETUP_ARGS="${BACKEND_ENVSETUP_ARGS:-PIO_CMODEL}"
+if [[ "${RUN_BACKEND_STAGES}" == "false" ]]; then
+  BACKEND_PATH=""
+  BACKEND_ENVSETUP=""
+  BACKEND_ENVSETUP_ARGS=""
+else
+  BACKEND_PATH="${BACKEND_PATH:-}"
+  BACKEND_ENVSETUP="${BACKEND_ENVSETUP:-}"
+  BACKEND_ENVSETUP_ARGS="${BACKEND_ENVSETUP_ARGS:-}"
+fi
 
 container_codex_bin="/usr/local/bin/codex"
 container_codex_home="/root/.codex"
@@ -49,6 +84,11 @@ container_schema_path="${container_workspace_root}/codex-ai-analysis.schema.json
 container_jsonl_recorder_path="${container_workspace_root}/codex-jsonl-evidence.py"
 container_local_ci_log="${container_input_dir}/local-ci.log"
 container_changed_files_manifest="${container_input_dir}/codex-changed-files-manifest.json"
+container_trusted_envsetup="${container_input_dir}/trusted-envsetup.sh"
+container_anchor_envsetup=""
+if [[ "${branch}" =~ ^ci/pr-[0-9]+/.+ && "${SOURCE_ENVSETUP}" == "1" ]]; then
+  container_anchor_envsetup="${container_trusted_envsetup}"
+fi
 
 log_path="${output_dir}/codex-ai-ci.log"
 codex_jsonl_path="${output_dir}/codex-ai-events.jsonl"
@@ -86,6 +126,7 @@ diff_command=""
 diff_revisions=()
 changed_file_count=0
 changed_files_manifest_json="[]"
+changed_files_manifest_available="false"
 failure_reason=""
 marker_found="false"
 report_format_valid="false"
@@ -110,6 +151,8 @@ snapshot_duration_seconds="UNKNOWN"
 container_start_duration_seconds="UNKNOWN"
 input_setup_duration_seconds="UNKNOWN"
 command_executed="false"
+command_ledger_available="false"
+generated_archive_available="false"
 workspace_dirty="false"
 workspace_dir=""
 workspace_parent=""
@@ -122,6 +165,7 @@ config_sha256_before=""
 auth_sha256_before=""
 change_request_context_status="not_applicable"
 change_request_context_reason="当前任务不是 PR，功能声明上下文不适用。"
+change_request_context_diagnostic=""
 change_request_context_pr_number=""
 change_request_context_json=""
 ephemeral_container=""
@@ -184,6 +228,11 @@ write_summary() {
     echo "local_ci_status: ${local_ci_status}"
     echo "analysis_mode: ${analysis_mode}"
     echo "execution_mode: ephemeral_container"
+    echo "local_ci_execution_mode: ${LOCAL_CI_EXECUTION_MODE}"
+    echo "ci_profile: ${LOCAL_CI_PROFILE_NAME}"
+    echo "llvm_hash: ${LOCAL_CI_LLVM_HASH}"
+    echo "backend_stages_enabled: ${RUN_BACKEND_STAGES}"
+    echo "backend_skip_reason: ${BACKEND_SKIP_REASON}"
     echo "source_container: ${LOCAL_CI_CONTAINER}"
     echo "ephemeral_container: ${ephemeral_container}"
     echo "snapshot_image: ${ephemeral_image}"
@@ -192,6 +241,7 @@ write_summary() {
     echo "artifact_dir: ${artifact_dir}"
     echo "output_dir: ${output_dir}"
     echo "changed_file_count: ${changed_file_count}"
+    echo "changed_files_manifest_available: ${changed_files_manifest_available}"
     echo "review_context_profile: ${review_context_profile}"
     echo "review_context_hint: ${review_context_hint}"
     echo "changed_file_groups_json: ${changed_file_groups_json}"
@@ -214,6 +264,10 @@ write_summary() {
     echo "max_generated_test_files: ${CODEX_AI_CI_MAX_GENERATED_TEST_FILES}"
     echo "max_test_commands: ${CODEX_AI_CI_MAX_TEST_COMMANDS}"
     echo "recommended_command_timeout_seconds: ${CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS}"
+    echo "container_cpus: ${CODEX_AI_CI_CPUS}"
+    echo "container_memory: ${CODEX_AI_CI_MEMORY}"
+    echo "container_memory_swap: ${CODEX_AI_CI_MEMORY_SWAP}"
+    echo "container_pids_limit: ${CODEX_AI_CI_PIDS_LIMIT}"
     echo "test_budget_seconds: ${CODEX_AI_CI_TEST_BUDGET_SECONDS}"
     echo "report_reserve_seconds: ${CODEX_AI_CI_REPORT_RESERVE_SECONDS}"
     echo "marker_found: ${marker_found}"
@@ -229,15 +283,323 @@ write_summary() {
     echo "constraint_reason: ${constraint_reason}"
     echo "turn_completed: ${turn_completed}"
     echo "command_executed: ${command_executed}"
+    echo "command_ledger_available: ${command_ledger_available}"
+    echo "generated_archive_available: ${generated_archive_available}"
     echo "workspace_dirty: ${workspace_dirty}"
     echo "credential_integrity_status: ${credential_integrity_status}"
     echo "credential_integrity_reason: ${credential_integrity_reason}"
     echo "change_request_context_status: ${change_request_context_status}"
     echo "change_request_context_reason: ${change_request_context_reason}"
+    echo "change_request_context_diagnostic: ${change_request_context_diagnostic}"
     echo "change_request_context_pr_number: ${change_request_context_pr_number}"
     echo "failure_code: ${failure_code}"
     echo "failure_reason: ${failure_reason}"
   } > "${summary_path}"
+}
+
+load_execution_metadata() {
+  local execution_metadata
+  local constraint_fields=()
+  execution_metadata="$(
+    "${PYTHON_BIN}" -c '
+import json
+import sys
+
+execution = json.load(open(sys.argv[1], encoding="utf-8"))["test_execution"]
+max_files = int(sys.argv[2])
+max_commands = int(sys.argv[3])
+recommended_timeout = int(sys.argv[4])
+test_budget = int(sys.argv[5])
+generated_files = execution["generated_test_files"]
+commands = execution["commands"]
+durations = [float(command["duration_seconds"]) for command in commands]
+max_duration = max(durations, default=0.0)
+total_duration = sum(durations)
+reasons = []
+
+if len(generated_files) > max_files:
+    reasons.append(
+        f"生成测试文件数量 {len(generated_files)} 超过限制 {max_files}"
+    )
+if len(commands) > max_commands:
+    reasons.append(
+        f"测试、构建、lint 或诊断命令数量 {len(commands)} 超过限制 {max_commands}"
+    )
+if max_duration > recommended_timeout:
+    reasons.append(
+        f"单条命令最长耗时 {max_duration:g} 秒超过建议上限 "
+        f"{recommended_timeout} 秒"
+    )
+if total_duration > test_budget:
+    reasons.append(
+        f"测试和诊断命令累计耗时 {total_duration:g} 秒超过建议预算 "
+        f"{test_budget} 秒"
+    )
+constraint_status = "warning" if reasons else "pass"
+constraint_reason = (
+    "；".join(reasons)
+    if reasons
+    else "生成测试文件、执行测试或诊断命令的数量和耗时均在轻量约束范围内。"
+)
+
+print(
+    execution["status"],
+    len(generated_files),
+    len(commands),
+    f"{max_duration:g}",
+    f"{total_duration:g}",
+    constraint_status,
+    constraint_reason,
+    sep="\t",
+)
+' "${report_json_path}" \
+      "${CODEX_AI_CI_MAX_GENERATED_TEST_FILES}" \
+      "${CODEX_AI_CI_MAX_TEST_COMMANDS}" \
+      "${CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS}" \
+      "${CODEX_AI_CI_TEST_BUDGET_SECONDS}" 2>> "${log_path}"
+  )" || return 1
+  [[ -n "${execution_metadata}" ]] || return 1
+  IFS=$'\t' read -r -a constraint_fields <<< "${execution_metadata}"
+  [[ "${#constraint_fields[@]}" -eq 7 ]] || return 1
+  test_execution_status="${constraint_fields[0]}"
+  generated_test_file_count="${constraint_fields[1]}"
+  test_command_count="${constraint_fields[2]}"
+  max_test_command_duration_seconds="${constraint_fields[3]}"
+  total_test_command_duration_seconds="${constraint_fields[4]}"
+  constraint_status="${constraint_fields[5]}"
+  constraint_reason="${constraint_fields[6]}"
+}
+
+refresh_command_ledger_state() {
+  local ledger_metadata=""
+  local ledger_count=""
+  local ledger_max_duration=""
+  local ledger_total_duration=""
+  local ledger_failed_count=""
+  command_executed="false"
+  if [[ "${command_ledger_available}" != "true" || ! -r "${command_ledger_path}" ]]; then
+    return 1
+  fi
+  if ! ledger_metadata="$(
+    "${PYTHON_BIN}" - "${command_ledger_path}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    document = json.load(stream)
+if not isinstance(document, list):
+    raise SystemExit("command ledger is not an array")
+for index, item in enumerate(document):
+    if not isinstance(item, dict):
+        raise SystemExit(f"command ledger item {index} is not an object")
+    command = item.get("command")
+    exit_code = item.get("exit_code")
+    duration = item.get("duration_seconds", 0.0)
+    if not isinstance(command, str) or not command.strip():
+        raise SystemExit(f"command ledger item {index} has no command")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        raise SystemExit(f"command ledger item {index} has no integer exit code")
+    if (
+        not isinstance(duration, (int, float))
+        or isinstance(duration, bool)
+        or duration < 0
+    ):
+        raise SystemExit(f"command ledger item {index} has an invalid duration")
+durations = [float(item.get("duration_seconds", 0.0)) for item in document]
+print(
+    f"{len(document)}\t"
+    f"{max(durations, default=0.0):.3f}\t"
+    f"{sum(durations):.3f}\t"
+    f"{sum(item['exit_code'] != 0 for item in document)}"
+)
+PY
+  )"; then
+    echo "Codex 命令执行记录不可读取。" >> "${log_path}"
+    command_ledger_available="false"
+    return 1
+  fi
+  IFS=$'\t' read -r ledger_count ledger_max_duration ledger_total_duration \
+    ledger_failed_count \
+    <<< "${ledger_metadata}"
+  test_command_count="${ledger_count}"
+  max_test_command_duration_seconds="${ledger_max_duration}"
+  total_test_command_duration_seconds="${ledger_total_duration}"
+  if ((ledger_count > 0)); then
+    command_executed="true"
+    if ((ledger_failed_count > 0)); then
+      test_execution_status="insufficient_evidence"
+    else
+      test_execution_status="passed"
+    fi
+  else
+    test_execution_status="not_run"
+  fi
+}
+
+fallback_command_ledger_fact() {
+  if [[ "${command_ledger_available}" != "true" || ! -r "${command_ledger_path}" ]]; then
+    echo "本次验证或诊断命令的执行事实不可确认。"
+    return 0
+  fi
+  "${PYTHON_BIN}" - "${command_ledger_path}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    ledger = json.load(stream)
+passed = sum(item["exit_code"] == 0 for item in ledger)
+failed = len(ledger) - passed
+duration = sum(float(item.get("duration_seconds", 0.0)) for item in ledger)
+if not ledger:
+    print("本次没有执行新的验证或诊断命令。")
+elif failed:
+    print(
+        f"已保留 {len(ledger)} 条验证或诊断命令记录："
+        f"{passed} 条成功、{failed} 条失败，总耗时 {duration:.3f} 秒；"
+        "失败记录对整体结论的影响仍需结合对应命令和根因判断。"
+    )
+else:
+    print(
+        f"已保留 {len(ledger)} 条验证或诊断命令记录，均成功，"
+        f"总耗时 {duration:.3f} 秒。"
+    )
+PY
+}
+
+write_fallback_command_ledger_table() {
+  if [[ "${command_ledger_available}" != "true" || ! -r "${command_ledger_path}" ]]; then
+    echo "命令执行记录不可确认。"
+    return 0
+  fi
+  if ! "${PYTHON_BIN}" - "${command_ledger_path}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    ledger = json.load(stream)
+
+def cell(value: object, limit: int = 1000) -> str:
+    text = str(value).replace("|", "\\|").replace("`", "\\`").replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+if not ledger:
+    print("未记录新增验证或诊断命令。")
+else:
+    print("| 命令 | 退出码 | 耗时（秒） |")
+    print("| --- | ---: | ---: |")
+    for item in ledger:
+        print(
+            f"| `{cell(item['command'])}` | {item['exit_code']} | "
+            f"{float(item.get('duration_seconds', 0.0)):.3f} |"
+        )
+PY
+  then
+    echo "命令执行记录不可确认。"
+  fi
+}
+
+write_fallback_changed_files_table() {
+  local max_rows="${1:-0}"
+  if [[ "${changed_files_manifest_available}" != "true" || ! -r "${changed_files_manifest_path}" ]]; then
+    echo "变更文件清单尚未生成或不可确认。"
+    return 0
+  fi
+  if ! "${PYTHON_BIN}" - "${changed_files_manifest_path}" "${max_rows}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    manifest = json.load(stream)
+max_rows = int(sys.argv[2])
+if not isinstance(manifest, list):
+    raise SystemExit("changed-files manifest is not an array")
+
+labels = {
+    "added": "新增",
+    "modified": "修改",
+    "deleted": "删除",
+    "renamed": "重命名",
+}
+
+for index, item in enumerate(manifest):
+    if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+        raise SystemExit(f"changed-files manifest item {index} is invalid")
+    if item.get("change_type") not in labels:
+        raise SystemExit(f"changed-files manifest item {index} has an invalid type")
+paths = [item["path"] for item in manifest]
+if len(paths) != len(set(paths)):
+    raise SystemExit("changed-files manifest contains duplicate paths")
+
+def cell(value: object, limit: int = 500) -> str:
+    text = str(value).replace("|", "\\|").replace("`", "\\`").replace("\n", " ")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+print("| 文件 | 类型 | 改动说明 | 影响 |")
+print("| --- | --- | --- | --- |")
+if not manifest:
+    print("| 无 | 无 | 本次差异没有变更文件。 | 不适用。 |")
+shown = manifest if max_rows <= 0 else manifest[:max_rows]
+for item in shown:
+    change_type = labels[item["change_type"]]
+    path = cell(item["path"])
+    print(
+        f"| `{path}` | {change_type} | "
+        "自动审查未完成，未能可靠归纳该文件的具体改动。 | "
+        "该文件的行为影响仍需结合代码差异人工核对。 |"
+    )
+if len(shown) < len(manifest):
+    print(
+        f"| 其余 {len(manifest) - len(shown)} 个文件 | 省略 | "
+        "评论长度受限，完整文件清单保留在任务结果产物中。 | "
+        "需结合完整差异人工核对。 |"
+    )
+PY
+  then
+    echo "变更文件清单不可读取。"
+  fi
+}
+
+limit_public_comment() {
+  "${PYTHON_BIN}" - "${comment_path}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+limit = 58_000
+if len(text) <= limit:
+    raise SystemExit(0)
+
+changed_heading = "\n### 变更文件\n"
+if changed_heading in text:
+    changed_start = text.index(changed_heading)
+    details_end = text.find("\n</details>", changed_start)
+    if details_end >= 0:
+        tail_start = details_end + len("\n</details>")
+        text = (
+            text[:changed_start]
+            + changed_heading
+            + "\n变更文件较多，公开评论已按长度上限省略文件表；"
+            "完整清单保留在本次任务结果产物中。\n"
+            + text[tail_start:]
+        )
+
+if len(text) > limit:
+    validation_heading = "\n### 验证情况\n"
+    if validation_heading in text:
+        tail = text[text.index(validation_heading) :]
+        marker = "\n\n（前文已按评论长度上限截断。）\n"
+        available = max(limit - len(marker) - len(tail), 0)
+        text = text[:available].rstrip() + marker + tail
+
+if len(text) > limit:
+    suffix = "\n\n（评论已按长度上限截断，完整信息保留在任务结果产物中。）\n"
+    text = text[: limit - len(suffix)].rstrip() + suffix
+
+temporary = path.with_suffix(path.suffix + ".tmp")
+temporary.write_text(text, encoding="utf-8")
+temporary.replace(path)
+PY
 }
 
 write_failure_report() {
@@ -247,7 +609,25 @@ write_failure_report() {
   local fallback_contributor_goal="Codex AI 自动审查未完成，未能可靠归纳贡献者的修改目标。"
   local fallback_expected_behavior="Codex AI 自动审查未完成，未能可靠归纳贡献者声明的预期行为。"
   local fallback_implementation_summary="当前没有足够证据判断代码是否实现了声明目标。"
+  local fallback_validation_fact="本次验证或诊断命令的执行事实不可确认。"
+  local fallback_changed_file_count="不可确认"
   local public_failure_reason
+  report_verdict="WARNING"
+  test_execution_status="unavailable"
+  generated_test_file_count="UNKNOWN"
+  test_command_count="UNKNOWN"
+  max_test_command_duration_seconds="UNKNOWN"
+  total_test_command_duration_seconds="UNKNOWN"
+  constraint_status="warning"
+  constraint_reason="Codex AI 自动审查未完成，无法确认测试执行是否符合轻量约束。"
+  refresh_command_ledger_state || true
+  fallback_validation_fact="$(fallback_command_ledger_fact)"
+  if [[ "${generated_archive_available}" == "true" ]]; then
+    fallback_validation_fact+=" 已收集的任务级测试文件归档已保留在结果产物中，具体内容需人工核对。"
+  fi
+  if [[ "${changed_files_manifest_available}" == "true" ]]; then
+    fallback_changed_file_count="${changed_file_count}"
+  fi
   if [[ "${diff_mode}" == "merge-base" ]]; then
     rendered_diff_mode="merge-base"
   fi
@@ -260,116 +640,37 @@ write_failure_report() {
   if [[ -n "${workspace_dir}" && -d "${workspace_dir}" ]]; then
     repository_root_args=(--repository-root "${workspace_dir}")
   fi
-  report_verdict="WARNING"
-  test_execution_status="unavailable"
-  generated_test_file_count="0"
-  test_command_count="0"
-  max_test_command_duration_seconds="0"
-  total_test_command_duration_seconds="0"
-  constraint_status="warning"
-  constraint_reason="Codex AI 自动审查未完成，无法确认测试执行是否符合轻量约束。"
 
   public_failure_reason="$(codex_failure_public_reason "${failure_code:-codex_execution_failed}")"
-  if ! "${PYTHON_BIN}" - "${public_failure_reason}" \
-    "${changed_files_manifest_path}" \
-    "${change_request_context_status}" \
-    > "${report_json_path}" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-public_failure_reason = sys.argv[1]
-manifest_path = Path(sys.argv[2])
-context_status = sys.argv[3]
-try:
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-except (OSError, UnicodeError, json.JSONDecodeError):
-    manifest = []
-
-changed_files = []
-for item in manifest if isinstance(manifest, list) else []:
-    if not isinstance(item, dict):
-        continue
-    path = item.get("path")
-    change_type = item.get("change_type")
-    if not isinstance(path, str) or not isinstance(change_type, str):
-        continue
-    changed_files.append({
-        "path": path,
-        "change_type": change_type,
-        "summary": "AI 审查未完成，未能可靠归纳该文件的改动。",
-        "impact": "该文件的行为影响仍需人工检查。",
-        "validation_strategy": "未执行：Codex AI 自动审查未完成，没有取得该文件的可信验证结果。",
-    })
-
-behavior_coverage = {}
-labels = {
-    "normal": "正常路径",
-    "boundary": "边界路径",
-    "error": "错误路径",
-    "compatibility": "兼容路径",
-    "integration": "集成路径",
-}
-for key, label in labels.items():
-    behavior_coverage[key] = {
-        "scope": f"本次未能可靠检查{label}。",
-        "strategy": "修复 AI 执行问题后重新分析代码差异并进行定向验证。",
-        "result": "分析未完成，当前没有可信结论。",
-    }
-
-document = {
-    "verdict": "WARNING",
-    "summary": f"Codex AI 自动审查未完成：{public_failure_reason}。本次没有生成可信的结构化审查摘要。",
-    "merge_recommendation": "请先排查 AI 执行问题并重新运行，当前不要仅依据本次 AI 结果决定合入。",
-    "change_request_assessment": {
-        "status": "not_applicable" if context_status == "not_applicable" else "not_assessable",
-        "contributor_goal": (
-            "当前任务不是 PR，因此没有需要对照的贡献者功能声明。"
-            if context_status == "not_applicable"
-            else "Codex AI 自动审查未完成，未能可靠归纳贡献者的修改目标。"
-        ),
-        "expected_behavior": (
-            "当前任务不是 PR，因此贡献者预期行为不适用。"
-            if context_status == "not_applicable"
-            else "Codex AI 自动审查未完成，未能可靠归纳贡献者声明的预期行为。"
-        ),
-        "implementation_summary": (
-            "当前任务不是 PR，不进行贡献者声明对照；Codex AI 审查未完成。"
-            if context_status == "not_applicable"
-            else "Codex AI 自动审查未完成，不能判断当前代码是否实现了声明目标。"
-        ),
-        "evidence": [
-            f"Codex AI 自动审查执行失败：{public_failure_reason}。当前没有完整的代码审查证据。"
-        ],
-    },
-    "changed_files": changed_files,
-    "behavior_coverage": behavior_coverage,
-    "findings": [],
-    "unlocated_findings": [],
-    "suggested_tests": [],
-    "residual_risks": [
-        "当前代码差异仍需人工检查，或在修复执行环境后重新运行 Codex AI 自动审查。"
-    ],
-    "test_execution": {
-        "evidence_level": "unavailable",
-        "status": "unavailable",
-        "summary": [
-            "Codex 说明：自动审查未完成，未获得可信的证据判断。",
-            "Runner 校验：没有可用于生成执行事实结论的完整报告。",
-        ],
-        "generated_test_files": [],
-        "commands": [],
-    },
-    "completion_marker": "CODEX_AI_CI_COMPLETE",
-}
-json.dump(document, sys.stdout, ensure_ascii=False, indent=2)
-sys.stdout.write("\n")
-PY
-  then
-    :
+  local command_ledger_state="unavailable"
+  local generated_archive_state="unavailable"
+  if [[ "${command_ledger_available}" == "true" ]]; then
+    command_ledger_state="available"
+  fi
+  if [[ "${generated_archive_available}" == "true" ]]; then
+    generated_archive_state="available"
+  fi
+  if [[ "${changed_files_manifest_available}" == "true" \
+    && -r "${report_builder_path}" \
+    && -r "${changed_files_manifest_path}" ]] && \
+    "${PYTHON_BIN}" "${report_builder_path}" build-fallback \
+      --output "${report_json_path}" \
+      --manifest "${changed_files_manifest_path}" \
+      --command-ledger "${command_ledger_path}" \
+      --command-ledger-state "${command_ledger_state}" \
+      --generated-archive "${generated_files_path}" \
+      --generated-archive-state "${generated_archive_state}" \
+      --failure-reason "${public_failure_reason}" \
+      --change-request-context-status "${change_request_context_status}" \
+      >> "${log_path}" 2>&1; then
+    load_execution_metadata || true
+  else
+    echo "Codex AI CI 最末级报告：无法生成标准 fallback 数据。" >> "${log_path}"
   fi
 
-  if [[ -r "${renderer_path}" && -r "${changed_files_manifest_path}" ]] && \
+  if [[ "${changed_files_manifest_available}" == "true" \
+    && -r "${renderer_path}" \
+    && -r "${changed_files_manifest_path}" ]] && \
     "${PYTHON_BIN}" "${renderer_path}" \
       --input "${report_json_path}" \
       --output "${report_path}" \
@@ -382,6 +683,8 @@ PY
       --head-sha "${requested_head_sha}" \
       --tested-sha-kind "$([[ "${branch}" =~ ^ci/pr-[0-9]+/.+ ]] && printf '%s' pr_merge || printf '%s' commit)" \
       --local-ci-status "${local_ci_status}" \
+      --local-ci-execution-mode "${LOCAL_CI_EXECUTION_MODE}" \
+      --backend-validation-scope "${backend_validation_scope}" \
       --changed-file-count "${changed_file_count}" \
       --changed-files-manifest "${changed_files_manifest_path}" \
       --constraint-status "${constraint_status}" \
@@ -405,7 +708,7 @@ PY
     echo "| 实际审查起点 | \`${base_sha:-不可用}\` |"
     echo "| 差异模式 | \`${diff_mode}\` |"
     echo "| 测试提交 | \`${target_sha}\` |"
-    echo "| 变更文件数 | ${changed_file_count} |"
+    echo "| 变更文件数 | ${fallback_changed_file_count} |"
     echo "| 生成时间（UTC） | \`${start_time}\` |"
     echo
     echo "## 结论"
@@ -427,11 +730,11 @@ PY
     echo
     echo "## 合入建议"
     echo
-    echo "请先排查 AI 执行问题并重新运行，当前不要仅依据本次 AI 结果决定合入。"
+    echo "本次 AI 意见不可用；确定性门禁事实不受影响，请结合门禁结果和人工审查决定是否合入。"
     echo
     echo "## 具体文件变更"
     echo
-    echo "分析未完成，无法可靠生成文件级变更表。"
+    write_fallback_changed_files_table
     echo
     echo "## 行为覆盖"
     echo
@@ -447,9 +750,9 @@ PY
     echo
     echo "## 测试执行"
     echo
-    echo "- Codex 对验证证据的判断：未获得可信判断"
-    echo "- Runner 事实校验：未获得可信结果"
-    echo "- 摘要：Codex AI 自动审查未完成。"
+    echo "- ${fallback_validation_fact}"
+    echo
+    write_fallback_command_ledger_table
     echo
     echo "## 剩余风险"
     echo
@@ -466,13 +769,18 @@ PY
     echo
     echo "### 审查摘要"
     echo
-    echo "- Codex AI 审查结论：**警告**"
-    if [[ "${local_ci_status}" == "0" ]]; then
-      echo "- 本地确定性 CI 检查：已通过；本次失败只影响 Codex AI 自动审查，不改变门禁结果。"
+    if [[ "${LOCAL_CI_EXECUTION_MODE}" == "codex_only" ]]; then
+      echo "- 本地确定性 CI 检查：**按策略跳过**；本次任务只执行 Codex AI 自动审查。"
+    elif [[ "${backend_validation_scope}" == "frontend_only" && "${local_ci_status}" == "0" ]]; then
+      echo "- 本地确定性 CI 检查：**通过（仅前端范围）**；本次未执行厂商后端验证。"
+    elif [[ "${backend_validation_scope}" == "frontend_only" ]]; then
+      echo "- 本地确定性 CI 检查：**失败（前端范围）**；本次未执行厂商后端验证。"
+    elif [[ "${local_ci_status}" == "0" ]]; then
+      echo "- 本地确定性 CI 检查：**通过**。"
     else
-      echo "- 本地确定性 CI 检查：未通过；需要先根据检查日志和复测结果判断合入风险。"
+      echo "- 本地确定性 CI 检查：**失败**。"
     fi
-    echo "- 合入建议：请先排查 Codex AI 自动审查执行问题并重新运行，再决定是否合入。"
+    echo "- 合入建议：本次 AI 意见不可用；确定性门禁事实不受影响，请结合门禁结果和人工审查决定是否合入。"
     echo
     echo "$(codex_failure_public_reason "${failure_code:-codex_execution_failed}")。"
     echo
@@ -487,27 +795,33 @@ PY
     echo
     echo "### 需要处理的问题"
     echo
-    echo "未生成产品代码问题；Codex AI 自动审查执行未完成。"
+    echo "本次审查未形成可确认的具体代码问题结论。"
     echo
     echo "### 验证情况"
     echo
     echo "- 验证内容与结果："
-    echo "  - Codex AI 自动审查未形成可信的结构化语义载荷。"
-    echo "  - 本次未形成可公开确认的验证命令清单。"
-    echo "  - 本次没有形成可由 Runner 核验的完整执行结论。"
+    echo "  - ${fallback_validation_fact}"
     echo "- 限制与未覆盖："
     echo "  - $(codex_failure_public_reason "${failure_code:-codex_execution_failed}")。"
-    echo "  - 当前代码差异仍需人工检查，或在修复执行环境后重新运行 Codex AI 自动审查。"
+    if [[ "${backend_validation_scope}" == "frontend_only" ]]; then
+      echo "  - ${BACKEND_SKIP_REASON}"
+    fi
+    echo "  - 本次 AI 审查未完成，代码差异仍需人工核对。"
+    echo
+    echo "### 剩余风险"
+    echo
+    echo "- 本次 AI 审查未完成，可能仍有未被识别的代码风险。"
     echo
     echo "### 变更文件"
     echo
     echo "<details>"
     echo "<summary>展开文件级变更表</summary>"
     echo
-    echo "分析未完成，无法可靠生成文件级变更表。"
+    write_fallback_changed_files_table 50
     echo
     echo "</details>"
   } > "${comment_path}"
+  limit_public_comment
 }
 
 append_credential_integrity_warning() {
@@ -531,8 +845,14 @@ append_credential_integrity_warning() {
 }
 
 append_change_request_context_warning() {
+  local public_context_reason=""
   case "${change_request_context_status}" in
-    missing | invalid) ;;
+    missing)
+      public_context_reason="未取得与当前 PR 测试提交匹配的功能声明元数据；本次审查已结束，功能声明对照不可确认。"
+      ;;
+    invalid)
+      public_context_reason="PR 功能声明元数据未通过校验；本次审查已结束，功能声明对照不可确认。"
+      ;;
     *) return 0 ;;
   esac
   {
@@ -540,15 +860,15 @@ append_change_request_context_warning() {
     echo "## PR 功能声明上下文"
     echo
     echo "- 状态：警告"
-    echo "- 说明：${change_request_context_reason}"
+    echo "- 说明：${public_context_reason}"
   } >> "${report_path}"
   {
     echo
     echo "### PR 功能声明上下文警告"
     echo
-    echo "${change_request_context_reason}"
+    echo "${public_context_reason}"
   } >> "${comment_path}"
-  echo "PR 功能声明上下文警告：${change_request_context_reason}" >> "${log_path}"
+  echo "PR 功能声明上下文警告：${public_context_reason}" >> "${log_path}"
 }
 
 codex_failure_code_for_reason() {
@@ -583,11 +903,11 @@ codex_failure_public_reason() {
     timeout) echo "Codex 自动审查执行超时" ;;
     startup_timeout) echo "Codex 自动审查启动阶段超时" ;;
     missing_completion_marker | missing_turn_completed) echo "Codex 自动审查没有完整结束" ;;
-    no_command_executed) echo "Codex 自动审查没有获得可由 Runner 核验的命令与证据记录" ;;
-    analysis_contract_failed | schema_validation_failed) echo "Codex 审查语义载荷未满足公开结构契约" ;;
-    trusted_report_input_failed) echo "Runner 生成的可信报告输入校验失败" ;;
-    report_contract_failed) echo "Runner 生成报告时内部契约校验失败" ;;
-    report_metadata_failed) echo "Runner 读取报告执行事实失败" ;;
+    no_command_executed) echo "Codex 自动审查未获得可确认的审查或验证操作记录" ;;
+    analysis_contract_failed | schema_validation_failed) echo "Codex 审查结果整理失败" ;;
+    trusted_report_input_failed) echo "Codex 审查所需的任务证据校验失败" ;;
+    report_contract_failed) echo "Codex 审查报告生成失败" ;;
+    report_metadata_failed) echo "Codex 审查执行记录读取失败" ;;
     invalid_finding_location) echo "Codex 问题定位信息校验未通过" ;;
     container_setup_failed) echo "Codex 审查运行环境启动失败" ;;
     checkout_or_diff_failed) echo "Codex 审查代码或差异准备失败" ;;
@@ -609,6 +929,7 @@ fail_ai_ci() {
   write_failure_report
   append_change_request_context_warning
   append_credential_integrity_warning
+  limit_public_comment
   echo "Codex AI CI 失败：${failure_code} ${failure_reason}" >> "${log_path}"
   write_summary
   echo "Codex AI CI：失败（${failure_code}：${failure_reason}）"
@@ -646,17 +967,17 @@ verify_credential_integrity() {
   fi
   if [[ ! -f "${CODEX_AI_CI_HOME}/config.toml" || ! -f "${CODEX_AI_CI_HOME}/auth.json" ]]; then
     credential_integrity_status="warning"
-    credential_integrity_reason="任务执行期间独立凭据文件被删除或替换；runner 未自动恢复文件。"
+    credential_integrity_reason="任务执行期间独立凭据文件被删除或替换；系统未自动恢复文件。"
     return 0
   fi
   config_sha256_after="$(credential_sha256 "${CODEX_AI_CI_HOME}/config.toml" 2>/dev/null || true)"
   auth_sha256_after="$(credential_sha256 "${CODEX_AI_CI_HOME}/auth.json" 2>/dev/null || true)"
   if [[ -z "${config_sha256_after}" || -z "${auth_sha256_after}" ]]; then
     credential_integrity_status="warning"
-    credential_integrity_reason="任务结束时无法重新计算独立凭据文件哈希；runner 未修改或恢复文件。"
+    credential_integrity_reason="任务结束时无法重新计算独立凭据文件哈希；系统未修改或恢复文件。"
   elif [[ "${config_sha256_after}" != "${config_sha256_before}" || "${auth_sha256_after}" != "${auth_sha256_before}" ]]; then
     credential_integrity_status="warning"
-    credential_integrity_reason="任务执行期间独立凭据文件内容发生变化；runner 未自动恢复文件，请人工检查。"
+    credential_integrity_reason="任务执行期间独立凭据文件内容发生变化；系统未自动恢复文件，请人工检查。"
   else
     credential_integrity_status="pass"
     credential_integrity_reason="独立凭据文件在任务执行前后保持不变。"
@@ -724,7 +1045,7 @@ load_change_request_context() {
 
   if [[ -z "${task_metadata_file}" || ! -f "${task_metadata_file}" ]]; then
     change_request_context_status="missing"
-    change_request_context_reason="未取得与当前 PR 测试提交匹配的功能声明元数据；继续依据代码差异和测试证据分析。"
+    change_request_context_reason="未取得与当前 PR 测试提交匹配的功能声明元数据；功能声明对照不可确认，审查依据代码差异和测试证据进行。"
     change_request_context_json="$(build_unavailable_change_request_context)" || \
       fail_ai_ci "无法生成 PR 元数据缺失上下文"
     echo "${change_request_context_reason}" >> "${log_path}"
@@ -747,9 +1068,13 @@ load_change_request_context() {
     rm -f -- "${task_metadata_output_path}"
     validation_message="${validation_message//$'\n'/ }"
     change_request_context_status="invalid"
-    change_request_context_reason="PR 功能声明元数据校验失败；继续依据代码差异和测试证据分析。${validation_message:+ ${validation_message}}"
+    change_request_context_reason="PR 功能声明元数据未通过校验；功能声明对照不可确认，审查依据代码差异和测试证据进行。"
+    change_request_context_diagnostic="${validation_message}"
     change_request_context_json="$(build_unavailable_change_request_context)" || \
       fail_ai_ci "无法生成 PR 元数据无效上下文"
+    if [[ -n "${validation_message}" ]]; then
+      printf '%s\n' "${validation_message}" >> "${log_path}"
+    fi
     echo "${change_request_context_reason}" >> "${log_path}"
     return 0
   fi
@@ -798,7 +1123,7 @@ PY
   if [[ "${#context_parts[@]}" -lt 2 || -z "${context_parts[1]}" ]]; then
     rm -f -- "${task_metadata_output_path}"
     change_request_context_status="invalid"
-    change_request_context_reason="规范化后的 PR 功能声明元数据无法读取；继续依据代码差异和测试证据分析。"
+    change_request_context_reason="规范化后的 PR 功能声明元数据无法读取；功能声明对照不可确认，审查依据代码差异和测试证据进行。"
     change_request_context_json="$(build_unavailable_change_request_context)" || \
       fail_ai_ci "无法生成 PR 元数据读取失败上下文"
     echo "${change_request_context_reason}" >> "${log_path}"
@@ -842,10 +1167,20 @@ validate_prerequisites() {
     CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS
     CODEX_AI_CI_TEST_BUDGET_SECONDS
     CODEX_AI_CI_REPORT_RESERVE_SECONDS
+    CODEX_AI_CI_PIDS_LIMIT
   )
   for integer_name in "${integer_names[@]}"; do
     validate_positive_integer "${integer_name}" "${!integer_name}"
   done
+  if [[ ! "${CODEX_AI_CI_CPUS}" =~ ^[1-9][0-9]*([.][0-9]+)?$ ]]; then
+    fail_ai_ci "CODEX_AI_CI_CPUS 必须是正数"
+  fi
+  if [[ ! "${CODEX_AI_CI_MEMORY}" =~ ^[1-9][0-9]*[kKmMgG]$ ]]; then
+    fail_ai_ci "CODEX_AI_CI_MEMORY 必须是 Docker 支持的正整数容量"
+  fi
+  if [[ ! "${CODEX_AI_CI_MEMORY_SWAP}" =~ ^[1-9][0-9]*[kKmMgG]$ ]]; then
+    fail_ai_ci "CODEX_AI_CI_MEMORY_SWAP 必须是 Docker 支持的正整数容量"
+  fi
 
   if ((
     10#${CODEX_AI_CI_MIN_GENERATED_TEST_CASES} >
@@ -859,6 +1194,14 @@ validate_prerequisites() {
   esac
   case "${LOCAL_CI_CONTAINER}" in
     "" | *[!A-Za-z0-9_.-]*) fail_ai_ci "Local CI 容器名称无效：${LOCAL_CI_CONTAINER}" ;;
+  esac
+  case "${RUN_BACKEND_STAGES}" in
+    true | false) ;;
+    *) fail_ai_ci "RUN_BACKEND_STAGES 必须是 true 或 false" ;;
+  esac
+  case "${LOCAL_CI_EXECUTION_MODE}" in
+    full | codex_only) ;;
+    *) fail_ai_ci "LOCAL_CI_EXECUTION_MODE 必须是 full 或 codex_only" ;;
   esac
 
   if ! command -v timeout >/dev/null 2>&1; then
@@ -1000,6 +1343,7 @@ diff_requires_generated_tests() {
 }
 
 generate_changed_files_manifest() {
+  changed_files_manifest_available="false"
   local diff_args=(
     -C "${workspace_dir}"
     diff
@@ -1071,6 +1415,7 @@ print(len(json.load(open(sys.argv[1], encoding="utf-8"))))
 ' "${changed_files_manifest_path}")"; then
     return 1
   fi
+  changed_files_manifest_available="true"
   if ! "${PYTHON_BIN}" "${report_builder_path}" prepare-manifest \
     --input "${changed_files_manifest_path}" \
     --output "${analysis_manifest_path}" >> "${log_path}" 2>&1; then
@@ -1190,7 +1535,11 @@ create_ephemeral_container() {
   echo "正在从 ${LOCAL_CI_CONTAINER} 创建本次任务的临时镜像 ${ephemeral_image}。" >> "${log_path}"
   phase_started_seconds="${SECONDS}"
   if ! run_prepare_command "environment_snapshot" \
-    docker commit "${LOCAL_CI_CONTAINER}" "${ephemeral_image}"; then
+    docker commit \
+      --change "LABEL triton-anchor.role=codex-ai-snapshot" \
+      --change "LABEL triton-anchor.run-id=${LOCAL_CI_RUN_ID}" \
+      --change "LABEL triton-anchor.target-sha=${target_sha}" \
+      "${LOCAL_CI_CONTAINER}" "${ephemeral_image}"; then
     snapshot_duration_seconds="$((SECONDS - phase_started_seconds))"
     fail_prepare_step "无法从本次 Local CI 容器创建环境快照"
   fi
@@ -1200,7 +1549,12 @@ create_ephemeral_container() {
   if ! run_prepare_command "container_start" docker run -dit \
     --name "${ephemeral_container}" \
     --hostname "${ephemeral_container}" \
+    --cpus "${CODEX_AI_CI_CPUS}" \
+    --memory "${CODEX_AI_CI_MEMORY}" \
+    --memory-swap "${CODEX_AI_CI_MEMORY_SWAP}" \
+    --pids-limit "${CODEX_AI_CI_PIDS_LIMIT}" \
     --label "triton-anchor.role=codex-ai" \
+    --label "triton-anchor.run-id=${LOCAL_CI_RUN_ID}" \
     --label "triton-anchor.target-sha=${target_sha}" \
     --volumes-from "${LOCAL_CI_CONTAINER}:ro" \
     --entrypoint /bin/bash \
@@ -1266,6 +1620,13 @@ create_ephemeral_container() {
   if ! run_prepare_command "copy_checkout" docker cp "${workspace_dir}/." \
     "${ephemeral_container}:${container_checkout_dir}"; then
     fail_prepare_step "无法把经过验证的 checkout 复制到临时容器"
+  fi
+  if [[ "${branch}" =~ ^ci/pr-[0-9]+/.+ && "${SOURCE_ENVSETUP}" == "1" ]]; then
+    if ! run_prepare_command "copy_trusted_envsetup" docker cp \
+      "${TRUSTED_ANCHOR_ENVSETUP}" \
+      "${ephemeral_container}:${container_trusted_envsetup}"; then
+      fail_prepare_step "无法把可信目标分支环境脚本复制到临时容器"
+    fi
   fi
   if ! run_prepare_command "copy_analysis_schema" docker cp "${schema_path}" \
     "${ephemeral_container}:${container_schema_path}"; then
@@ -1340,8 +1701,10 @@ collect_container_workspace() {
      tar --null --verbatim-files-from --files-from="$2" -czf "$3"' \
     bash "${container_checkout_dir}" "${container_untracked_list}" \
     "${container_generated_files}" >> "${log_path}" 2>&1; then
-    docker exec --user 0 "${ephemeral_container}" cat "${container_generated_files}" \
-      > "${generated_files_path}" 2>> "${log_path}" || true
+    if docker exec --user 0 "${ephemeral_container}" cat "${container_generated_files}" \
+      > "${generated_files_path}" 2>> "${log_path}"; then
+      generated_archive_available="true"
+    fi
   fi
 }
 
@@ -1358,7 +1721,7 @@ fi
 : > "${workspace_status_path}"
 : > "${workspace_patch_path}"
 printf '[]\n' > "${command_ledger_path}"
-printf '[]\n' > "${changed_files_manifest_path}"
+command_ledger_available="true"
 
 validate_prerequisites
 load_change_request_context
@@ -1392,6 +1755,9 @@ if [[ "${branch}" =~ ^ci/pr-[0-9]+/.+ ]]; then
   fi
   if [[ -z "${requested_head_sha}" ]]; then
     fail_ai_ci "PR Codex 审查缺少贡献分支精确 SHA"
+  fi
+  if [[ "${SOURCE_ENVSETUP}" == "1" && ! -r "${TRUSTED_ANCHOR_ENVSETUP}" ]]; then
+    fail_ai_ci "PR Codex 审查缺少可信目标分支环境脚本"
   fi
   if ! git -C "${workspace_dir}" cat-file -e "${requested_base_sha}^{commit}" 2>/dev/null; then
     fail_ai_ci "PR 目标分支提交在 Codex checkout 中不可用：${requested_base_sha}"
@@ -1498,42 +1864,99 @@ printf '%s\n' "${prompt}" | timeout --signal=TERM --kill-after=30s \
     --env "AI_JSONL_RECORDER_PATH=${container_jsonl_recorder_path}" \
     --env "AI_REASONING_EFFORT=${CODEX_AI_CI_REASONING_EFFORT}" \
     --env "AI_PYTHON_VENV_ACTIVATE=${PYTHON_VENV_ACTIVATE}" \
+    --env "AI_LLVM_BUILD_DIR=${LLVM_BUILD_DIR}" \
     --env "AI_SOURCE_ENVSETUP=${SOURCE_ENVSETUP}" \
+    --env "AI_ANCHOR_ENVSETUP=${container_anchor_envsetup}" \
     --env "AI_CHECKOUT_DIR=${container_checkout_dir}" \
+    --env "AI_TARGET_SHA=${target_sha}" \
+    --env "AI_BRANCH=${branch}" \
+    --env "AI_LOCAL_CI_RUN_ID=${LOCAL_CI_RUN_ID}" \
+    --env "AI_TEST_PYTHON_BIN=${CODEX_TEST_PYTHON_BIN}" \
+    --env "AI_PPL_ROOT=${PPL_ROOT}" \
+    --env "AI_PACKAGE_TOOL=${PACKAGE_TOOL}" \
+    --env "AI_FRONTEND_BUILD_MODE=${FRONTEND_BUILD_MODE}" \
+    --env "AI_BACKEND_PROFILE=${BACKEND_PROFILE}" \
+    --env "AI_EXPECTED_TRITON_BACKEND=${EXPECTED_TRITON_BACKEND}" \
+    --env "AI_FLAGGEMS_CLONE_DIR=${FLAGGEMS_CLONE_DIR}" \
+    --env "AI_MAX_JOBS=${MAX_JOBS}" \
+    --env "AI_CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}" \
+    --env "AI_NINJAFLAGS=${NINJAFLAGS}" \
+    --env "AI_UV_LINK_MODE=${UV_LINK_MODE}" \
     --env "AI_BACKEND_PATH=${BACKEND_PATH}" \
     --env "AI_BACKEND_ENVSETUP=${BACKEND_ENVSETUP}" \
     --env "AI_BACKEND_ENVSETUP_ARGS=${BACKEND_ENVSETUP_ARGS}" \
+    --env "AI_RUN_BACKEND_STAGES=${RUN_BACKEND_STAGES}" \
     "${ephemeral_container}" \
     bash -lc '
       bootstrap_status=0
       set +u
+      export TMPDIR=/tmp/triton-anchor-codex-tmp
+      export TRITON_DUMP_DIR=/tmp/triton-anchor-codex-dump
+      mkdir -p "${TMPDIR}" "${TRITON_DUMP_DIR}" || bootstrap_status=1
       if [[ -n "${AI_PYTHON_VENV_ACTIVATE}" && -f "${AI_PYTHON_VENV_ACTIVATE}" ]]; then
         source "${AI_PYTHON_VENV_ACTIVATE}" || bootstrap_status=1
       else
         echo "Codex AI CI 环境提示：Python venv 激活脚本不存在。" >&2
         bootstrap_status=1
       fi
-      if [[ "${AI_SOURCE_ENVSETUP}" == "1" && -f "${AI_CHECKOUT_DIR}/envsetup.sh" ]]; then
-        source "${AI_CHECKOUT_DIR}/envsetup.sh" || bootstrap_status=1
+      if [[ -n "${AI_LLVM_BUILD_DIR}" ]]; then
+        export LLVM_BUILD_DIR="${AI_LLVM_BUILD_DIR}"
       fi
-      backend_setup="${AI_BACKEND_ENVSETUP}"
-      if [[ -n "${backend_setup}" && "${backend_setup}" != /* ]]; then
-        backend_setup="${AI_BACKEND_PATH}/${backend_setup}"
+      export WORKSPACE=/workspace
+      export ANCHOR_DIR="${AI_CHECKOUT_DIR}"
+      export GITHUB_SHA="${AI_TARGET_SHA}"
+      export GITHUB_REF="refs/heads/${AI_BRANCH}"
+      export LOCAL_CI_RUN_ID="${AI_LOCAL_CI_RUN_ID}"
+      export PYTHON_BIN="${AI_TEST_PYTHON_BIN}"
+      export PPL_ROOT="${AI_PPL_ROOT}"
+      export PACKAGE_TOOL="${AI_PACKAGE_TOOL}"
+      export FRONTEND_BUILD_MODE="${AI_FRONTEND_BUILD_MODE}"
+      export BACKEND_PROFILE="${AI_BACKEND_PROFILE}"
+      export EXPECTED_TRITON_BACKEND="${AI_EXPECTED_TRITON_BACKEND}"
+      export FLAGGEMS_CLONE_DIR="${AI_FLAGGEMS_CLONE_DIR}"
+      export FLAGGEMS_ROOT="${AI_FLAGGEMS_CLONE_DIR}"
+      export MAX_JOBS="${AI_MAX_JOBS}"
+      export CMAKE_BUILD_PARALLEL_LEVEL="${AI_CMAKE_BUILD_PARALLEL_LEVEL}"
+      export NINJAFLAGS="${AI_NINJAFLAGS}"
+      export UV_LINK_MODE="${AI_UV_LINK_MODE}"
+      if [[ "${AI_SOURCE_ENVSETUP}" == "1" ]]; then
+        anchor_setup="${AI_ANCHOR_ENVSETUP}"
+        if [[ -n "${anchor_setup}" && -f "${anchor_setup}" ]]; then
+          source "${anchor_setup}" || bootstrap_status=1
+        elif [[ -n "${anchor_setup}" ]]; then
+          echo "Codex AI CI 环境提示：前端环境脚本不存在。" >&2
+          bootstrap_status=1
+        elif [[ -f "${AI_CHECKOUT_DIR}/envsetup.sh" ]]; then
+          source "${AI_CHECKOUT_DIR}/envsetup.sh" || bootstrap_status=1
+        fi
       fi
-      if [[ -n "${backend_setup}" && -f "${backend_setup}" ]]; then
-        # shellcheck disable=SC2086
-        source "${backend_setup}" ${AI_BACKEND_ENVSETUP_ARGS} || bootstrap_status=1
-      elif [[ -n "${backend_setup}" ]]; then
-        echo "Codex AI CI 环境提示：后端环境脚本不存在。" >&2
-        bootstrap_status=1
+      if [[ "${AI_RUN_BACKEND_STAGES}" == "true" ]]; then
+        backend_setup="${AI_BACKEND_ENVSETUP}"
+        if [[ -n "${backend_setup}" && "${backend_setup}" != /* ]]; then
+          backend_setup="${AI_BACKEND_PATH}/${backend_setup}"
+        fi
+        if [[ -n "${backend_setup}" && -f "${backend_setup}" ]]; then
+          # shellcheck disable=SC2086
+          source "${backend_setup}" ${AI_BACKEND_ENVSETUP_ARGS} || bootstrap_status=1
+        elif [[ -n "${backend_setup}" ]]; then
+          echo "Codex AI CI 环境提示：后端环境脚本不存在。" >&2
+          bootstrap_status=1
+        fi
       fi
+      export TMPDIR=/tmp/triton-anchor-codex-tmp
       export TRITON_DUMP_DIR=/tmp/triton-anchor-codex-dump
-      mkdir -p "${TRITON_DUMP_DIR}" || bootstrap_status=1
+      mkdir -p "${TMPDIR}" "${TRITON_DUMP_DIR}" || bootstrap_status=1
       set -u
-      if [[ ${bootstrap_status} -eq 0 ]]; then
-        export CODEX_AI_ENVIRONMENT_STATUS="ready"
-      else
+      if [[ ${bootstrap_status} -ne 0 ]]; then
+        if [[ "${AI_ANALYSIS_MODE}" == "full" ]]; then
+          echo "CODEX_AI_CI_BOOTSTRAP_FAILED_BEFORE_EXEC" >&2
+          echo "Codex AI CI 无法继承确定性 CI 的验证环境。" >&2
+          exit 78
+        fi
         export CODEX_AI_ENVIRONMENT_STATUS="incomplete"
+        echo "Codex AI CI 验证环境不完整；继续执行静态失败诊断。" >&2
+      else
+        export CODEX_AI_ENVIRONMENT_STATUS="ready"
       fi
       unset GITEE_TOKEN GITEE_USERNAME GIT_ASKPASS
       set -o pipefail
@@ -1584,22 +2007,16 @@ fi
 if ! "${PYTHON_BIN}" "${jsonl_evidence_path}" extract \
   --input "${codex_jsonl_path}" \
   --output "${command_ledger_path}" >> "${log_path}" 2>&1; then
+  command_ledger_available="false"
   echo "Codex JSONL 命令证据提取失败。" >> "${log_path}"
+else
+  command_ledger_available="true"
 fi
 if "${PYTHON_BIN}" "${jsonl_evidence_path}" has-event \
   --input "${codex_jsonl_path}" --type "turn.completed"; then
   turn_completed="true"
 fi
-if "${PYTHON_BIN}" - "${command_ledger_path}" <<'PY'
-import json
-import sys
-
-document = json.load(open(sys.argv[1], encoding="utf-8"))
-raise SystemExit(0 if isinstance(document, list) and document else 1)
-PY
-then
-  command_executed="true"
-fi
+refresh_command_ledger_state || true
 if [[ ${exit_code} -eq 0 ]]; then
   "${PYTHON_BIN}" "${report_builder_path}" build \
     --analysis "${analysis_json_path}" \
@@ -1614,81 +2031,9 @@ if [[ ${exit_code} -eq 0 ]]; then
   if grep -Fq "CODEX_AI_CI_COMPLETE" "${report_json_path}"; then
     marker_found="true"
   fi
-  constraint_args=(
-    "${report_json_path}"
-    "${CODEX_AI_CI_MAX_GENERATED_TEST_FILES}"
-    "${CODEX_AI_CI_MAX_TEST_COMMANDS}"
-    "${CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS}"
-    "${CODEX_AI_CI_TEST_BUDGET_SECONDS}"
-  )
-  execution_metadata="$(
-    "${PYTHON_BIN}" -c '
-import json
-import sys
-
-execution = json.load(open(sys.argv[1], encoding="utf-8"))["test_execution"]
-max_files = int(sys.argv[2])
-max_commands = int(sys.argv[3])
-recommended_timeout = int(sys.argv[4])
-test_budget = int(sys.argv[5])
-generated_files = execution["generated_test_files"]
-commands = execution["commands"]
-durations = [float(command["duration_seconds"]) for command in commands]
-max_duration = max(durations, default=0.0)
-total_duration = sum(durations)
-reasons = []
-
-if len(generated_files) > max_files:
-    reasons.append(
-        f"生成测试文件数量 {len(generated_files)} 超过限制 {max_files}"
-    )
-if len(commands) > max_commands:
-    reasons.append(
-        f"测试、构建、lint 或诊断命令数量 {len(commands)} 超过限制 {max_commands}"
-    )
-if max_duration > recommended_timeout:
-    reasons.append(
-        f"单条命令最长耗时 {max_duration:g} 秒超过建议上限 "
-        f"{recommended_timeout} 秒"
-    )
-if total_duration > test_budget:
-    reasons.append(
-        f"测试和诊断命令累计耗时 {total_duration:g} 秒超过建议预算 "
-        f"{test_budget} 秒"
-    )
-constraint_status = "warning" if reasons else "pass"
-constraint_reason = (
-    "；".join(reasons)
-    if reasons
-    else "生成测试文件、执行测试或诊断命令的数量和耗时均在轻量约束范围内。"
-)
-
-print(
-    execution["status"],
-    len(generated_files),
-    len(commands),
-    f"{max_duration:g}",
-    f"{total_duration:g}",
-    constraint_status,
-    constraint_reason,
-    sep="\t",
-)
-' "${constraint_args[@]}" 2>> "${log_path}" || true
-  )"
-  if [[ -n "${execution_metadata}" ]]; then
-    constraint_fields=()
-    IFS=$'\t' read -r -a constraint_fields <<< "${execution_metadata}"
-    if [[ "${#constraint_fields[@]}" -eq 7 ]]; then
-      test_execution_status="${constraint_fields[0]}"
-      generated_test_file_count="${constraint_fields[1]}"
-      test_command_count="${constraint_fields[2]}"
-      max_test_command_duration_seconds="${constraint_fields[3]}"
-      total_test_command_duration_seconds="${constraint_fields[4]}"
-      constraint_status="${constraint_fields[5]}"
-      constraint_reason="${constraint_fields[6]}"
-    else
-      execution_metadata=""
-    fi
+  execution_metadata_available="false"
+  if load_execution_metadata; then
+    execution_metadata_available="true"
   fi
 
   renderer_args=(
@@ -1703,6 +2048,8 @@ print(
     --head-sha "${requested_head_sha}"
     --tested-sha-kind "$([[ "${branch}" =~ ^ci/pr-[0-9]+/.+ ]] && printf '%s' pr_merge || printf '%s' commit)"
     --local-ci-status "${local_ci_status}"
+    --local-ci-execution-mode "${LOCAL_CI_EXECUTION_MODE}"
+    --backend-validation-scope "${backend_validation_scope}"
     --changed-file-count "${changed_file_count}"
     --changed-files-manifest "${changed_files_manifest_path}"
     --repository-root "${workspace_dir}"
@@ -1712,7 +2059,7 @@ print(
   if report_verdict="$(
     "${PYTHON_BIN}" "${renderer_path}" "${renderer_args[@]}" 2>> "${log_path}"
   )"; then
-    if [[ -n "${execution_metadata}" ]]; then
+    if [[ "${execution_metadata_available}" == "true" ]]; then
       report_format_valid="true"
     else
       report_verdict="UNKNOWN"
@@ -1726,6 +2073,10 @@ if [[ "${startup_timed_out}" == "true" ]]; then
   set_failure_reason "Codex 启动阶段超过 ${CODEX_AI_CI_STARTUP_TIMEOUT_SECONDS} 秒仍未出现首个有效进展"
 elif [[ ${exit_code} -eq 124 || ${exit_code} -eq 137 ]]; then
   set_failure_reason "Codex 执行超过 ${CODEX_AI_CI_TIMEOUT_SECONDS} 秒硬超时"
+elif [[ ${exit_code} -eq 78 ]] && \
+  grep -Fq "CODEX_AI_CI_BOOTSTRAP_FAILED_BEFORE_EXEC" "${log_path}"; then
+  failure_code="container_setup_failed"
+  set_failure_reason "Codex 无法继承确定性 CI 的验证环境"
 elif [[ ${exit_code} -ne 0 ]]; then
   set_failure_reason "Codex exec 异常退出，退出码为 ${exit_code}"
 elif [[ "${report_format_valid}" != "true" ]]; then
@@ -1761,6 +2112,7 @@ if [[ "${status}" != "pass" ]]; then
 fi
 append_change_request_context_warning
 append_credential_integrity_warning
+limit_public_comment
 write_summary
 if [[ "${status}" == "pass" ]]; then
   echo "Codex AI CI：完成（结论 ${report_verdict}；测试状态 ${test_execution_status}；约束 ${constraint_status}；报告 ${report_path}）"
