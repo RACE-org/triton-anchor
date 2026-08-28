@@ -1,7 +1,15 @@
 """Tests for AnchorIR validator."""
 
 import pytest
-from triton_anchor.anchor_ir import AnchorIRValidator, AnchorIRError
+from triton_anchor.anchor_ir import (
+    AnchorIRError,
+    AnchorIRTrack,
+    AnchorIRValidator,
+    LINALG_TRACK_ALLOWED,
+    LINALG_TRACK_FORBIDDEN,
+    TRITON_GPU_TRACK_ALLOWED,
+    TRITON_GPU_TRACK_FORBIDDEN,
+)
 
 
 VALID_LINALG_IR = """
@@ -47,6 +55,48 @@ module {
 
 
 class TestAnchorIRValidator:
+    def test_linalg_track_configuration_is_frozen(self):
+        assert LINALG_TRACK_ALLOWED == {
+            "linalg",
+            "linalg_ext",
+            "tensor",
+            "memref",
+            "arith",
+            "math",
+            "math_ext",
+            "scf",
+            "func",
+            "cf",
+            "affine",
+            "aux",
+            "index",
+            "bufferization",
+            "vector",
+        }
+        assert LINALG_TRACK_FORBIDDEN == {
+            "tt",
+            "triton",
+            "tts",
+            "tptr",
+            "smt",
+            "triton_gpu",
+            "triton_nvidia_gpu",
+        }
+
+    def test_triton_gpu_track_configuration_is_frozen(self):
+        assert TRITON_GPU_TRACK_ALLOWED == {
+            "triton_gpu",
+            "tt",
+            "arith",
+            "cf",
+            "math",
+            "scf",
+            "func",
+            "gpu",
+            "nvgpu",
+        }
+        assert TRITON_GPU_TRACK_FORBIDDEN == {"tts", "tptr", "smt"}
+
     def test_valid_ir(self):
         v = AnchorIRValidator()
         assert v.is_valid(VALID_LINALG_IR)
@@ -107,3 +157,41 @@ class TestAnchorIRValidator:
         }
         """
         assert v.is_valid(ir_with_comments)
+
+    def test_pre_hook_rejects_extension_and_post_hook_allows_it(self):
+        validator = AnchorIRValidator(track=AnchorIRTrack.LINALG)
+        ir_with_extension = """
+        module {
+          func.func @kernel() {
+            xsmt.mmt4d
+            return
+          }
+        }
+        """
+
+        pre = validator.validate_pre_hook(ir_with_extension)
+        post = validator.validate_post_hook(
+            ir_with_extension, ext_allowed={"xsmt"}
+        )
+
+        assert len(pre) == 1
+        assert pre[0].dialect == "xsmt"
+        assert post == []
+
+    def test_post_hook_extension_cannot_override_forbidden(self):
+        validator = AnchorIRValidator(track=AnchorIRTrack.LINALG)
+        ir_with_forbidden = """
+        module {
+          func.func @kernel() {
+            tt.return
+          }
+        }
+        """
+
+        violations = validator.validate_post_hook(
+            ir_with_forbidden, ext_allowed={"tt"}
+        )
+
+        assert len(violations) == 1
+        assert violations[0].dialect == "tt"
+        assert "Forbidden dialect" in violations[0].message

@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "positive_cases": [
+    {
+      "case_id": "linalg/positive/basic",
+      "track": "linalg",
+      "path": "linalg/positive/basic.mlir"
+    },
+    {
+      "case_id": "triton_gpu/positive/basic",
+      "track": "triton_gpu",
+      "path": "triton_gpu/positive/basic.mlir"
+    }
+  ],
+  "negative_cases": [
+    {
+      "case_id": "linalg/negative/nested_op",
+      "track": "linalg",
+      "category": "nested_op",
+      "path": "linalg/negative/nested_op.mlir",
+      "expected_code": "AIR-LINALG-001",
+      "expected_object_kind": "operation",
+      "operation_path_contains": "/scf.if#0/region[0]/block[0]/smt.deep#0"
+    },
+    {
+      "case_id": "linalg/negative/unknown_dialect",
+      "track": "linalg",
+      "category": "unknown_dialect",
+      "path": "linalg/negative/unknown_dialect.mlir",
+      "expected_code": "AIR-COMMON-001",
+      "expected_object_kind": "operation"
+    },
+    {
+      "case_id": "linalg/negative/illegal_type",
+      "track": "linalg",
+      "category": "illegal_type",
+      "path": "linalg/negative/illegal_type.mlir",
+      "expected_code": "AIR-LINALG-002",
+      "expected_object_kind": "type"
+    },
+    {
+      "case_id": "linalg/negative/illegal_attribute",
+      "track": "linalg",
+      "category": "illegal_attribute",
+      "path": "linalg/negative/illegal_attribute.mlir",
+      "expected_code": "AIR-LINALG-003",
+      "expected_object_kind": "attribute"
+    },
+    {
+      "case_id": "linalg/negative/illegal_encoding",
+      "track": "linalg",
+      "category": "illegal_encoding",
+      "path": "linalg/negative/illegal_encoding.mlir",
+      "expected_code": "AIR-LINALG-003",
+      "expected_object_kind": "attribute"
+    },
+    {
+      "case_id": "linalg/negative/semantic_missing",
+      "track": "linalg",
+      "category": "semantic_missing",
+      "path": "linalg/negative/semantic_missing.mlir",
+      "expected_code": "AIR-LINALG-012",
+      "expected_object_kind": "operation"
+    },
+    {
+      "case_id": "triton_gpu/negative/nested_op",
+      "track": "triton_gpu",
+      "category": "nested_op",
+      "path": "triton_gpu/negative/nested_op.mlir",
+      "expected_code": "AIR-GPU-001",
+      "expected_object_kind": "operation",
+      "operation_path_contains": "/scf.if#0/region[0]/block[0]/smt.deep#0"
+    },
+    {
+      "case_id": "triton_gpu/negative/unknown_dialect",
+      "track": "triton_gpu",
+      "category": "unknown_dialect",
+      "path": "triton_gpu/negative/unknown_dialect.mlir",
+      "expected_code": "AIR-COMMON-001",
+      "expected_object_kind": "operation"
+    },
+    {
+      "case_id": "triton_gpu/negative/illegal_type",
+      "track": "triton_gpu",
+      "category": "illegal_type",
+      "path": "triton_gpu/negative/illegal_type.mlir",
+      "expected_code": "AIR-GPU-002",
+      "expected_object_kind": "type"
+    },
+    {
+      "case_id": "triton_gpu/negative/illegal_attribute",
+      "track": "triton_gpu",
+      "category": "illegal_attribute",
+      "path": "triton_gpu/negative/illegal_attribute.mlir",
+      "expected_code": "AIR-GPU-003",
+      "expected_object_kind": "attribute"
+    },
+    {
+      "case_id": "triton_gpu/negative/illegal_encoding",
+      "track": "triton_gpu",
+      "category": "illegal_encoding",
+      "path": "triton_gpu/negative/illegal_encoding.mlir",
+      "expected_code": "AIR-GPU-012",
+      "expected_object_kind": "type"
+    },
+    {
+      "case_id": "triton_gpu/negative/semantic_missing",
+      "track": "triton_gpu",
+      "category": "semantic_missing",
+      "path": "triton_gpu/negative/semantic_missing.mlir",
+      "expected_code": "AIR-GPU-010",
+      "expected_object_kind": "type"
+    }
+  ],
+  "golden_cases": [
+    {
+      "case_id": "linalg/golden/basic",
+      "track": "linalg",
+      "manifest": "golden/linalg/basic.json",
+      "stages": [
+        {
+          "stage_id": "adapter.output",
+          "path": "golden/linalg/adapter.mlir"
+        },
+        {
+          "stage_id": "pass.canonicalize.after",
+          "path": "golden/linalg/after_canonicalize.mlir"
+        },
+        {
+          "stage_id": "hook.vendor.after",
+          "path": "golden/linalg/after_hook.mlir",
+          "extension_dialects": [
+            "linalg_vendor"
+          ]
+        },
+        {
+          "stage_id": "boundary.post_hook",
+          "path": "golden/linalg/after_hook.mlir",
+          "extension_dialects": [
+            "linalg_vendor"
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "triton_gpu/golden/basic",
+      "track": "triton_gpu",
+      "manifest": "golden/triton_gpu/basic.json",
+      "stages": [
+        {
+          "stage_id": "adapter.output",
+          "path": "golden/triton_gpu/adapter.mlir"
+        },
+        {
+          "stage_id": "pass.canonicalize.after",
+          "path": "golden/triton_gpu/after_canonicalize.mlir"
+        },
+        {
+          "stage_id": "hook.vendor.after",
+          "path": "golden/triton_gpu/after_hook.mlir",
+          "extension_dialects": [
+            "gpu_vendor"
+          ]
+        },
+        {
+          "stage_id": "boundary.post_hook",
+          "path": "golden/triton_gpu/after_hook.mlir",
+          "extension_dialects": [
+            "gpu_vendor"
+          ]
+        }
+      ]
+    }
+  ]
+}

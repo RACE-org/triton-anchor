@@ -191,7 +191,18 @@ if(TRITON_BUILD_PYTHON_MODULE)
     ${PYTHON_SRC_PATH}/interpreter.cc
     ${PYTHON_SRC_PATH}/llvm.cc
     csrc/bindings/triton_anchor_passes.cc
+    csrc/bindings/triton_anchor_validator.cc
+    csrc/lib/Validation/AnchorIRValidator.cpp
   )
+  target_compile_definitions(triton PRIVATE TRITON_ANCHOR_VALIDATION_EXPORTS)
+  if(TTGPU)
+    # The TTGPU overlay adds Fantasy-specific TritonGPU encodings that do not
+    # exist in the upstream headers used by the default build.  Keep references
+    # to those generated C++ classes explicitly conditional.
+    target_compile_definitions(triton PRIVATE
+      TRITON_ANCHOR_HAS_FANT_WMMA=1
+    )
+  endif()
 
   set(TRITON_LIBRARIES
     ${TRITON_UPSTREAM_LIBS}
@@ -204,6 +215,18 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRGPUToGPURuntimeTransforms
     MLIRGPUTransforms
     MLIRIR
+    MLIRParser
+    MLIRAffineDialect
+    MLIRArithDialect
+    MLIRBufferizationDialect
+    MLIRControlFlowDialect
+    MLIRFuncDialect
+    MLIRFuncInlinerExtension
+    MLIRIndexDialect
+    MLIRMathDialect
+    MLIRNVGPUDialect
+    MLIRSCFDialect
+    MLIRVectorDialect
     MLIRControlFlowToLLVM
     MLIRBytecodeWriter
     MLIRPass
@@ -230,7 +253,6 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRLinalgUtils
     MLIRMemRefDialect
     MLIRTensorDialect
-    MLIRAffineDialect
 
     # triton-anchor 本身的内部库
     TritonLinalgAnalysis

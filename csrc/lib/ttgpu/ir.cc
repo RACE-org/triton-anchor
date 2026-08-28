@@ -502,7 +502,7 @@ void init_triton_ir(py::module &&m) {
           throw std::runtime_error("Parse MLIR file failed.");
         return module->clone();
       },
-      ret::take_ownership);
+      ret::take_ownership, py::keep_alive<0, 2>());
 
   py::class_<FuncOp, OpState>(m, "function", py::module_local())
       // .def_property_readonly("attrs", &ir::function::attrs)

@@ -96,8 +96,9 @@ class MyDeviceBackend(BaseBackend):
 
     def add_stages(self, stages, options):
         stages["ttir"]   = lambda src, metadata: _make_ttir(src, metadata, options)
-        stages["linalg"] = lambda src, metadata: _make_linalg(src, metadata, options)
-        stages["so"]     = lambda src, metadata: _make_binary(src, metadata)
+        stages["so"]     = lambda src, metadata: _make_anchor_binary(
+            src, metadata, options
+        )
 ```
 
 ### 编译阶段
@@ -117,19 +118,24 @@ def _make_ttir(mod, metadata, options):
     return mod
 
 
-def _make_linalg(mod, metadata, options):
-    """Stage 2: TTIR → Linalg（使用 triton-anchor 的 adapter pass 管线）。"""
-    from triton._C.libtriton.anchor import anchor_passes as passes
-    pm = ir.pass_manager(mod.context)
-    tl = passes.triton_to_linalg
-    tl.add_triton_to_linalg(pm)
-    # ... 其他 anchor passes
-    pm.run(mod)
-    return mod
+def _make_anchor_binary(ttir, metadata, options) -> bytes:
+    """TTIR → AnchorIR 强验证 → 后端 Hook → 强验证 → 二进制。"""
+    from triton_anchor.adapters.triton_linalg_adapter import TritonLinalgAdapter
+
+    report = TritonLinalgAdapter().compile(
+        ttir,
+        metadata,
+        hook=None,  # 或实现 on_anchor_ir_ready()/get_allowed_dialects() 的后端 Hook
+        backend_lowering=lambda anchor_ir: _lower_anchor_ir(
+            anchor_ir, metadata
+        ),
+        context=ttir.context,
+    )
+    return report.lowered_output
 
 
-def _make_binary(mod, metadata) -> bytes:
-    """Stage 3: Linalg → 硬件二进制。
+def _lower_anchor_ir(mod, metadata) -> bytes:
+    """post-hook 验证通过后的 Linalg → 硬件二进制。
 
     1. Dump IR 到文件
     2. 调用硬件编译工具链（你的编译器）
@@ -145,8 +151,37 @@ def _make_binary(mod, metadata) -> bytes:
         return f.read()                    # 必须返回 bytes
 ```
 
+> [!IMPORTANT]
+> 生产后端不能直接调用 `adapter.convert()`、手工执行
+> `add_triton_to_linalg()` 后立即进入 `_lower_anchor_ir()`，否则会绕过
+> pre-hook/Hook/post-hook 强验证。必须调用 Adapter 的 `compile()`，或者对
+> TritonGPU/其他 Track 使用
+> `AnchorIRLifecycleOrchestrator.run_module_or_raise()`。
+> 仓库内通用 `triton.compiler.compile()` 只执行后端登记的 stages，不会自动插入
+> AnchorIR 生命周期；因此后端必须像上例一样把 fail-closed 入口放入自己的 stage。
+
+T6.5 的结构化规则、生命周期、Golden 语义和一键验收命令见
+[《AnchorIR 结构化强验证与 Golden 回归》](anchor_ir_validation.md)。
+
 > [!CAUTION]
 > 最后一个 stage **必须返回 `bytes`**，不要返回文件路径字符串。Triton 的缓存系统会接管这串字节流并写入 `~/.triton/cache`。
+
+后端的 `hash()` 还必须包含 `ANCHOR_IR_SPEC_VERSION`、规范化版本和 Hook
+实现版本。否则规则或 Hook 改变后可能复用旧缓存，跳过本次编译应产生的验证和
+Golden Stage。端到端 Golden/corpus 验收应由 T10.3 在
+`TRITON_ALWAYS_COMPILE=1` 下采集真实阶段输出。
+
+`triton-anchor-validate --allow-extension` 只扩展 post-hook policy，不会动态加载
+厂商 Dialect 或自定义 parser。厂商自定义语法应在后端已注册 Dialect 的显式
+MLIR Context 中解析，并把真实 `ModuleOp` 交给 Python lifecycle；不能假设 CLI
+仅凭 namespace 名称就能理解 out-of-tree custom syntax。
+
+`get_allowed_dialects()` 只能声明当前 Track 的非核心 namespace。声明当前
+Track 的核心 Forbidden namespace（例如两条 Track 的 `smt`、Linalg Track 的
+`tt`）会在 Hook 执行前以 `ValueError` 拒绝，Hook 和 lowering 均不会执行。
+生命周期报告的 `post_hook_snapshot` 是 post-hook 验证后、lowering 前的
+不可变规范化文本与哈希，T10.3 应以它采集 `boundary.post_hook`；ModuleOp lowering
+得到的是 clone，因此常规原地 lowering 不会改写 `report.output` 这个已验证边界。
 
 ## 5. 实现运行时驱动 (`driver.py`)
 
@@ -234,4 +269,5 @@ assert driver.is_active()
 print(f"current_target: {driver.get_current_target()}")
 ```
 
-**一切就绪后，你就可以通过 `@triton.jit` 让 Triton 前端经由 `triton-anchor` 平滑地调用你的自定义芯片后端了！**
+完成 backend stage 接入、cache key、T10.3 真实语料采集和设备运行门禁后，才可以
+把 `@triton.jit` 路径视为完整端到端接入。

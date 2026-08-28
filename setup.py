@@ -209,7 +209,16 @@ setup(
     package_data={
         "triton.tools": ["compile.h", "compile.c"],
         "triton": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
-        "triton_anchor": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
+        "triton_anchor": [
+            "include/**/*.h",
+            "include/**/*.hpp",
+            "include/**/*.inc",
+            "include/**/*.def",
+            "include/**/*.td",
+            "spec/*.json",
+            "tests/data/anchor_ir/**/*.json",
+            "tests/data/anchor_ir/**/*.mlir",
+        ],
     },
     exclude_package_data={
         "triton_anchor": [] if is_ttgpu_enabled() else ["include/ttgpu/*", "include/ttgpu/**/*"],
@@ -223,9 +232,12 @@ setup(
     },
     zip_safe=False,
     entry_points={
+        "console_scripts": [
+            "triton-anchor-validate = triton_anchor.anchor_ir_cli:main",
+        ],
         "triton.adapters": [
             "triton-linalg = triton_anchor.adapters.triton_linalg_adapter:TritonLinalgAdapter",
-        ]
+        ],
     },
     keywords=["Compiler", "Deep Learning", "Triton"],
     classifiers=[
