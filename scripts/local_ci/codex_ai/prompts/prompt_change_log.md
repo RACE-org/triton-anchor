@@ -1,3 +1,23 @@
+## 2026-08-31：明确复用 Local CI 构建源码树
+
+### 修改原因
+
+Codex 的独立 checkout 用于审查和生成测试，Local CI 已构建源码树则通过只读 `/workspace` 复用。两者 SHA 可以一致，但仓库相对的 `build/`、`dist/`、生成头文件和动态库只存在于后者；提示词未明确这组路径时，构建依赖测试可能把独立 checkout 中缺少产物误判为 Local CI 没有产物。
+
+### 修改内容
+
+- runner 核对挂载源码树的目标 SHA，并分别导出 Local CI 前端源码、`build/`、`dist/` 以及已启用 backend 中实际存在的对应目录；backend wheel 构建未保留仓库根 `build/` 时将该目录标记为不可用；
+- success/failure prompt 区分审查 checkout 与只读构建源码树，要求构建依赖测试从后者执行；
+- 只读源码树中的 pytest 使用 `/tmp` basetemp，并关闭 repo-local cache 和 Python bytecode 写入；
+- 不复制构建树，不新增 artifact、报告 schema 或发布协议。
+
+### 兼容性与风险
+
+- Codex 仍在可写独立 checkout 中审查和生成测试，原 `/workspace` 保持只读；
+- `codex_only` 不要求存在 Local CI 构建树，失败诊断只暴露实际核对可用的路径。
+
+---
+
 ## 2026-08-26：按验证目标聚合命令与公开结论
 
 ### 修改原因

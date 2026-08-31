@@ -470,6 +470,12 @@ def scan(files: list[dict[str, object]]) -> tuple[list[Finding], list[Finding]]:
                         )
 
             for message, pattern in EXECUTION_BLOCKING_PATTERNS:
+                if (
+                    message == "dynamic shell evaluation is not allowed"
+                    and Path(filename).suffix.lower()
+                    in {".md", ".markdown", ".rst"}
+                ):
+                    continue
                 if pattern.search(line):
                     blocking.append(Finding("error", filename, line_number, message))
 

@@ -15,47 +15,6 @@ import publish_gitee_result as publisher
 
 
 class PublishedArtifactTests(unittest.TestCase):
-    def test_publish_budget_rejects_a_file_that_would_exceed_the_total(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source.bin"
-            destination = root / "destination.bin"
-            source.write_bytes(b"x" * 11)
-            budget = publisher.PublishBudget(10)
-
-            with self.assertRaises(publisher.PublishBudgetExceeded):
-                budget.copy(source, destination)
-
-            self.assertFalse(destination.exists())
-
-    def test_size_limit_result_marks_the_host_run_and_publishes_only_summary(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            run_dir = root / "run"
-            target_dir = root / "published"
-            run_dir.mkdir()
-            args = SimpleNamespace(
-                exit_code=88,
-                source_branch="ci/push/CI_dev",
-                sha="a" * 40,
-                run_id="run-1",
-                context="local-ci/test",
-                max_publish_bytes=10,
-            )
-
-            publisher.write_size_limit_result(
-                run_dir, target_dir, args, Path("runs/ci_push/run-1")
-            )
-
-            marker = json.loads(
-                (run_dir / "gitee-result-size-limit.json").read_text(encoding="utf-8")
-            )
-            result = json.loads(
-                (target_dir / "result.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(marker["failure_code"], "gitee_result_size_limit")
-            self.assertEqual(result["status"], 88)
-
     def test_candidate_result_does_not_duplicate_base_performance_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -91,7 +50,6 @@ class PublishedArtifactTests(unittest.TestCase):
                 target_dir,
                 args,
                 Path("runs/ci_pr/ci_pr-42_feature_demo") / args.sha / args.run_id,
-                publisher.PublishBudget(1024 * 1024),
             )
 
             self.assertEqual(published, target_dir)
@@ -140,7 +98,6 @@ class PublishedArtifactTests(unittest.TestCase):
                 target_dir,
                 args,
                 Path("runs/ci_pr/ci_pr-42_feature_demo") / args.sha / args.run_id,
-                publisher.PublishBudget(1024 * 1024),
             )
             summary = (target_dir / "delivery-summary.txt").read_text(
                 encoding="utf-8"

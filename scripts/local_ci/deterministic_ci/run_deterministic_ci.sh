@@ -51,8 +51,6 @@ PERFORMANCE_SCRIPT_DIR="${RUNNER_ROOT}/deterministic_ci/performance"
 FLAGGEMS_SCRIPT_DIR="${RUNNER_ROOT}/deterministic_ci/flaggems"
 DUMP_ARTIFACT_TOOL="${RUNNER_ROOT}/shared/dump_artifacts.py"
 TASK_TMP_TOOL="${RUNNER_ROOT}/shared/task_tmp.py"
-CAPPED_TEE_TOOL="${RUNNER_ROOT}/shared/capped_tee.py"
-OUTPUT_LIMIT_TOOL="${RUNNER_ROOT}/shared/output_limits.py"
 # shellcheck disable=SC1091
 source "${RUNNER_ROOT}/shared/path_utils.sh"
 
@@ -139,10 +137,6 @@ SOURCE_ENVSETUP="${SOURCE_ENVSETUP:-1}"
 FRONTEND_BUILD_MODE="${FRONTEND_BUILD_MODE:-fresh}"
 FRONTEND_BUILD_COMMAND="${FRONTEND_BUILD_COMMAND:-}"
 LOCAL_CI_ARTIFACT_ROOT="${LOCAL_CI_ARTIFACT_ROOT:-${WORKSPACE}/local-ci-artifacts}"
-LOCAL_CI_LOG_MAX_BYTES="${LOCAL_CI_LOG_MAX_BYTES:-536870912}"
-LOCAL_CI_ARTIFACT_FILE_MAX_BYTES="${LOCAL_CI_ARTIFACT_FILE_MAX_BYTES:-2147483648}"
-LOCAL_CI_ARTIFACT_MAX_BYTES="${LOCAL_CI_ARTIFACT_MAX_BYTES:-5368709120}"
-LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS="${LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS:-15}"
 RUN_COMPILE_BENCHMARK="${RUN_COMPILE_BENCHMARK:-true}"
 COMPILE_BENCHMARK_KERNELS="${COMPILE_BENCHMARK_KERNELS:-add,mm,softmax,layernorm}"
 COMPILE_BENCHMARK_REPEAT="${COMPILE_BENCHMARK_REPEAT:-5}"
@@ -208,11 +202,8 @@ LOCAL_CI_TASK_TMP_DIR="${LOCAL_CI_TASK_TMP_ROOT}/tmp"
 LOCAL_CI_TASK_DUMP_ROOT="${LOCAL_CI_TASK_TMP_ROOT}/dump"
 LOCAL_CI_TASK_CREDENTIAL_DIR="${LOCAL_CI_TASK_TMP_ROOT}/credentials"
 LOCAL_CI_TASK_BENCHMARK_ROOT="${LOCAL_CI_TASK_TMP_ROOT}/benchmark"
-LOCAL_CI_OUTPUT_LIMIT_REPORT="${LOCAL_CI_TASK_TMP_ROOT}/output-limit.json"
 TMPDIR="${LOCAL_CI_TASK_TMP_DIR}"
 FAILURE_IR_ARTIFACT_DIR="${DELIVERY_ARTIFACT_DIR}/failure-ir"
-LOCAL_CI_FAILURE_CODE=""
-OUTPUT_LIMIT_MONITOR_PID=""
 
 export WORKSPACE ANCHOR_DIR BACKEND_PROFILE EXPECTED_TRITON_BACKEND BACKEND_PATH
 export BACKEND_ENVSETUP BACKEND_ENVSETUP_ARGS BACKEND_TEST_COMMAND
@@ -238,57 +229,6 @@ if [[ "${artifact_path}" == "${task_tmp_path}" || "${artifact_path}" == "${task_
   exit 2
 fi
 mkdir -p "${DELIVERY_ARTIFACT_DIR}"
-: > "${DELIVERY_ARTIFACT_DIR}/.local-ci-artifact-root"
-
-for limit_name in \
-  LOCAL_CI_LOG_MAX_BYTES LOCAL_CI_ARTIFACT_FILE_MAX_BYTES \
-  LOCAL_CI_ARTIFACT_MAX_BYTES LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS; do
-  if [[ ! "${!limit_name}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "${limit_name} must be a positive integer." >&2
-    exit 2
-  fi
-done
-
-capped_tee() {
-  local output="$1"
-  "${PYTHON_BIN}" "${CAPPED_TEE_TOOL}" \
-    --output "${output}" \
-    --max-bytes "${LOCAL_CI_LOG_MAX_BYTES}" \
-    --marker "${LOCAL_CI_OUTPUT_LIMIT_REPORT}"
-}
-
-check_output_limits() {
-  "${PYTHON_BIN}" "${OUTPUT_LIMIT_TOOL}" check \
-    --root "${DELIVERY_ARTIFACT_DIR}" \
-    --max-log-bytes "${LOCAL_CI_LOG_MAX_BYTES}" \
-    --max-file-bytes "${LOCAL_CI_ARTIFACT_FILE_MAX_BYTES}" \
-    --max-total-bytes "${LOCAL_CI_ARTIFACT_MAX_BYTES}" \
-    --report "${LOCAL_CI_OUTPUT_LIMIT_REPORT}"
-}
-
-start_output_limit_monitor() {
-  local owner_pid="${BASHPID}"
-  (
-    while kill -0 "${owner_pid}" >/dev/null 2>&1; do
-      sleep "${LOCAL_CI_OUTPUT_CHECK_INTERVAL_SECONDS}"
-      if ! check_output_limits; then
-        echo "Local CI artifact output limit exceeded; terminating task." >&2
-        kill -TERM -- "-${owner_pid}" >/dev/null 2>&1 || \
-          kill -TERM "${owner_pid}" >/dev/null 2>&1 || true
-        return 0
-      fi
-    done
-  ) &
-  OUTPUT_LIMIT_MONITOR_PID="$!"
-}
-
-stop_output_limit_monitor() {
-  if [[ -n "${OUTPUT_LIMIT_MONITOR_PID}" ]]; then
-    kill "${OUTPUT_LIMIT_MONITOR_PID}" >/dev/null 2>&1 || true
-    wait "${OUTPUT_LIMIT_MONITOR_PID}" 2>/dev/null || true
-    OUTPUT_LIMIT_MONITOR_PID=""
-  fi
-}
 
 use_uv() {
   [[ "${PACKAGE_TOOL}" == "uv" ]] || { [[ "${PACKAGE_TOOL}" == "auto" ]] && command -v uv >/dev/null 2>&1; }
@@ -548,7 +488,7 @@ run_logged() {
   (
     export TRITON_DUMP_DIR="${task_dump_dir}"
     "$@"
-  ) 2>&1 | capped_tee "${log_file}"
+  ) 2>&1 | tee "${log_file}"
   pipeline_statuses=("${PIPESTATUS[@]}")
   for pipeline_status in "${pipeline_statuses[@]}"; do
     if [[ ${pipeline_status} -ne 0 ]]; then
@@ -576,7 +516,7 @@ frontend_package_installed() {
 uninstall_installed_frontend() {
   if ! frontend_package_installed; then
     echo "No previously installed triton-anchor distribution found." \
-      | capped_tee "${DELIVERY_ARTIFACT_DIR}/frontend-uninstall.log"
+      | tee "${DELIVERY_ARTIFACT_DIR}/frontend-uninstall.log"
     return 0
   fi
 
@@ -874,7 +814,7 @@ run_compile_benchmark() {
       --threshold "${COMPILE_BENCHMARK_THRESHOLD}" \
       --output-json "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.json" \
       --output-markdown "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.md" \
-      2>&1 | capped_tee "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.log"; then
+      2>&1 | tee "${DELIVERY_ARTIFACT_DIR}/compile-time-comparison.log"; then
       COMPILE_TIME_STATUS="fail"
       return 1
     fi
@@ -951,7 +891,7 @@ run_pass_profile() {
       --output-json "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.json" \
       --output-csv "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.csv" \
       --output-markdown "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.md" \
-      2>&1 | capped_tee "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.log"; then
+      2>&1 | tee "${DELIVERY_ARTIFACT_DIR}/pass-profile-comparison.log"; then
       PASS_PROFILE_STATUS="fail"
       return 1
     fi
@@ -1026,7 +966,7 @@ run_ir_serialization_benchmark() {
       --output-json "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.json" \
       --output-csv "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.csv" \
       --output-markdown "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.md" \
-      2>&1 | capped_tee "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.log"; then
+      2>&1 | tee "${DELIVERY_ARTIFACT_DIR}/ir-serialization-comparison.log"; then
       IR_SERIALIZATION_STATUS="fail"
       return 1
     fi
@@ -1105,10 +1045,6 @@ write_summary() {
     echo "flaggems_total_timeout_seconds: ${FLAGGEMS_TOTAL_TIMEOUT_SECONDS}"
     echo "flaggems_full_timeout_extension_seconds: ${FLAGGEMS_FULL_TIMEOUT_EXTENSION_SECONDS}"
     echo "flaggems_full_hard_timeout_seconds: ${FLAGGEMS_FULL_HARD_TIMEOUT_SECONDS}"
-    echo "failure_code: ${LOCAL_CI_FAILURE_CODE}"
-    echo "log_max_bytes: ${LOCAL_CI_LOG_MAX_BYTES}"
-    echo "artifact_file_max_bytes: ${LOCAL_CI_ARTIFACT_FILE_MAX_BYTES}"
-    echo "artifact_max_bytes: ${LOCAL_CI_ARTIFACT_MAX_BYTES}"
     echo "llvm_build_dir: ${LLVM_BUILD_DIR}"
     echo "ppl_root: ${PPL_ROOT}"
     echo "artifact_dir: ${DELIVERY_ARTIFACT_DIR}"
@@ -1165,23 +1101,8 @@ required_stages_passed() {
 on_exit() {
   local status="$?"
   local dump_cleanup_status=0
-  local compact_status=0
   trap - EXIT
   set +e
-  stop_output_limit_monitor
-  check_output_limits || true
-  if [[ -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
-    LOCAL_CI_FAILURE_CODE="$(
-      "${PYTHON_BIN}" -c \
-        'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("failure_code", "artifact_size_limit"))' \
-        "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" 2>/dev/null || printf 'artifact_size_limit'
-    )"
-    if [[ "${LOCAL_CI_FAILURE_CODE}" == "log_size_limit" ]]; then
-      status=86
-    else
-      status=87
-    fi
-  fi
   if [[ ${status} -eq 0 && ${LOCAL_CI_RESULT_STATUS} -ne 0 ]]; then
     status="${LOCAL_CI_RESULT_STATUS}"
   fi
@@ -1191,7 +1112,7 @@ on_exit() {
     status=1
   fi
   cleanup_gitee_git_auth
-  if [[ ${status} -ne 0 && ! -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
+  if [[ ${status} -ne 0 ]]; then
     collect_failure_ir "unhandled-exit" "${LOCAL_CI_TASK_DUMP_ROOT}" || true
   fi
   prune_task_dumps || dump_cleanup_status=$?
@@ -1205,26 +1126,10 @@ on_exit() {
     fi
   fi
   prune_uv_cache_for_ci
-  if [[ -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
-    "${PYTHON_BIN}" "${OUTPUT_LIMIT_TOOL}" compact \
-      --root "${DELIVERY_ARTIFACT_DIR}" \
-      --report "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" || compact_status=$?
-    if [[ ${compact_status} -ne 0 ]]; then
-      echo "Failed to compact output-limited artifact directory." >&2
-    fi
-  fi
   write_summary "${status}"
-  if [[ -f "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" ]]; then
-    cp "${LOCAL_CI_OUTPUT_LIMIT_REPORT}" "${DELIVERY_ARTIFACT_DIR}/output-limit.json"
-  fi
-  if [[ -n "${LOCAL_CI_FAILURE_CODE}" ]]; then
-    echo "Local CI failure code: ${LOCAL_CI_FAILURE_CODE}" >&2
-  fi
-  echo "Artifacts are in ${DELIVERY_ARTIFACT_DIR}"
   exit "${status}"
 }
 trap on_exit EXIT
-start_output_limit_monitor
 
 if [[ ! -r "${DUMP_ARTIFACT_TOOL}" ]]; then
   echo "Dump artifact tool is missing from the trusted runner snapshot: ${DUMP_ARTIFACT_TOOL}" >&2
@@ -1323,7 +1228,7 @@ fi
   echo "Built frontend wheel: ${wheel_path}"
   ls -lh "${wheel_path}"
   sha256sum "${wheel_path}"
-} | capped_tee "${DELIVERY_ARTIFACT_DIR}/frontend-wheel-info.log"
+} | tee "${DELIVERY_ARTIFACT_DIR}/frontend-wheel-info.log"
 if use_uv; then
   run_logged frontend-install uv pip install --force-reinstall --no-deps "${wheel_path}"
 else

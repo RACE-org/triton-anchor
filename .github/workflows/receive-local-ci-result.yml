@@ -170,6 +170,10 @@ jobs:
           esac
           gh api --method POST "repos/${REPO}/statuses/${TESTED_SHA}" \
             -f state=error -f context="${CONTEXT}" -f description="${description}"
+          if [ -n "${PR_NUMBER}" ] && [[ "${EXPECTED_HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            gh api --method POST "repos/${REPO}/statuses/${EXPECTED_HEAD_SHA}" \
+              -f state=error -f context=local-ci/summary -f description="${description}"
+          fi
           exit 1
 
       - name: Request Dashboard refresh through Gateway

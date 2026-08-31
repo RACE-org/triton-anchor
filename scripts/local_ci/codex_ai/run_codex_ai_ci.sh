@@ -30,10 +30,6 @@ CODEX_AI_CI_MAX_TEST_COMMANDS="${CODEX_AI_CI_MAX_TEST_COMMANDS:-50}"
 CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS="${CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS:-900}"
 CODEX_AI_CI_TEST_BUDGET_SECONDS="${CODEX_AI_CI_TEST_BUDGET_SECONDS:-2700}"
 CODEX_AI_CI_REPORT_RESERVE_SECONDS="${CODEX_AI_CI_REPORT_RESERVE_SECONDS:-450}"
-CODEX_AI_CI_CPUS="${CODEX_AI_CI_CPUS:-12}"
-CODEX_AI_CI_MEMORY="${CODEX_AI_CI_MEMORY:-48g}"
-CODEX_AI_CI_MEMORY_SWAP="${CODEX_AI_CI_MEMORY_SWAP:-48g}"
-CODEX_AI_CI_PIDS_LIMIT="${CODEX_AI_CI_PIDS_LIMIT:-4096}"
 LOCAL_CI_CONTAINER="${LOCAL_CI_CONTAINER:-anchor-sophgo-ci-prod}"
 LOCAL_CI_ARTIFACT_ROOT="${LOCAL_CI_ARTIFACT_ROOT:-/workspace/local-ci-artifacts}"
 LOCAL_CI_PROFILE_NAME="${LOCAL_CI_PROFILE_NAME:-legacy}"
@@ -157,6 +153,13 @@ workspace_dirty="false"
 workspace_dir=""
 workspace_parent=""
 artifact_dir=""
+local_ci_runtime_status="not_checked"
+local_ci_source_dir=""
+local_ci_build_dir=""
+local_ci_dist_dir=""
+backend_source_dir=""
+backend_build_dir=""
+backend_dist_dir=""
 host_codex_bin=""
 credential_integrity_status="not_checked"
 credential_integrity_reason="尚未校验独立凭据文件。"
@@ -239,6 +242,13 @@ write_summary() {
     echo "workspace_dir: ${workspace_dir}"
     echo "container_workspace_dir: ${container_checkout_dir}"
     echo "artifact_dir: ${artifact_dir}"
+    echo "local_ci_runtime_status: ${local_ci_runtime_status}"
+    echo "local_ci_source_dir: ${local_ci_source_dir}"
+    echo "local_ci_build_dir: ${local_ci_build_dir}"
+    echo "local_ci_dist_dir: ${local_ci_dist_dir}"
+    echo "backend_source_dir: ${backend_source_dir}"
+    echo "backend_build_dir: ${backend_build_dir}"
+    echo "backend_dist_dir: ${backend_dist_dir}"
     echo "output_dir: ${output_dir}"
     echo "changed_file_count: ${changed_file_count}"
     echo "changed_files_manifest_available: ${changed_files_manifest_available}"
@@ -264,10 +274,6 @@ write_summary() {
     echo "max_generated_test_files: ${CODEX_AI_CI_MAX_GENERATED_TEST_FILES}"
     echo "max_test_commands: ${CODEX_AI_CI_MAX_TEST_COMMANDS}"
     echo "recommended_command_timeout_seconds: ${CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS}"
-    echo "container_cpus: ${CODEX_AI_CI_CPUS}"
-    echo "container_memory: ${CODEX_AI_CI_MEMORY}"
-    echo "container_memory_swap: ${CODEX_AI_CI_MEMORY_SWAP}"
-    echo "container_pids_limit: ${CODEX_AI_CI_PIDS_LIMIT}"
     echo "test_budget_seconds: ${CODEX_AI_CI_TEST_BUDGET_SECONDS}"
     echo "report_reserve_seconds: ${CODEX_AI_CI_REPORT_RESERVE_SECONDS}"
     echo "marker_found: ${marker_found}"
@@ -1167,21 +1173,10 @@ validate_prerequisites() {
     CODEX_AI_CI_RECOMMENDED_COMMAND_TIMEOUT_SECONDS
     CODEX_AI_CI_TEST_BUDGET_SECONDS
     CODEX_AI_CI_REPORT_RESERVE_SECONDS
-    CODEX_AI_CI_PIDS_LIMIT
   )
   for integer_name in "${integer_names[@]}"; do
     validate_positive_integer "${integer_name}" "${!integer_name}"
   done
-  if [[ ! "${CODEX_AI_CI_CPUS}" =~ ^[1-9][0-9]*([.][0-9]+)?$ ]]; then
-    fail_ai_ci "CODEX_AI_CI_CPUS 必须是正数"
-  fi
-  if [[ ! "${CODEX_AI_CI_MEMORY}" =~ ^[1-9][0-9]*[kKmMgG]$ ]]; then
-    fail_ai_ci "CODEX_AI_CI_MEMORY 必须是 Docker 支持的正整数容量"
-  fi
-  if [[ ! "${CODEX_AI_CI_MEMORY_SWAP}" =~ ^[1-9][0-9]*[kKmMgG]$ ]]; then
-    fail_ai_ci "CODEX_AI_CI_MEMORY_SWAP 必须是 Docker 支持的正整数容量"
-  fi
-
   if ((
     10#${CODEX_AI_CI_MIN_GENERATED_TEST_CASES} >
       10#${CODEX_AI_CI_MAX_GENERATED_TEST_CASES}
@@ -1518,6 +1513,98 @@ fail_prepare_step() {
   fail_ai_ci "${reason}"
 }
 
+discover_local_ci_runtime_paths() {
+  local resolved_source=""
+  local resolved_backend_source=""
+  local resolved_path=""
+  local source_sha=""
+
+  if [[ "${LOCAL_CI_EXECUTION_MODE}" == "codex_only" ]]; then
+    local_ci_runtime_status="not_required"
+    return 0
+  fi
+
+  if ! run_prepare_capture resolved_source "resolve_local_ci_source" \
+    docker exec --user 0 "${ephemeral_container}" \
+      readlink -e -- "${ANCHOR_DIR}"; then
+    local_ci_runtime_status="unavailable"
+    if [[ "${analysis_mode}" == "full" ]]; then
+      fail_prepare_step "无法在 Codex 容器中定位 Local CI 源码目录"
+    fi
+    return 0
+  fi
+  if [[ "${resolved_source}" != /workspace/* ]]; then
+    local_ci_runtime_status="unavailable"
+    if [[ "${analysis_mode}" == "full" ]]; then
+      fail_prepare_step "Local CI 源码目录不在只读 /workspace 下"
+    fi
+    return 0
+  fi
+  if ! run_prepare_capture source_sha "verify_local_ci_source_sha" \
+    docker exec --user 0 "${ephemeral_container}" \
+      git -C "${resolved_source}" rev-parse HEAD; then
+    local_ci_runtime_status="unavailable"
+    if [[ "${analysis_mode}" == "full" ]]; then
+      fail_prepare_step "无法读取 Local CI 源码目录的提交 SHA"
+    fi
+    return 0
+  fi
+  source_sha="${source_sha//$'\r'/}"
+  if [[ "${source_sha}" != "${target_sha}" ]]; then
+    local_ci_runtime_status="sha_mismatch"
+    if [[ "${analysis_mode}" == "full" ]]; then
+      fail_prepare_step "Local CI 源码目录的 SHA 与目标 SHA 不一致"
+    fi
+    return 0
+  fi
+
+  local_ci_source_dir="${resolved_source}"
+  local_ci_dist_dir="${resolved_source}/dist"
+  local_ci_runtime_status="source_only"
+  if run_prepare_capture resolved_path "resolve_local_ci_build" \
+    docker exec --user 0 "${ephemeral_container}" \
+      readlink -e -- "${resolved_source}/build"; then
+    local_ci_build_dir="${resolved_path}"
+    local_ci_runtime_status="ready"
+  elif [[ "${analysis_mode}" == "full" ]]; then
+    fail_prepare_step "Local CI 已通过，但对应源码目录缺少 build 构建产物"
+  fi
+
+  if [[ "${RUN_BACKEND_STAGES}" != "true" || -z "${BACKEND_PATH}" ]]; then
+    return 0
+  fi
+  if ! run_prepare_capture resolved_backend_source "resolve_backend_source" \
+    docker exec --user 0 "${ephemeral_container}" \
+      readlink -e -- "${BACKEND_PATH}"; then
+    if [[ "${prepare_timed_out}" == "true" ]]; then
+      fail_prepare_step "定位 Local CI backend 源码目录超时"
+    fi
+    return 0
+  fi
+  if [[ "${resolved_backend_source}" != /workspace/* ]]; then
+    return 0
+  fi
+  backend_source_dir="${resolved_backend_source}"
+  if run_prepare_capture resolved_path "resolve_backend_build" \
+    docker exec --user 0 "${ephemeral_container}" \
+      readlink -e -- "${resolved_backend_source}/build"; then
+    if [[ "${resolved_path}" == /workspace/* ]]; then
+      backend_build_dir="${resolved_path}"
+    fi
+  elif [[ "${prepare_timed_out}" == "true" ]]; then
+    fail_prepare_step "定位 Local CI backend build 目录超时"
+  fi
+  if run_prepare_capture resolved_path "resolve_backend_dist" \
+    docker exec --user 0 "${ephemeral_container}" \
+      readlink -e -- "${resolved_backend_source}/dist"; then
+    if [[ "${resolved_path}" == /workspace/* ]]; then
+      backend_dist_dir="${resolved_path}"
+    fi
+  elif [[ "${prepare_timed_out}" == "true" ]]; then
+    fail_prepare_step "定位 Local CI backend dist 目录超时"
+  fi
+}
+
 create_ephemeral_container() {
   local resource_key
   local workspace_rw
@@ -1549,10 +1636,6 @@ create_ephemeral_container() {
   if ! run_prepare_command "container_start" docker run -dit \
     --name "${ephemeral_container}" \
     --hostname "${ephemeral_container}" \
-    --cpus "${CODEX_AI_CI_CPUS}" \
-    --memory "${CODEX_AI_CI_MEMORY}" \
-    --memory-swap "${CODEX_AI_CI_MEMORY_SWAP}" \
-    --pids-limit "${CODEX_AI_CI_PIDS_LIMIT}" \
     --label "triton-anchor.role=codex-ai" \
     --label "triton-anchor.run-id=${LOCAL_CI_RUN_ID}" \
     --label "triton-anchor.target-sha=${target_sha}" \
@@ -1674,6 +1757,7 @@ create_ephemeral_container() {
   if [[ "${copied_sha}" != "${target_sha}" ]]; then
     fail_prepare_step "容器内 checkout 的 SHA 与目标 SHA 不一致"
   fi
+  discover_local_ci_runtime_paths
   if ! run_prepare_command "verify_codex_cli" \
     docker exec --user 0 "${ephemeral_container}" \
       "${container_codex_bin}" --version; then
@@ -1835,6 +1919,13 @@ if ! prompt="$(
     CHANGED_FILES_MANIFEST_PATH "${container_changed_files_manifest}" \
     LOCAL_CI_LOG "${container_local_ci_log}" \
     ARTIFACT_DIR "${artifact_dir:-未识别到具体目录}" \
+    LOCAL_CI_RUNTIME_STATUS "${local_ci_runtime_status}" \
+    LOCAL_CI_SOURCE_DIR "${local_ci_source_dir:-不可用}" \
+    LOCAL_CI_BUILD_DIR "${local_ci_build_dir:-不可用}" \
+    LOCAL_CI_DIST_DIR "${local_ci_dist_dir:-不可用}" \
+    BACKEND_SOURCE_DIR "${backend_source_dir:-未启用或不可用}" \
+    BACKEND_BUILD_DIR "${backend_build_dir:-未启用或不可用}" \
+    BACKEND_DIST_DIR "${backend_dist_dir:-未启用或不可用}" \
     TEST_GENERATION_EXPECTED "${test_generation_expected}" \
     MIN_GENERATED_TEST_CASES "${CODEX_AI_CI_MIN_GENERATED_TEST_CASES}" \
     MAX_GENERATED_TEST_CASES "${CODEX_AI_CI_MAX_GENERATED_TEST_CASES}" \
@@ -1868,6 +1959,10 @@ printf '%s\n' "${prompt}" | timeout --signal=TERM --kill-after=30s \
     --env "AI_SOURCE_ENVSETUP=${SOURCE_ENVSETUP}" \
     --env "AI_ANCHOR_ENVSETUP=${container_anchor_envsetup}" \
     --env "AI_CHECKOUT_DIR=${container_checkout_dir}" \
+    --env "AI_LOCAL_CI_RUNTIME_STATUS=${local_ci_runtime_status}" \
+    --env "AI_LOCAL_CI_SOURCE_DIR=${local_ci_source_dir}" \
+    --env "AI_LOCAL_CI_BUILD_DIR=${local_ci_build_dir}" \
+    --env "AI_LOCAL_CI_DIST_DIR=${local_ci_dist_dir}" \
     --env "AI_TARGET_SHA=${target_sha}" \
     --env "AI_BRANCH=${branch}" \
     --env "AI_LOCAL_CI_RUN_ID=${LOCAL_CI_RUN_ID}" \
@@ -1883,6 +1978,9 @@ printf '%s\n' "${prompt}" | timeout --signal=TERM --kill-after=30s \
     --env "AI_NINJAFLAGS=${NINJAFLAGS}" \
     --env "AI_UV_LINK_MODE=${UV_LINK_MODE}" \
     --env "AI_BACKEND_PATH=${BACKEND_PATH}" \
+    --env "AI_BACKEND_SOURCE_DIR=${backend_source_dir}" \
+    --env "AI_BACKEND_BUILD_DIR=${backend_build_dir}" \
+    --env "AI_BACKEND_DIST_DIR=${backend_dist_dir}" \
     --env "AI_BACKEND_ENVSETUP=${BACKEND_ENVSETUP}" \
     --env "AI_BACKEND_ENVSETUP_ARGS=${BACKEND_ENVSETUP_ARGS}" \
     --env "AI_RUN_BACKEND_STAGES=${RUN_BACKEND_STAGES}" \
@@ -1904,6 +2002,10 @@ printf '%s\n' "${prompt}" | timeout --signal=TERM --kill-after=30s \
       fi
       export WORKSPACE=/workspace
       export ANCHOR_DIR="${AI_CHECKOUT_DIR}"
+      export LOCAL_CI_RUNTIME_STATUS="${AI_LOCAL_CI_RUNTIME_STATUS}"
+      export LOCAL_CI_SOURCE_DIR="${AI_LOCAL_CI_SOURCE_DIR}"
+      export LOCAL_CI_BUILD_DIR="${AI_LOCAL_CI_BUILD_DIR}"
+      export LOCAL_CI_DIST_DIR="${AI_LOCAL_CI_DIST_DIR}"
       export GITHUB_SHA="${AI_TARGET_SHA}"
       export GITHUB_REF="refs/heads/${AI_BRANCH}"
       export LOCAL_CI_RUN_ID="${AI_LOCAL_CI_RUN_ID}"
@@ -1912,6 +2014,9 @@ printf '%s\n' "${prompt}" | timeout --signal=TERM --kill-after=30s \
       export PACKAGE_TOOL="${AI_PACKAGE_TOOL}"
       export FRONTEND_BUILD_MODE="${AI_FRONTEND_BUILD_MODE}"
       export BACKEND_PROFILE="${AI_BACKEND_PROFILE}"
+      export BACKEND_PATH="${AI_BACKEND_SOURCE_DIR}"
+      export BACKEND_BUILD_DIR="${AI_BACKEND_BUILD_DIR}"
+      export BACKEND_DIST_DIR="${AI_BACKEND_DIST_DIR}"
       export EXPECTED_TRITON_BACKEND="${AI_EXPECTED_TRITON_BACKEND}"
       export FLAGGEMS_CLONE_DIR="${AI_FLAGGEMS_CLONE_DIR}"
       export FLAGGEMS_ROOT="${AI_FLAGGEMS_CLONE_DIR}"

@@ -22,6 +22,13 @@
 - Changed File Count: ${CHANGED_FILE_COUNT}
 - Local CI Log: ${LOCAL_CI_LOG}
 - Artifact Dir: ${ARTIFACT_DIR}
+- Local CI Runtime Status: ${LOCAL_CI_RUNTIME_STATUS}
+- Local CI Source Dir: ${LOCAL_CI_SOURCE_DIR}
+- Local CI Build Dir: ${LOCAL_CI_BUILD_DIR}
+- Local CI Dist Dir: ${LOCAL_CI_DIST_DIR}
+- Backend Source Dir: ${BACKEND_SOURCE_DIR}
+- Backend Build Dir: ${BACKEND_BUILD_DIR}
+- Backend Dist Dir: ${BACKEND_DIST_DIR}
 - Test Generation Expected: ${TEST_GENERATION_EXPECTED}
 
 Change Request Context JSON：
@@ -120,6 +127,8 @@ ${CHANGED_FILE_GROUPS_JSON}
 ## Local CI 环境、产物复用与验证约束
 
 确定性 Local CI 已成功执行并可作为基础证据，但 Codex 不能假设其覆盖完整。Codex 运行在 runner 从 Local CI 容器快照创建的临时容器中，当前审查 checkout 位于 `${REPOSITORY_ROOT}`，可以在该 checkout 中创建测试文件和临时诊断文件，但禁止修改生产实现代码。原始 Local CI `/workspace` 会以只读方式复用；能否直接读取 `${ARTIFACT_DIR}` 以 runner 实际解析的路径为准。这些执行控制不应被描述为完整凭据隔离或完整 hostile-code 沙箱；它们只是本次非阻塞审查的运行约束。
+
+`${REPOSITORY_ROOT}` 用于差异审查和生成测试，不是确定性 CI 的构建目录。`${LOCAL_CI_RUNTIME_STATUS}` 为 `ready` 时，`${LOCAL_CI_SOURCE_DIR}` 是与 `${TARGET_SHA}` 一致且已经完成构建的只读源码树；依赖仓库相对路径下 `build/`、`dist/`、生成头文件或动态库的现有测试，应在该目录中执行并使用 `${LOCAL_CI_BUILD_DIR}`、`${LOCAL_CI_DIST_DIR}`，不能仅因 `${REPOSITORY_ROOT}` 下没有这些目录就判断构建产物缺失。已启用 backend 时，只使用 `${BACKEND_SOURCE_DIR}`、`${BACKEND_BUILD_DIR}` 和 `${BACKEND_DIST_DIR}` 中实际给出的目录；显示“未启用或不可用”的目录不保证存在，其中 backend wheel 构建成功也不保证保留仓库根 `build/`。在只读源码树中运行 pytest 时，将临时目录放到 `/tmp`，并使用 `PYTHONDONTWRITEBYTECODE=1`、`-p no:cacheprovider` 和 `--basetemp=/tmp/triton-anchor-codex-pytest` 避免写入源码树。
 
 Codex 应优先复用 `${LOCAL_CI_LOG}` 和 `${ARTIFACT_DIR}` 中已有的日志、摘要、测试数据、构建产物、wheel、缓存和 benchmark 结果作为基础证据，避免重复执行原始 CI 已完成且结果可用的工作。复用产物前应尽量确认其与 `${TARGET_SHA}`、当前 checkout、Local CI 日志中的阶段和环境配置一致；无法确认时只能作为有限证据，并在 `residual_risks` 中说明。
 

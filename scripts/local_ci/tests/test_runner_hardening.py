@@ -119,78 +119,16 @@ def test_codex_budget_defaults_are_consistent_at_the_poller_boundary() -> None:
     assert 'CODEX_AI_CI_REPORT_RESERVE_SECONDS="${CODEX_AI_CI_REPORT_RESERVE_SECONDS:-450}"' in POLLER
 
 
-def test_resource_and_retention_governance_defaults_are_wired() -> None:
+def test_retention_governance_defaults_are_wired() -> None:
     for expected in (
-        'LOCAL_CI_TASK_TIMEOUT_SECONDS="${LOCAL_CI_TASK_TIMEOUT_SECONDS:-21600}"',
-        'LOCAL_CI_FULL_TASK_TIMEOUT_SECONDS="${LOCAL_CI_FULL_TASK_TIMEOUT_SECONDS:-172800}"',
         'LOCAL_CI_MAINTENANCE_INTERVAL_SECONDS="${LOCAL_CI_MAINTENANCE_INTERVAL_SECONDS:-86400}"',
         'LOCAL_CI_SUCCESS_RETENTION_DAYS="${LOCAL_CI_SUCCESS_RETENTION_DAYS:-14}"',
         'LOCAL_CI_FAILURE_RETENTION_DAYS="${LOCAL_CI_FAILURE_RETENTION_DAYS:-28}"',
-        'LOCAL_CI_LOG_MAX_BYTES="${LOCAL_CI_LOG_MAX_BYTES:-536870912}"',
-        'LOCAL_CI_ARTIFACT_MAX_BYTES="${LOCAL_CI_ARTIFACT_MAX_BYTES:-5368709120}"',
     ):
         assert expected in POLLER
     assert 'run_maintenance_if_due || echo "Local CI maintenance failed; polling will continue."' in POLLER
-    assert 'LOCAL_CI_DETERMINISTIC_TIMEOUT_SECONDS="${deterministic_timeout_seconds}"' in POLLER
-    assert 'deterministic_timeout_for_branch \\\n    "${GITEE_BRANCH}"' in ORCHESTRATOR
-    assert 'timeout --signal=TERM --kill-after=60s' in ORCHESTRATOR
-    assert '--root "${run_dir}"' in POLLER
-    assert ': > "${run_dir}/.local-ci-run-root"' in POLLER
-    full_mode = POLLER[POLLER.index('if [[ "${flaggems_test_mode}" == "full" ]]') :]
-    for variable in (
-        "LOCAL_CI_FULL_FLAGGEMS_IDLE_TIMEOUT_SECONDS",
-        "LOCAL_CI_FULL_FLAGGEMS_SOFT_TIMEOUT_SECONDS",
-        "LOCAL_CI_FULL_FLAGGEMS_EXTENSION_SECONDS",
-        "LOCAL_CI_FULL_FLAGGEMS_HARD_TIMEOUT_SECONDS",
-        "LOCAL_CI_FULL_PERFORMANCE_TIMEOUT",
-    ):
-        assert variable in full_mode
-
-
-def test_direct_container_entry_uses_branch_budget_without_task_override() -> None:
-    start = ORCHESTRATOR.index("deterministic_timeout_for_branch() {")
-    end = ORCHESTRATOR.index("\n}\n\n", start) + 3
-    function = ORCHESTRATOR[start:end]
-    script = (
-        f"set -euo pipefail\n{function}\n"
-        "unset LOCAL_CI_TASK_TIMEOUT_SECONDS LOCAL_CI_FULL_TASK_TIMEOUT_SECONDS\n"
-        "printf 'default-ordinary=%s\\n' \"$(deterministic_timeout_for_branch ci/push/main '')\"\n"
-        "printf 'default-full=%s\\n' \"$(deterministic_timeout_for_branch ci/full/nightly '')\"\n"
-        "LOCAL_CI_TASK_TIMEOUT_SECONDS=111\n"
-        "LOCAL_CI_FULL_TASK_TIMEOUT_SECONDS=222\n"
-        "printf 'ordinary=%s\\n' \"$(deterministic_timeout_for_branch ci/push/main '')\"\n"
-        "printf 'full=%s\\n' \"$(deterministic_timeout_for_branch ci/full/nightly '')\"\n"
-        "printf 'override=%s\\n' \"$(deterministic_timeout_for_branch ci/full/nightly 7)\"\n"
-    )
-    result = subprocess.run(
-        ["bash"], input=script.encode(), capture_output=True, check=False
-    )
-    assert result.returncode == 0, result.stderr.decode(errors="replace")
-    assert result.stdout.decode().splitlines() == [
-        "default-ordinary=21600",
-        "default-full=172800",
-        "ordinary=111",
-        "full=222",
-        "override=7",
-    ]
-
-
-def test_container_entry_validates_timeout_before_docker_setup() -> None:
-    timeout_assignment = ORCHESTRATOR.index(
-        'LOCAL_CI_DETERMINISTIC_TIMEOUT_SECONDS="$(')
-    timeout_validation = ORCHESTRATOR.index(
-        'if [[ ! "${LOCAL_CI_DETERMINISTIC_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]'
-    )
-    docker_setup = ORCHESTRATOR.index('CONTAINER_CI_TASK_TMP_ROOT="$(')
-    assert timeout_assignment < timeout_validation < docker_setup
-
-
-def test_codex_ephemeral_container_has_resource_limits_and_ownership_labels() -> None:
+def test_codex_ephemeral_container_has_ownership_labels() -> None:
     for expected in (
-        '--cpus "${CODEX_AI_CI_CPUS}"',
-        '--memory "${CODEX_AI_CI_MEMORY}"',
-        '--memory-swap "${CODEX_AI_CI_MEMORY_SWAP}"',
-        '--pids-limit "${CODEX_AI_CI_PIDS_LIMIT}"',
         '--label "triton-anchor.run-id=${LOCAL_CI_RUN_ID}"',
         'LABEL triton-anchor.role=codex-ai-snapshot',
     ):

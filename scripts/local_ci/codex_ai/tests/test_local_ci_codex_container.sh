@@ -722,6 +722,23 @@ if program == "bash" and len(command_args) >= 2 and command_args[1] == "-lc":
         assert f"- Test Generation Expected: {expected}" in prompt
     assert environment.get("CODEX_HOME") == "/root/.codex"
     assert environment.get("AI_SCHEMA_PATH") == "/codex-workspace/codex-ai-analysis.schema.json"
+    runtime_status = environment.get("AI_LOCAL_CI_RUNTIME_STATUS")
+    assert f"- Local CI Runtime Status: {runtime_status}" in prompt
+    if runtime_status == "ready":
+        assert environment.get("AI_LOCAL_CI_SOURCE_DIR") == "/workspace/triton-anchor"
+        assert environment.get("AI_LOCAL_CI_BUILD_DIR") == "/workspace/triton-anchor/build"
+        assert environment.get("AI_LOCAL_CI_DIST_DIR") == "/workspace/triton-anchor/dist"
+        assert mapped("/workspace/triton-anchor/build/lib/runtime-marker.so").is_file()
+        assert mapped("/workspace/triton-anchor/python/triton_anchor/include/generated-marker.h").is_file()
+        assert "不能仅因" in prompt and "下没有这些目录就判断构建产物缺失" in prompt
+        if environment.get("AI_RUN_BACKEND_STAGES") == "true":
+            assert environment.get("AI_BACKEND_SOURCE_DIR") == "/workspace/backend"
+            assert environment.get("AI_BACKEND_BUILD_DIR") == ""
+            assert environment.get("AI_BACKEND_DIST_DIR") == "/workspace/backend/dist"
+            assert not mapped("/workspace/backend/build").exists()
+            assert "- Backend Build Dir: 未启用或不可用" in prompt
+    elif runtime_status == "not_required":
+        assert environment.get("AI_LOCAL_CI_SOURCE_DIR") == ""
     if scenario in {"timeout", "startup_timeout"}:
         time.sleep(5)
         raise SystemExit(0)
@@ -833,6 +850,27 @@ run_case() {
   local host_home="${case_root}/host-home"
   mkdir -p "${output_dir}" "${docker_root}" "${docker_state}" \
     "${source_workspace}/local-ci-artifacts/${case_name}" "${host_home}/.codex"
+  local runtime_checkout_sha="${case_target_sha}"
+  if ! git -C "${relay_repo}" cat-file -e "${runtime_checkout_sha}^{commit}" 2>/dev/null; then
+    runtime_checkout_sha="${target_sha}"
+  fi
+  if [[ "${scenario}" == "runtime_sha_mismatch" ]]; then
+    runtime_checkout_sha="${base_sha}"
+  fi
+  git clone --quiet --no-checkout "${relay_repo}" "${source_workspace}/triton-anchor"
+  git -C "${source_workspace}/triton-anchor" checkout --quiet --detach "${runtime_checkout_sha}"
+  mkdir -p \
+    "${source_workspace}/triton-anchor/build/lib" \
+    "${source_workspace}/triton-anchor/dist" \
+    "${source_workspace}/triton-anchor/python/triton_anchor/include" \
+    "${source_workspace}/backend/dist"
+  printf 'frontend-native\n' \
+    > "${source_workspace}/triton-anchor/build/lib/runtime-marker.so"
+  printf 'frontend-wheel\n' \
+    > "${source_workspace}/triton-anchor/dist/runtime-marker.whl"
+  printf 'generated-header\n' \
+    > "${source_workspace}/triton-anchor/python/triton_anchor/include/generated-marker.h"
+  printf 'backend-wheel\n' > "${source_workspace}/backend/dist/backend-marker.whl"
   cp -a "${codex_home}" "${case_codex_home}"
   printf 'personal-config-sentinel\n' > "${host_home}/.codex/config.toml"
   printf 'personal-auth-sentinel\n' > "${host_home}/.codex/auth.json"
@@ -843,7 +881,11 @@ run_case() {
   source_digest_before="$(
     sha256sum \
       "${source_workspace}/sentinel.txt" \
-      "${source_workspace}/local-ci-artifacts/${case_name}/result.txt"
+      "${source_workspace}/local-ci-artifacts/${case_name}/result.txt" \
+      "${source_workspace}/triton-anchor/build/lib/runtime-marker.so" \
+      "${source_workspace}/triton-anchor/dist/runtime-marker.whl" \
+      "${source_workspace}/triton-anchor/python/triton_anchor/include/generated-marker.h" \
+      "${source_workspace}/backend/dist/backend-marker.whl"
   )"
   local credential_digest_before
   credential_digest_before="$(
@@ -876,6 +918,8 @@ run_case() {
   CODEX_AI_CI_HOME="${case_codex_home}" \
   LOCAL_CI_CONTAINER="anchor-sophgo-ci" \
   TRUSTED_ANCHOR_ENVSETUP="${trusted_envsetup}" \
+  ANCHOR_DIR="/workspace/triton-anchor" \
+  BACKEND_PATH="/workspace/backend" \
   LLVM_BUILD_DIR="/workspace/llvm-selected-profile" \
   CODEX_AI_CI_WORKSPACE_ROOT="${workspace_root}" \
   CODEX_AI_CI_TIMEOUT_SECONDS="${timeout_seconds}" \
@@ -897,7 +941,11 @@ run_case() {
   fi
   [[ "$(sha256sum \
       "${source_workspace}/sentinel.txt" \
-      "${source_workspace}/local-ci-artifacts/${case_name}/result.txt"
+      "${source_workspace}/local-ci-artifacts/${case_name}/result.txt" \
+      "${source_workspace}/triton-anchor/build/lib/runtime-marker.so" \
+      "${source_workspace}/triton-anchor/dist/runtime-marker.whl" \
+      "${source_workspace}/triton-anchor/python/triton_anchor/include/generated-marker.h" \
+      "${source_workspace}/backend/dist/backend-marker.whl"
     )" == "${source_digest_before}" ]]
   [[ "$(sha256sum \
       "${host_home}/.codex/config.toml" \
@@ -973,6 +1021,16 @@ grep -Fxq "workspace_dirty: true" "${success_output}/codex-ai-ci-summary.txt"
 grep -Fq -- "--volumes-from anchor-sophgo-ci:ro" "${test_root}/success/docker-state/docker.log"
 grep -Fq -- "--env AI_LLVM_BUILD_DIR=/workspace/llvm-selected-profile" \
   "${test_root}/success/docker-state/docker.log"
+grep -Fq -- "--env AI_LOCAL_CI_SOURCE_DIR=/workspace/triton-anchor" \
+  "${test_root}/success/docker-state/docker.log"
+grep -Fq -- "--env AI_LOCAL_CI_BUILD_DIR=/workspace/triton-anchor/build" \
+  "${test_root}/success/docker-state/docker.log"
+grep -Fq -- "--env AI_BACKEND_BUILD_DIR=" \
+  "${test_root}/success/docker-state/docker.log"
+grep -Fxq "local_ci_runtime_status: ready" "${success_output}/codex-ai-ci-summary.txt"
+grep -Fxq "local_ci_source_dir: /workspace/triton-anchor" \
+  "${success_output}/codex-ai-ci-summary.txt"
+grep -Fxq "backend_build_dir: " "${success_output}/codex-ai-ci-summary.txt"
 grep -Fq "generated_tests/test_generated.py" "${success_output}/codex-workspace-status.txt"
 tar -tzf "${success_output}/codex-generated-files.tar.gz" | grep -Fxq "generated_tests/test_generated.py"
 grep -Fq "# Codex AI 自动审查报告" "${success_output}/codex-ai-report.md"
@@ -1029,6 +1087,14 @@ grep -Fxq "max_test_command_duration_seconds: 0.2" "${success_output}/codex-ai-c
 grep -Fxq "total_test_command_duration_seconds: 0.2" "${success_output}/codex-ai-ci-summary.txt"
 grep -Fq "## 测试执行约束" "${success_output}/codex-ai-report.md"
 grep -Fq "状态：通过" "${success_output}/codex-ai-report.md"
+
+run_case runtime-sha-mismatch runtime_sha_mismatch 0 30 1
+runtime_mismatch_output="${test_root}/runtime-sha-mismatch/output"
+grep -Fxq "status: fail" "${runtime_mismatch_output}/codex-ai-ci-summary.txt"
+grep -Fxq "local_ci_runtime_status: sha_mismatch" \
+  "${runtime_mismatch_output}/codex-ai-ci-summary.txt"
+grep -Fq "Local CI 源码目录的 SHA 与目标 SHA 不一致" \
+  "${runtime_mismatch_output}/codex-ai-ci-summary.txt"
 
 run_case frontend-only success 0 30 0 \
   "${target_sha}" "${base_sha}" "${task_branch}" "" "" "" "" false

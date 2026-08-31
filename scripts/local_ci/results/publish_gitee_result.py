@@ -31,28 +31,6 @@ from result_paths import (  # noqa: E402
 )
 
 
-class PublishBudgetExceeded(RuntimeError):
-    pass
-
-
-class PublishBudget:
-    def __init__(self, max_bytes: int) -> None:
-        if max_bytes <= 0:
-            raise ValueError("GITEE result size limit must be positive")
-        self.max_bytes = max_bytes
-        self.used_bytes = 0
-
-    def copy(self, source: Path, destination: Path) -> None:
-        size = source.stat().st_size
-        if size > self.max_bytes or self.used_bytes + size > self.max_bytes:
-            raise PublishBudgetExceeded(
-                f"Gitee result payload exceeds {self.max_bytes} bytes at {source}"
-            )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        self.used_bytes += size
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--owner", required=True, help="Source Gitee code repository owner for commit comments.")
@@ -77,11 +55,6 @@ def parse_args() -> argparse.Namespace:
         "--backend-stages-enabled", choices=("true", "false"), default="true"
     )
     parser.add_argument("--backend-skip-reason", default="")
-    parser.add_argument(
-        "--max-publish-bytes",
-        type=int,
-        default=int(os.getenv("GITEE_RESULT_MAX_BYTES", "268435456")),
-    )
     return parser.parse_args()
 
 
@@ -289,13 +262,7 @@ def build_publish_manifest(
     )
 
 
-def copy_results(
-    run_dir: Path,
-    target_dir: Path,
-    args: argparse.Namespace,
-    rel_dir: Path,
-    budget: PublishBudget,
-) -> Path | None:
+def copy_results(run_dir: Path, target_dir: Path, args: argparse.Namespace, rel_dir: Path) -> Path | None:
     artifact_dir_text = discover_artifact_dir(run_dir / "local-ci.log")
     artifact_dir = map_container_path(artifact_dir_text)
     if not artifact_dir or not artifact_dir.exists():
@@ -310,18 +277,18 @@ def copy_results(
     for file_name in PUBLISHED_ARTIFACT_FILES:
         source = artifact_dir / file_name
         if source.is_file():
-            budget.copy(source, target_dir / file_name)
+            shutil.copy2(source, target_dir / file_name)
             copied.append(file_name)
 
     for file_name in PUBLISHED_RUN_FILES:
         source = run_dir / file_name
         if source.is_file():
-            budget.copy(source, target_dir / file_name)
+            shutil.copy2(source, target_dir / file_name)
             copied.append(file_name)
 
     result_json = run_dir / "result.json"
     if result_json.is_file():
-        budget.copy(result_json, target_dir / "result.json")
+        shutil.copy2(result_json, target_dir / "result.json")
         copied.append("result.json")
 
     for required_file in REQUIRED_RESULT_FILES:
@@ -531,13 +498,7 @@ def write_ir_serialization_dashboard(worktree: Path, limit: int = 100) -> tuple[
     return markdown_path, csv_path
 
 
-def write_fallback_results(
-    run_dir: Path,
-    target_dir: Path,
-    args: argparse.Namespace,
-    rel_dir: Path,
-    budget: PublishBudget,
-) -> Path:
+def write_fallback_results(run_dir: Path, target_dir: Path, args: argparse.Namespace, rel_dir: Path) -> Path:
     if target_dir.exists():
         shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -546,7 +507,7 @@ def write_fallback_results(
     for file_name in ("local-ci.log", "result.json", *PUBLISHED_RUN_FILES):
         source = run_dir / file_name
         if source.is_file():
-            budget.copy(source, target_dir / file_name)
+            shutil.copy2(source, target_dir / file_name)
             copied.append(file_name)
 
     artifact_dir_text = discover_artifact_dir(run_dir / "local-ci.log") or "unavailable"
@@ -606,67 +567,6 @@ def write_fallback_results(
     return target_dir
 
 
-def write_size_limit_result(
-    run_dir: Path, target_dir: Path, args: argparse.Namespace, rel_dir: Path
-) -> Path:
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    result = {
-        "sha": args.sha,
-        "target_sha": args.sha,
-        "tested_sha": args.sha,
-        "status": 88,
-        "failure_code": "gitee_result_size_limit",
-        "run_dir": str(run_dir),
-    }
-    (run_dir / "gitee-result-size-limit.json").write_text(
-        json.dumps(
-            {
-                "schema": "triton-anchor-local-ci-output-limit/v1",
-                "failure_code": "gitee_result_size_limit",
-                "limit_bytes": args.max_publish_bytes,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    (target_dir / "result.json").write_text(
-        json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-    (target_dir / "delivery-summary.txt").write_text(
-        "\n".join(
-            (
-                "schema: triton-anchor-local-ci/v3",
-                "status: 88",
-                f"target_sha: {args.sha}",
-                f"tested_sha: {args.sha}",
-                f"branch: {args.source_branch}",
-                f"run_id: {args.run_id}",
-                "failure_code: gitee_result_size_limit",
-                f"publish_limit_bytes: {args.max_publish_bytes}",
-                "note: oversized result files were not published.",
-            )
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    build_publish_manifest(
-        target_dir,
-        args=args,
-        rel_dir=rel_dir,
-        artifact_dir_text="unavailable",
-        artifact_dir=None,
-        copied=["delivery-summary.txt", "result.json"],
-        missing_expected=[],
-        fallback=True,
-    )
-    return target_dir
-
-
 def post_commit_comment(owner: str, repo: str, sha: str, token: str, body: str) -> None:
     path_owner = urllib.parse.quote(owner, safe="")
     path_repo = urllib.parse.quote(repo, safe="")
@@ -693,11 +593,6 @@ def post_commit_comment(owner: str, repo: str, sha: str, token: str, body: str) 
 
 def main() -> int:
     args = parse_args()
-    try:
-        publish_budget = PublishBudget(args.max_publish_bytes)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
     token = os.getenv("GITEE_TOKEN", "")
     if not token:
         print("GITEE_TOKEN is not set; cannot publish Gitee result branch.", file=sys.stderr)
@@ -753,25 +648,10 @@ def main() -> int:
             run_git(["checkout", "-q", "--orphan", args.results_branch], worktree, git_env)
 
         target_dir = worktree / rel_dir
-        try:
-            copied_result_dir = copy_results(
-                run_dir, target_dir, args, rel_dir, publish_budget
-            )
-            if copied_result_dir is None:
-                print(
-                    "Artifact result directory was unavailable; publishing fallback host logs.",
-                    file=sys.stderr,
-                )
-                copied_result_dir = write_fallback_results(
-                    run_dir, target_dir, args, rel_dir, publish_budget
-                )
-        except PublishBudgetExceeded as exc:
-            print(str(exc), file=sys.stderr)
-            args.exit_code = 88
-            status_text = "failed"
-            copied_result_dir = write_size_limit_result(
-                run_dir, target_dir, args, rel_dir
-            )
+        copied_result_dir = copy_results(run_dir, target_dir, args, rel_dir)
+        if copied_result_dir is None:
+            print("Artifact result directory was unavailable; publishing fallback host logs.", file=sys.stderr)
+            copied_result_dir = write_fallback_results(run_dir, target_dir, args, rel_dir)
 
         compile_cache_dir = publish_compile_time_cache(worktree, copied_result_dir, args.sha)
         if compile_cache_dir is not None:

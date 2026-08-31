@@ -21,6 +21,7 @@
     "available": false,
     "running": false,
     "status": "unknown",
+    "available_cpus": null,
     "limits": {},
     "stats": {}
   },

@@ -1339,6 +1339,16 @@ jobs:
                 .replace(/\s+/g, ' ')
                 .trim()
                 .slice(0, 160);
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha: pull.head.sha,
+                state: 'pending',
+                context: 'local-ci/summary',
+                description: `Merge ${process.env.TESTED_SHA.slice(0, 12)}: Local CI in progress`,
+                target_url:
+                  `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              });
               core.setOutput('pr_number', String(prNumber));
               core.setOutput('head_sha', pull.head.sha);
               core.setOutput('comparison_base_sha', process.env.COMPARISON_BASE_SHA);
@@ -1412,6 +1422,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           SHA: ${{ inputs.tested_sha }}
+          HEAD_SHA: ${{ inputs.expected_head_sha }}
           STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
         with:
           script: |
@@ -1429,6 +1440,19 @@ jobs:
               target_url:
                 `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
+            if (shaPattern.test(process.env.HEAD_SHA)) {
+              await github.rest.repos.createCommitStatus({
+                ...context.repo,
+                sha: process.env.HEAD_SHA,
+                state: 'error',
+                context: 'local-ci/summary',
+                description: 'local CI worker validation, security scan, or dispatch failed',
+                target_url:
+                  `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+            } else {
+              core.warning('Cannot publish a PR summary because expected_head_sha is invalid.');
+            }
 
   validate-push:
     name: Validate cross-branch push request
@@ -1676,6 +1700,19 @@ jobs:
                 context: process.env.STATUS_CONTEXT,
                 description: description.slice(0, 140),
               });
+              if (
+                /^[1-9][0-9]*$/.test(process.env.PR_NUMBER) &&
+                shaPattern.test(process.env.EXPECTED_HEAD_SHA)
+              ) {
+                await github.rest.repos.createCommitStatus({
+                  owner,
+                  repo,
+                  sha: process.env.EXPECTED_HEAD_SHA,
+                  state: 'error',
+                  context: 'local-ci/summary',
+                  description: description.slice(0, 140),
+                });
+              }
             };
 
             try {

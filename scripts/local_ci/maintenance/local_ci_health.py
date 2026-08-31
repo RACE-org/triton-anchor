@@ -391,6 +391,23 @@ def run_capture(command: list[str]) -> tuple[int, str, str]:
     return completed.returncode, completed.stdout.strip(), completed.stderr.strip()
 
 
+def cpuset_cpu_count(value: object) -> int | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    total = 0
+    try:
+        for item in value.split(","):
+            bounds = item.strip().split("-", 1)
+            start = int(bounds[0])
+            end = int(bounds[-1])
+            if start < 0 or end < start:
+                return None
+            total += end - start + 1
+    except ValueError:
+        return None
+    return total or None
+
+
 def docker_info(container: str, docker_bin: str) -> dict[str, Any]:
     if not container:
         return {"name": "", "available": False, "running": False}
@@ -421,6 +438,13 @@ def docker_info(container: str, docker_bin: str) -> dict[str, Any]:
         period = host_config.get("CpuPeriod") or 0
         if isinstance(quota, int) and isinstance(period, int) and quota > 0 and period > 0:
             cpu_limit = quota / period
+    available_cpu_candidates = [
+        value for value in (cpu_limit, os.cpu_count()) if value
+    ]
+    cpuset_cpus = cpuset_cpu_count(host_config.get("CpusetCpus"))
+    if cpuset_cpus:
+        available_cpu_candidates.append(cpuset_cpus)
+    available_cpus = min(available_cpu_candidates) if available_cpu_candidates else 0
     document: dict[str, Any] = {
         "name": container,
         "available": True,
@@ -429,6 +453,7 @@ def docker_info(container: str, docker_bin: str) -> dict[str, Any]:
         "started_at": str(state.get("StartedAt") or ""),
         "oom_killed": bool(state.get("OOMKilled")),
         "restart_count": int(inspect.get("RestartCount") or 0),
+        "available_cpus": round(available_cpus, 3) if available_cpus else None,
         "limits": {
             "cpus": round(cpu_limit, 3) if cpu_limit else None,
             "memory_bytes": int(host_config.get("Memory") or 0) or None,

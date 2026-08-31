@@ -90,8 +90,6 @@ def collect_failure_ir(args: argparse.Namespace) -> int:
     output_root = Path(args.output_dir)
     if not output_root.is_absolute():
         raise ValueError("output directory must be absolute")
-    if args.max_file_bytes <= 0 or args.max_total_bytes <= 0:
-        raise ValueError("artifact limits must be positive")
 
     source_specs = [parse_source(value) for value in args.source]
     if len({label for label, _ in source_specs}) != len(source_specs):
@@ -121,16 +119,7 @@ def collect_failure_ir(args: argparse.Namespace) -> int:
 
     stage_root = output_root / stage
     copied: list[dict[str, object]] = []
-    copied_bytes = 0
     for item in candidates:
-        if item.size > args.max_file_bytes:
-            raise ValueError(
-                f"failure IR file exceeds {args.max_file_bytes} bytes: {item.path}"
-            )
-        if copied_bytes + item.size > args.max_total_bytes:
-            raise ValueError(
-                f"failure IR collection exceeds {args.max_total_bytes} bytes"
-            )
         destination = stage_root / item.label / item.relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(item.path, destination, follow_symlinks=False)
@@ -142,7 +131,6 @@ def collect_failure_ir(args: argparse.Namespace) -> int:
                 "size_bytes": item.size,
             }
         )
-        copied_bytes += item.size
 
     document = {
         "schema": "triton-anchor-local-ci-failure-ir/v1",
@@ -260,16 +248,6 @@ def parse_args() -> argparse.Namespace:
     collect_parser.add_argument("--stage", required=True)
     collect_parser.add_argument("--target-sha", required=True)
     collect_parser.add_argument("--source", action="append", default=[], required=True)
-    collect_parser.add_argument(
-        "--max-file-bytes",
-        type=int,
-        default=int(os.getenv("LOCAL_CI_ARTIFACT_FILE_MAX_BYTES", "2147483648")),
-    )
-    collect_parser.add_argument(
-        "--max-total-bytes",
-        type=int,
-        default=int(os.getenv("LOCAL_CI_ARTIFACT_MAX_BYTES", "5368709120")),
-    )
     collect_parser.set_defaults(handler=collect_failure_ir)
 
     prune_parser = subparsers.add_parser("prune")

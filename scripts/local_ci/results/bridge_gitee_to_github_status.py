@@ -133,6 +133,7 @@ REPORTABLE_STAGES = (
     ("pass_profile", "pass_profile_status", "pass-profile", "Pass profiling"),
     ("ir_serialization", "ir_serialization_status", "ir-serialization", "IR serialization"),
 )
+PR_SUMMARY_CONTEXT = "local-ci/summary"
 FRONTEND_REQUIRED_STAGE_IDS = (
     "frontend_build",
     "frontend_smoke",
@@ -471,6 +472,19 @@ def post_github_status(sha: str, state: str, context: str, description: str, tar
     status, _, raw = request_json(github_status_url(sha), method="POST", token=github_token(), data=payload)
     if status not in (200, 201):
         raise RuntimeError(f"GitHub status update failed: HTTP {status}: {raw[:500]}")
+
+
+def post_pr_summary_status(
+    target: Target, state: str, description: str, target_url: str = ""
+) -> None:
+    if target.head_sha and pr_number_from_task_ref(target.task_ref) is not None:
+        post_github_status(
+            target.head_sha,
+            state,
+            PR_SUMMARY_CONTEXT,
+            description,
+            target_url,
+        )
 
 
 def get_github_json(path: str, params: dict[str, str] | None = None) -> object | None:
@@ -1346,18 +1360,25 @@ def sync_target(args: argparse.Namespace, target: Target, set_pending: bool) -> 
                         f"{description.replace('Gitee local CI', 'Local CI', 1)}"
                     )
                 post_github_status(status_sha, "success", args.context, description, result.target_url)
+                post_pr_summary_status(
+                    target, "success", description, result.target_url
+                )
                 print(f"Gitee local CI passed for {target.label}: {result.target_url}")
             else:
+                description = (
+                    f"Merge {target.sha[:12]}: Local CI failed: status {result.exit_code}"
+                    if target.head_sha
+                    else f"Gitee local CI failed: status {result.exit_code}"
+                )
                 post_github_status(
                     status_sha,
                     "failure",
                     args.context,
-                    (
-                        f"Merge {target.sha[:12]}: Local CI failed: status {result.exit_code}"
-                        if target.head_sha
-                        else f"Gitee local CI failed: status {result.exit_code}"
-                    ),
+                    description,
                     result.target_url,
+                )
+                post_pr_summary_status(
+                    target, "failure", description, result.target_url
                 )
                 print(f"Gitee local CI failed for {target.label}: {result.target_url}")
             return result

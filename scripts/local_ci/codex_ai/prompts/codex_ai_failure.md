@@ -22,6 +22,13 @@
 - Changed File Count: ${CHANGED_FILE_COUNT}
 - Local CI Log: ${LOCAL_CI_LOG}
 - Artifact Dir: ${ARTIFACT_DIR}
+- Local CI Runtime Status: ${LOCAL_CI_RUNTIME_STATUS}
+- Local CI Source Dir: ${LOCAL_CI_SOURCE_DIR}
+- Local CI Build Dir: ${LOCAL_CI_BUILD_DIR}
+- Local CI Dist Dir: ${LOCAL_CI_DIST_DIR}
+- Backend Source Dir: ${BACKEND_SOURCE_DIR}
+- Backend Build Dir: ${BACKEND_BUILD_DIR}
+- Backend Dist Dir: ${BACKEND_DIST_DIR}
 - Test Generation Expected: ${TEST_GENERATION_EXPECTED}
 
 Change Request Context JSON：
@@ -127,6 +134,8 @@ ${CHANGED_FILE_GROUPS_JSON}
 ## Local CI 环境、产物复用与有限诊断约束
 
 Codex 运行在 runner 从 Local CI 容器快照创建的临时容器中，当前审查 checkout 位于 `${REPOSITORY_ROOT}`，可以在该 checkout 中创建少量测试文件和临时诊断文件，也可以执行与失败阶段直接相关的定向命令，但禁止修改生产实现代码。原始 Local CI `/workspace` 会以只读方式复用；能否直接读取 `${ARTIFACT_DIR}` 以 runner 实际解析的路径为准。这些执行控制不应被描述为完整凭据隔离或完整 hostile-code 沙箱；它们只是本次非阻塞诊断的运行约束。
+
+`${REPOSITORY_ROOT}` 用于差异审查和生成测试，不代表确定性 CI 已在该目录构建。`${LOCAL_CI_SOURCE_DIR}`、`${LOCAL_CI_BUILD_DIR}` 或 backend 路径可用时，它们对应 runner 已核对的只读 Local CI 源码和现存产物；依赖仓库相对 `build/`、`dist/`、生成头文件或动态库的诊断应从对应源码目录执行，不能仅因 `${REPOSITORY_ROOT}` 下没有这些目录就判断构建产物缺失。backend 路径显示“未启用或不可用”时不得假定对应目录存在，尤其不能把 wheel 构建后未保留仓库根 `build/` 视为 backend 构建失败。`${LOCAL_CI_RUNTIME_STATUS}` 不是 `ready` 时只能使用实际存在的路径作为有限诊断证据。只读源码树中的 pytest 使用 `PYTHONDONTWRITEBYTECODE=1`、`-p no:cacheprovider` 和 `--basetemp=/tmp/triton-anchor-codex-pytest`，避免把写入失败误判为产品失败。
 
 Codex 应优先复用 `${LOCAL_CI_LOG}` 和 `${ARTIFACT_DIR}` 中已有的日志、摘要、测试数据、构建产物、wheel、缓存、benchmark 结果和 `failure-ir` 作为失败诊断证据，避免重复执行原始 CI 已完成且结果可用的工作。复用产物前应尽量确认其与 `${TARGET_SHA}`、当前 checkout、Local CI 日志中的失败阶段和环境配置一致；无法确认时只能作为有限证据，并在 `residual_risks` 中说明。`failure-ir` 不存在表示失败命令没有生成白名单 IR；如 `failure-ir-collection.log` 报错，则应按证据收集失败处理，不能假定没有 IR。
 
