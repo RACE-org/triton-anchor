@@ -1,0 +1,41 @@
+{
+  "case_id": "triton_gpu/golden/basic",
+  "manifest_version": "anchor-ir-golden-manifest/1.0.0",
+  "normalization_version": "anchor-ir-normalization/1.0.0",
+  "spec_version": "anchor-ir/3.0.0",
+  "stages": [
+    {
+      "extension_dialects": [],
+      "normalized_ir": "\"builtin.module\"() ({\n  %0 = \"tt.make_range\"() <{end = 16 : i32, start = 0 : i32}> : () -> tensor<16xi32, #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>>\n}) {\"ttg.num-ctas\" = 1 : i32, \"ttg.num-warps\" = 1 : i32, \"ttg.threads-per-warp\" = 32 : i32} : () -> ()\n",
+      "phase": "pre_hook",
+      "sha256": "e0c0aad828fe537e83f8c29797679652d16a5c5b683df4ad8194e8d61eaf84b1",
+      "stage_id": "adapter.output"
+    },
+    {
+      "extension_dialects": [],
+      "normalized_ir": "\"builtin.module\"() ({\n  %0 = \"tt.make_range\"() <{end = 32 : i32, start = 0 : i32}> : () -> tensor<32xi32, #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>>\n}) {\"ttg.num-ctas\" = 1 : i32, \"ttg.num-warps\" = 1 : i32, \"ttg.threads-per-warp\" = 32 : i32} : () -> ()\n",
+      "phase": "pre_hook",
+      "sha256": "ff8be711a500a1d3890c4b7457923fafaed837477ed743fdaf2680cb4fe5f101",
+      "stage_id": "pass.canonicalize.after"
+    },
+    {
+      "extension_dialects": [
+        "gpu_vendor"
+      ],
+      "normalized_ir": "\"builtin.module\"() ({\n  %0 = \"tt.make_range\"() <{end = 32 : i32, start = 0 : i32}> : () -> tensor<32xi32, #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>>\n  \"gpu_vendor.marker\"() : () -> ()\n}) {\"ttg.num-ctas\" = 1 : i32, \"ttg.num-warps\" = 1 : i32, \"ttg.threads-per-warp\" = 32 : i32} : () -> ()\n",
+      "phase": "post_hook",
+      "sha256": "2f051647f4531da2437cd908b25bf7018c6ad5949cd71498894ec4cceea98845",
+      "stage_id": "hook.vendor.after"
+    },
+    {
+      "extension_dialects": [
+        "gpu_vendor"
+      ],
+      "normalized_ir": "\"builtin.module\"() ({\n  %0 = \"tt.make_range\"() <{end = 32 : i32, start = 0 : i32}> : () -> tensor<32xi32, #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>>\n  \"gpu_vendor.marker\"() : () -> ()\n}) {\"ttg.num-ctas\" = 1 : i32, \"ttg.num-warps\" = 1 : i32, \"ttg.threads-per-warp\" = 32 : i32} : () -> ()\n",
+      "phase": "post_hook",
+      "sha256": "2f051647f4531da2437cd908b25bf7018c6ad5949cd71498894ec4cceea98845",
+      "stage_id": "boundary.post_hook"
+    }
+  ],
+  "track": "triton_gpu"
+}
