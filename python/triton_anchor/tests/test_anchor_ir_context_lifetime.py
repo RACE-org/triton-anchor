@@ -3,6 +3,9 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+import triton
 
 
 def test_parsed_module_retains_context_for_standalone_validation_and_normalization(
@@ -66,7 +69,13 @@ assert normalized.normalized_text is not None
 print("standalone ModuleOp validation and normalization succeeded")
 """
     repository = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    # Keep the child on the exact native package selected by the parent test
+    # environment.  A source checkout may also contain an older in-place
+    # libtriton.so next to ``triton/python``; putting that directory first
+    # would turn this regression into a test of a stale binary.
+    native_package_root = str(Path(triton.__file__).resolve().parents[1])
     pythonpath = [
+        native_package_root,
         os.path.join(repository, "python"),
         os.path.join(repository, "triton", "python"),
     ]
