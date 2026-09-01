@@ -29,7 +29,16 @@ Future extensibility:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Union
+
+from ..anchor_ir_rules import ANCHOR_IR_SPEC_VERSION
+from ..anchor_ir_schema import AnchorIRTrack
+
+if TYPE_CHECKING:
+    from ..anchor_ir_lifecycle import (
+        AnchorIRBackendHook,
+        AnchorIRLifecycleReport,
+    )
 
 
 class ITritonToLinalgAdapter(ABC):
@@ -42,7 +51,8 @@ class ITritonToLinalgAdapter(ABC):
     Subclass Contract:
         1. ``name()`` must return a unique string identifier
         2. ``convert()`` must produce valid AnchorIR from an optimized TTIR module
-        3. ``validate_output()`` should check AnchorIR compliance (optional override)
+        3. production backend entry must use inherited ``compile()`` so strict
+           pre/post validation cannot be skipped inside the unified lifecycle
     """
 
     @abstractmethod
@@ -72,10 +82,11 @@ class ITritonToLinalgAdapter(ABC):
         ...
 
     def validate_output(self, linalg_ir: Any) -> bool:
-        """Validate that the adapter output conforms to AnchorIR.
+        """Legacy boolean validation retained for compatibility only.
 
-        Default implementation uses the AnchorIRValidator.
-        Subclasses may override for custom validation.
+        This text-regex helper does not satisfy the strict versioned contract.
+        Production integrations must use ``compile()``, which invokes the
+        structured Validator before and after the backend Hook.
 
         Args:
             linalg_ir: The converted MLIR module (text or object).
@@ -89,6 +100,38 @@ class ITritonToLinalgAdapter(ABC):
         ir_text = str(linalg_ir) if not isinstance(linalg_ir, str) else linalg_ir
         return validator.is_valid(ir_text)
 
+    def compile(
+        self,
+        ttir_module: Any,
+        metadata: dict,
+        *,
+        hook: Optional["AnchorIRBackendHook"],
+        backend_lowering: Optional[Callable[[Any], Any]],
+        spec_version: str = ANCHOR_IR_SPEC_VERSION,
+        track: Union[AnchorIRTrack, str] = AnchorIRTrack.LINALG,
+        context: Any = None,
+        source_name: Optional[str] = None,
+    ) -> "AnchorIRLifecycleReport":
+        """Convert and enter a backend through the strict fail-closed boundary.
+
+        Production backend integrations should call this method instead of
+        invoking ``convert`` and backend lowering independently.
+        """
+
+        from ..pipeline import run_anchor_ir_compilation
+
+        return run_anchor_ir_compilation(
+            self,
+            ttir_module,
+            metadata,
+            hook=hook,
+            backend_lowering=backend_lowering,
+            spec_version=spec_version,
+            track=track,
+            context=context,
+            source_name=source_name,
+        )
+
     def get_required_passes(self) -> List[str]:
         """List of MLIR pass names this adapter requires.
 
@@ -99,9 +142,10 @@ class ITritonToLinalgAdapter(ABC):
     def get_output_dialects(self) -> List[str]:
         """List of MLIR dialects this adapter may produce in its output.
 
-        Used for AnchorIR extension validation — if an adapter produces
-        a dialect not in the AnchorIR whitelist, it must be registered
-        as a DSL extension.
+        This is documentation/diagnostic metadata.  A strict pre-hook boundary
+        does not accept Adapter-specific extensions: every listed output
+        dialect must be present in the selected Track's versioned core policy.
+        Backend extension namespaces are only admitted for post-hook validation.
         """
         return ["linalg", "tensor", "memref", "arith", "math", "scf", "func"]
 

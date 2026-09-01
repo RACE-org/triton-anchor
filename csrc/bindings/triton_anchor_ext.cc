@@ -12,9 +12,28 @@
 //
 //   硬件专有 Pass 由各硬件后端插件负责注册。
 
+#include "AnchorIRValidatorBindings.h"
+
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
+#include "mlir/Dialect/GPU/IR/GPUDialect.h"
+#include "mlir/Dialect/Index/IR/IndexDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/NVGPU/IR/NVGPUDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/Dialect.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
-#include "mlir/IR/Dialect.h"
+#include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/TritonGPU/IR/Dialect.h"
 
 // triton-shared 方言（flir 原生）
 #include "triton-shared/Dialect/TritonStructured/IR/TritonStructuredDialect.h"
@@ -60,11 +79,25 @@ void init_triton_anchor(py::module &&m) {
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     DialectRegistry registry;
     // triton-shared 基础方言（flir 原生）
-    registry.insert<tts::TritonStructuredDialect,
+    registry.insert<affine::AffineDialect, arith::ArithDialect,
+                    bufferization::BufferizationDialect,
+                    cf::ControlFlowDialect, func::FuncDialect,
+                    gpu::GPUDialect, index::IndexDialect,
+                    linalg::LinalgDialect, math::MathDialect,
+                    memref::MemRefDialect, nvgpu::NVGPUDialect,
+                    scf::SCFDialect, tensor::TensorDialect,
+                    vector::VectorDialect, triton::TritonDialect,
+                    triton::gpu::TritonGPUDialect,
+                    tts::TritonStructuredDialect,
                     ttx::TritonTilingExtDialect>();
+    func::registerInlinerExtension(registry);
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });
+
+  // Structured AnchorIR validation and normalization share this same public
+  // module with the 3.3 pass bindings.
+  init_triton_anchor_validator(m);
 
   // Pass 子模块
   auto passes = m.def_submodule("passes", "triton-anchor generic passes");
