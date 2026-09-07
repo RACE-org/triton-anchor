@@ -22,3 +22,5 @@ from .anchor_ir import (
     AnchorIRValidator as AnchorIRValidator,
 )
 from .pipeline import build_ttir_pipeline as build_ttir_pipeline
+from .pipeline import make_anchor_ir as make_anchor_ir
+from .pipeline import resolve_adapter_route_for_compile as resolve_adapter_route_for_compile

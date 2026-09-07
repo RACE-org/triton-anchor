@@ -29,15 +29,15 @@ Future extensibility:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List
+from typing import Any, Dict, List, Tuple
 
 
 class ITritonToLinalgAdapter(ABC):
-    """Abstract interface for TTIR → Linalg conversion adapters.
+    """Abstract interface for TTIR → AnchorIR conversion adapters.
 
     Each adapter wraps a specific pointer analysis + conversion pipeline
-    (e.g., triton-shared or triton-linalg) and must produce AnchorIR-
-    compliant output.
+    (e.g., triton-shared, triton-linalg, or TritonGPU) and must produce
+    AnchorIR-compliant output.
 
     Subclass Contract:
         1. ``name()`` must return a unique string identifier
@@ -95,6 +95,37 @@ class ITritonToLinalgAdapter(ABC):
         Used for documentation and diagnostic purposes.
         """
         return []
+
+    def cache_key_components(self) -> Dict[str, Any]:
+        """Stable adapter identity included in Router metadata/cache keys."""
+        adapter_type = type(self)
+        return {
+            "adapter": self.name(),
+            "adapter_type": f"{adapter_type.__module__}.{adapter_type.__qualname__}",
+        }
+
+    def supported_routes(self) -> List[Tuple[str, str]]:
+        """Return supported ``(anchor_ir_track, ptr_model)`` pairs.
+
+        ``ptr_model="*"`` means every pointer model on that track is accepted.
+        Third-party adapters that predate this hook are treated as compatible
+        unless they override ``supports`` or ``supported_routes``.
+        """
+        return []
+
+    def supports(self, hw: Any) -> bool:
+        """Return whether this adapter can handle the given capability."""
+        routes = self.supported_routes()
+        if not routes:
+            return True
+        track = getattr(hw, "anchor_ir_track", "")
+        track_value = getattr(track, "value", track)
+        ptr_model = getattr(hw, "ptr_model", "")
+        return any(
+            route_track == track_value
+            and (route_ptr_model == "*" or route_ptr_model == ptr_model)
+            for route_track, route_ptr_model in routes
+        )
 
     def get_output_dialects(self) -> List[str]:
         """List of MLIR dialects this adapter may produce in its output.

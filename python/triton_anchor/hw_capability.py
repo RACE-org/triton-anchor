@@ -150,6 +150,7 @@ class HWCapability:
 
     # ── Adapter Override ─────────────────────────────────────────────
     preferred_adapter: Optional[str] = None  # e.g. "triton-shared"
+    adapter_fallback_policy: Literal["managed", "strict"] = "managed"
 
     # triton-shared lowering metadata for spine-style CPU/tensor backends.
     arch_id: Optional[str] = None
@@ -221,6 +222,19 @@ class HWCapability:
             ValueError: If paradigm-specific cap doesn't match compute_paradigm,
                 or if lowering_path is inconsistent.
         """
+        valid_ptr_models = {"structured", "axis_info", "hybrid", "gpu"}
+        if self.ptr_model not in valid_ptr_models:
+            raise ValueError(
+                f"ptr_model must be one of {sorted(valid_ptr_models)} "
+                f"(hw: {self.name})"
+            )
+        valid_fallback_policies = {"managed", "strict"}
+        if self.adapter_fallback_policy not in valid_fallback_policies:
+            raise ValueError(
+                "adapter_fallback_policy must be one of "
+                f"{sorted(valid_fallback_policies)} (hw: {self.name})"
+            )
+
         if self.compute_paradigm == ComputeParadigm.AME_MATRIX:
             if self.matrix_cap is None:
                 raise ValueError(

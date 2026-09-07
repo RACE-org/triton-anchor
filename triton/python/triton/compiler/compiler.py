@@ -234,6 +234,14 @@ class CompileTimer:
         )
 
 
+def _anchor_adapter_route_for_cache(backend, options):
+    try:
+        from triton_anchor.pipeline import resolve_adapter_route_for_compile
+    except ImportError:
+        return None
+    return resolve_adapter_route_for_compile(backend=backend, options=options)
+
+
 def compile(src, target=None, options=None, _env_vars=None):
     compilation_listener = knobs.compilation.listener
     if compilation_listener:
@@ -252,9 +260,12 @@ def compile(src, target=None, options=None, _env_vars=None):
 
     extra_options = src.parse_options()
     options = backend.parse_options(dict(options or dict(), **extra_options))
+    anchor_adapter_route = _anchor_adapter_route_for_cache(backend, options)
     # create cache manager
     env_vars = get_cache_invalidating_env_vars() if _env_vars is None else _env_vars
     key = get_cache_key(src, backend, options, env_vars=env_vars)
+    if anchor_adapter_route is not None:
+        key += f"-{anchor_adapter_route.cache_key()}"
     if knobs.runtime.add_stages_inspection_hook is not None:
         inspect_stages_key, inspect_stages_hash = (
             knobs.runtime.add_stages_inspection_hook()
@@ -298,6 +309,8 @@ def compile(src, target=None, options=None, _env_vars=None):
         **options.__dict__,
         **env_vars,
     }
+    if anchor_adapter_route is not None:
+        metadata.update(anchor_adapter_route.to_metadata())
     metadata["triton_version"] = __version__
     # run compilation pipeline  and populate metadata
     stages = dict()

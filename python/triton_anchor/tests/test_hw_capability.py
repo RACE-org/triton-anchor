@@ -85,3 +85,15 @@ class TestHWCapability:
                 ptr_model="structured",
                 # Missing matrix_cap!
             )
+
+    def test_validation_bad_adapter_fallback_policy(self):
+        with pytest.raises(ValueError, match="adapter_fallback_policy"):
+            HWCapability(
+                name="bad",
+                arch_family="tpu",
+                compute_paradigm=ComputeParadigm.TENSOR_PROCESSOR,
+                anchor_ir_track=AnchorIRTrack.LINALG,
+                ptr_model="hybrid",
+                adapter_fallback_policy="loose",
+                tensor_cap=TensorCapability(),
+            )

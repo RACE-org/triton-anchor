@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import re
 import traceback
-from typing import Any, List
+from typing import Any, List, Tuple
 
 from .base import ILinalgPybindAdapter, AdapterConversionError
 
@@ -99,6 +99,8 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
         kernel_name = self._extract_kernel_name(ttir_module)
         if kernel_name:
             metadata.setdefault("name", kernel_name)
+        metadata["anchor_adapter_effective"] = self.name()
+        metadata["anchor_adapter_mode"] = "axis_info"
 
         # Build and run the pass pipeline
         pm = ir.pass_manager(ttir_module.context)
@@ -167,6 +169,9 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
             "cse",
             "licm",
         ]
+
+    def supported_routes(self) -> List[Tuple[str, str]]:
+        return [("linalg", "axis_info")]
 
     def get_output_dialects(self) -> List[str]:
         return [

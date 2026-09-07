@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Optional, Tuple, TYPE_CHECKING
 
 from .base import ITritonToLinalgAdapter
+from .router import AdapterNotFoundError, AdapterRoute, AdapterRouter
 
 if TYPE_CHECKING:
     from ..hw_capability import HWCapability
@@ -52,11 +53,53 @@ class AdapterRegistry:
         cls._adapters[name] = adapter
 
     @classmethod
+    def register_builtins(cls) -> None:
+        """Register triton-anchor's built-in adapters."""
+        builtin_factories = (
+            (
+                "triton-shared",
+                lambda: __import__(
+                    "triton_anchor.adapters.triton_shared_adapter",
+                    fromlist=["TritonSharedAdapter"],
+                ).TritonSharedAdapter(mode="structured"),
+            ),
+            (
+                "triton-linalg",
+                lambda: __import__(
+                    "triton_anchor.adapters.triton_linalg_adapter",
+                    fromlist=["TritonLinalgAdapter"],
+                ).TritonLinalgAdapter(),
+            ),
+            (
+                "hybrid",
+                lambda: __import__(
+                    "triton_anchor.adapters.hybrid_adapter",
+                    fromlist=["HybridAdapter"],
+                ).HybridAdapter(),
+            ),
+            (
+                "triton-gpu",
+                lambda: __import__(
+                    "triton_anchor.adapters.triton_gpu_adapter",
+                    fromlist=["TritonGPUAdapter"],
+                ).TritonGPUAdapter(),
+            ),
+        )
+        for name, factory in builtin_factories:
+            if name in cls._adapters:
+                continue
+            try:
+                cls.register(factory())
+            except ImportError as exc:
+                logger.debug("Built-in adapter '%s' unavailable: %s", name, exc)
+
+    @classmethod
     def discover(cls) -> None:
         """Auto-discover adapters from ``entry_points("triton.adapters")``."""
         if cls._discovered:
             return
         cls._discovered = True
+        cls.register_builtins()
         try:
             eps = importlib.metadata.entry_points(group="triton.adapters")
         except TypeError:
@@ -76,7 +119,29 @@ class AdapterRegistry:
         return cls._adapters.get(name)
 
     @classmethod
-    def get_adapter(cls, hw: HWCapability) -> ITritonToLinalgAdapter:
+    def resolve(
+        cls, hw: HWCapability, metadata: Optional[dict] = None
+    ) -> Tuple[ITritonToLinalgAdapter, AdapterRoute]:
+        """Resolve an adapter and record a deterministic Router decision.
+
+        Selection is intentionally fail-closed: unsupported ``ptr_model``
+        values or missing adapters raise ``AdapterNotFoundError`` instead of
+        falling back to whichever adapter happened to be registered first.
+        Hybrid conversion fallback is handled inside ``HybridAdapter``.
+        """
+        cls.discover()
+        return AdapterRouter(cls._adapters).resolve(hw, metadata=metadata)
+
+    @classmethod
+    def get_route(cls, hw: HWCapability, metadata: Optional[dict] = None) -> AdapterRoute:
+        """Return only the deterministic route metadata for ``hw``."""
+        _, route = cls.resolve(hw, metadata=metadata)
+        return route
+
+    @classmethod
+    def get_adapter(
+        cls, hw: HWCapability, metadata: Optional[dict] = None
+    ) -> ITritonToLinalgAdapter:
         """Select the best adapter for the given hardware capability.
 
         Selection logic:
@@ -85,7 +150,7 @@ class AdapterRegistry:
              - "structured" → TritonSharedAdapter
              - "axis_info"  → TritonLinalgAdapter
              - "hybrid"     → HybridAdapter
-             - "gpu"        → None (GPU path doesn't use Linalg adapters)
+             - "gpu"        → TritonGPUAdapter
 
         Args:
             hw: The target hardware capability.
@@ -96,33 +161,8 @@ class AdapterRegistry:
         Raises:
             AdapterNotFoundError: If no suitable adapter is found.
         """
-        cls.discover()
-        # 1. Explicit preference
-        if hw.preferred_adapter:
-            adapter = cls._adapters.get(hw.preferred_adapter)
-            if adapter:
-                return adapter
-            raise AdapterNotFoundError(
-                f"Preferred adapter '{hw.preferred_adapter}' not found. "
-                f"Available: {list(cls._adapters.keys())}"
-            )
-        # 2. Automatic selection by ptr_model
-        model_to_adapter = {
-            "structured": "triton-shared",
-            "axis_info": "triton-shared",
-            "hybrid": "triton-shared",
-        }
-        adapter_name = model_to_adapter.get(hw.ptr_model)
-        if adapter_name and adapter_name in cls._adapters:
-            return cls._adapters[adapter_name]
-
-        if cls._adapters:
-            return next(iter(cls._adapters.values()))
-
-        raise AdapterNotFoundError(
-            f"No adapters available for ptr_model='{hw.ptr_model}'. "
-            f"Install the triton-anchor wheel with triton-shared support."
-        )
+        adapter, _route = cls.resolve(hw, metadata=metadata)
+        return adapter
 
     @classmethod
     def list_adapters(cls) -> Dict[str, str]:
@@ -137,12 +177,8 @@ class AdapterRegistry:
         cls._discovered = False
 
 
-class AdapterNotFoundError(Exception):
-    """Raised when no suitable adapter is found."""
-
-    pass
-
-
-def get_adapter(hw: HWCapability) -> ITritonToLinalgAdapter:
+def get_adapter(
+    hw: HWCapability, metadata: Optional[dict] = None
+) -> ITritonToLinalgAdapter:
     """Shortcut for ``AdapterRegistry.get_adapter(hw)``."""
-    return AdapterRegistry.get_adapter(hw)
+    return AdapterRegistry.get_adapter(hw, metadata=metadata)

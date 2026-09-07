@@ -7,10 +7,6 @@ from .base import (
     AdapterConversionError as AdapterConversionError,
 )
 from .registry import AdapterRegistry as AdapterRegistry, get_adapter as get_adapter
+from .router import AdapterRouter as AdapterRouter, AdapterRoute as AdapterRoute
 
-try:
-    from .triton_shared_adapter import TritonSharedAdapter
-
-    AdapterRegistry.register(TritonSharedAdapter())
-except ImportError:
-    pass
+AdapterRegistry.register_builtins()
