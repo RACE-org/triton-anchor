@@ -35,7 +35,8 @@
 namespace py = pybind11;
 using namespace mlir;
 
-// 注册通用 triton-shared Pass（供 triton-anchor 本身或下游后端调用）
+// 注册通用 triton-shared Pass（供 triton-anchor 本身或下游后端调用）。
+// Python path: triton._C.libtriton.anchor.passes
 void init_triton_anchor_passes(py::module &&m) {
   // flir 原生通用 Pass
   ADD_PASS_WRAPPER_0("add_triton_to_linalg",
@@ -51,6 +52,8 @@ void init_triton_anchor_passes(py::module &&m) {
 
   // 通用优化 Pass（便于后端直接使用）
   ADD_PASS_WRAPPER_0("add_cse", createCSEPass);
+  ADD_PASS_WRAPPER_0("add_canonicalizer", createCanonicalizerPass);
+  // Backward-compatible alias kept for older anchor-side callers.
   ADD_PASS_WRAPPER_0("add_canonicalize", createCanonicalizerPass);
 }
 

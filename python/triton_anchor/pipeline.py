@@ -13,7 +13,7 @@ The pipeline also supports conditional passes controlled by ``HWCapability``.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
 if TYPE_CHECKING:
     from .hw_capability import HWCapability
@@ -129,6 +129,77 @@ def make_ttir(mod, metadata: dict, hw: Optional[HWCapability] = None):
     return mod
 
 
+def route_adapter(
+    hw: HWCapability,
+    *,
+    backend_capabilities: Iterable[str],
+    metadata: Optional[dict] = None,
+    user_config: Optional[Mapping[str, Any]] = None,
+    op_coverage: Any = None,
+):
+    """Select the TTIR -> AnchorIR adapter for a post-TTIR kernel."""
+    from .adapters.router import AdapterRouter
+
+    return AdapterRouter().route(
+        hw,
+        backend_capabilities=backend_capabilities,
+        user_config=user_config,
+        op_coverage=op_coverage,
+        metadata=metadata,
+    )
+
+
+def convert_ttir_to_anchor_ir(
+    mod,
+    metadata: dict,
+    hw: HWCapability,
+    *,
+    backend_capabilities: Iterable[str],
+    user_config: Optional[Mapping[str, Any]] = None,
+    op_coverage: Any = None,
+):
+    """Route and convert optimized TTIR to the selected AnchorIR track."""
+    route = route_adapter(
+        hw,
+        backend_capabilities=backend_capabilities,
+        metadata=metadata,
+        user_config=user_config,
+        op_coverage=op_coverage,
+    )
+    context = route.conversion_context(hw)
+    anchor_ir = route.adapter.convert(mod, metadata, context)
+    decision = getattr(route, "decision", None)
+    anchor_ir_track = getattr(decision, "anchor_ir_track", hw.anchor_ir_track)
+    selected_adapter = getattr(
+        decision,
+        "selected_adapter",
+        metadata.get("adapter_decision", {}).get("selected_adapter", route.adapter.name()),
+    )
+    validate_anchor_ir_after_adapter(
+        anchor_ir,
+        anchor_ir_track,
+        context=f"adapter '{selected_adapter}'",
+    )
+    return anchor_ir
+
+
+def validate_anchor_ir_after_adapter(anchor_ir, track, *, context: str = "") -> None:
+    """Validate Adapter output before backend hooks consume AnchorIR."""
+    from .anchor_ir import AnchorIRError, AnchorIRValidator
+
+    validator = AnchorIRValidator(track=track)
+    ir_text = anchor_ir if isinstance(anchor_ir, str) else str(anchor_ir)
+    violations = validator.validate_pre_hook(ir_text)
+    if not violations:
+        return
+
+    header = "AnchorIR pre-hook validation failed"
+    if context:
+        header += f" for {context}"
+    details = "\n".join(str(violation) for violation in violations)
+    raise AnchorIRError(f"{header}:\n{details}")
+
+
 def inject_hw_attributes(mod, hw: HWCapability, metadata: dict):
     """将硬件能力信息注入 MLIR module 属性和编译元数据中。
 
@@ -163,3 +234,5 @@ def inject_hw_attributes(mod, hw: HWCapability, metadata: dict):
     metadata["hw_name"] = hw.name
     metadata["hw_paradigm"] = hw.compute_paradigm.value
     metadata["hw_arch_family"] = hw.arch_family
+    metadata["anchor_ir_track"] = hw.anchor_ir_track.value
+    metadata["ptr_model"] = hw.ptr_model

@@ -1,16 +1,16 @@
 """
-ITritonToLinalgAdapter — Adapter Pattern Interface
-====================================================
+Anchor Adapter Interfaces
+=========================
 
-The adapter pattern allows the unified frontend to support two
-fundamentally different pointer analysis / lowering strategies:
+The adapter pattern allows the unified frontend to support multiple
+post-TTIR AnchorIR tracks:
 
-  1. **triton-shared** — Structured/Unstructured dual-path pointer analysis
-     (used by spine-triton, from Microsoft)
-  2. **triton-linalg** — AxisInfo unified analysis
-     (used by triton_race, from Cambricon)
+  1. **triton-gpu** — TritonGPU AnchorIR track for GPGPU backends
+  2. **triton-shared** — Structured pointer analysis for Linalg track
+  3. **triton-linalg** — AxisInfo-style Linalg track path
+  4. **hybrid** — Structured first, Router-authorized AxisInfo fallback
 
-Both adapters must produce output that conforms to the **AnchorIR** spec.
+All adapters must produce output that conforms to the **AnchorIR** spec.
 
 ABI Isolation Strategy (v0.1.3):
   Two adapter base classes provide clean ABI separation:
@@ -22,18 +22,56 @@ ABI Isolation Strategy (v0.1.3):
   are compiled into the host libtriton.so.
 
 Future extensibility:
-  - HybridAdapter: tries Structured first, falls back to AxisInfo
   - Custom adapters: new analysis methods via plugin
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Optional, Tuple
+
+from ..anchor_ir import AnchorIRTrack
+
+PtrModel = str
 
 
-class ITritonToLinalgAdapter(ABC):
-    """Abstract interface for TTIR → Linalg conversion adapters.
+@dataclass(frozen=True)
+class AdapterInfo:
+    """Declarative capability summary for one Anchor adapter.
+
+    The registry stores adapter instances; the router reads this immutable
+    description to decide whether an adapter can serve a specific AnchorIR
+    track, pointer model, backend capability set, and kernel op coverage.
+    """
+
+    name: str
+    supported_tracks: Tuple[AnchorIRTrack, ...]
+    supported_ptr_models: Tuple[PtrModel, ...]
+    required_backend_capabilities: Tuple[str, ...] = ()
+    supported_ops: Optional[Tuple[str, ...]] = None
+    supports_internal_fallback: bool = False
+
+
+@dataclass
+class AdapterConversionContext:
+    """Context passed from ``AdapterRouter`` to ``convert()``.
+
+    ``fallback_authorized`` is intentionally explicit.  Adapters such as
+    ``HybridAdapter`` may contain multiple conversion paths, but they must not
+    enter a weaker path unless the router granted that policy decision.
+    """
+
+    hw: Any = None
+    decision: Any = None
+    fallback_authorized: bool = False
+    fallback_candidates: Tuple[str, ...] = ()
+    metadata_key: str = "adapter_decision"
+    extras: Mapping[str, Any] = field(default_factory=dict)
+
+
+class IAnchorAdapter(ABC):
+    """Abstract interface for TTIR → AnchorIR conversion adapters.
 
     Each adapter wraps a specific pointer analysis + conversion pipeline
     (e.g., triton-shared or triton-linalg) and must produce AnchorIR-
@@ -42,7 +80,8 @@ class ITritonToLinalgAdapter(ABC):
     Subclass Contract:
         1. ``name()`` must return a unique string identifier
         2. ``convert()`` must produce valid AnchorIR from an optimized TTIR module
-        3. ``validate_output()`` should check AnchorIR compliance (optional override)
+        3. ``describe()`` should expose routable adapter capabilities
+        4. ``validate_output()`` should check AnchorIR compliance (optional override)
     """
 
     @abstractmethod
@@ -52,7 +91,7 @@ class ITritonToLinalgAdapter(ABC):
 
     @abstractmethod
     def convert(self, ttir_module: Any, metadata: dict, context: Any = None) -> Any:
-        """Convert an optimized TTIR module to Linalg IR (AnchorIR).
+        """Convert an optimized TTIR module to AnchorIR.
 
         Args:
             ttir_module: The MLIR module after TTIR optimization.
@@ -70,6 +109,46 @@ class ITritonToLinalgAdapter(ABC):
             AdapterConversionError: If the conversion fails.
         """
         ...
+
+    def describe(self) -> AdapterInfo:
+        """Return routable capabilities for this adapter.
+
+        Subclasses should override at least ``supported_ptr_models`` and
+        ``required_backend_capabilities``.  The default is a conservative
+        Linalg-track adapter with no pointer-model match.
+        """
+        return AdapterInfo(
+            name=self.name(),
+            supported_tracks=self.get_supported_tracks(),
+            supported_ptr_models=self.get_supported_ptr_models(),
+            required_backend_capabilities=self.get_required_backend_capabilities(),
+            supported_ops=self.get_supported_ops(),
+            supports_internal_fallback=self.supports_internal_fallback(),
+        )
+
+    def get_supported_tracks(self) -> Tuple[AnchorIRTrack, ...]:
+        """AnchorIR tracks this adapter can produce."""
+        return (AnchorIRTrack.LINALG,)
+
+    def get_supported_ptr_models(self) -> Tuple[PtrModel, ...]:
+        """Pointer models this adapter natively supports."""
+        return ()
+
+    def get_required_backend_capabilities(self) -> Tuple[str, ...]:
+        """Backend capabilities required to consume this adapter's output."""
+        return ()
+
+    def get_supported_ops(self) -> Optional[Tuple[str, ...]]:
+        """Triton op coverage for this adapter.
+
+        ``None`` means the adapter does not declare op-level coverage.  ``("*",)``
+        means it claims complete coverage for router purposes.
+        """
+        return None
+
+    def supports_internal_fallback(self) -> bool:
+        """Whether the adapter may contain multiple conversion paths."""
+        return False
 
     def validate_output(self, linalg_ir: Any) -> bool:
         """Validate that the adapter output conforms to AnchorIR.
@@ -89,14 +168,14 @@ class ITritonToLinalgAdapter(ABC):
         ir_text = str(linalg_ir) if not isinstance(linalg_ir, str) else linalg_ir
         return validator.is_valid(ir_text)
 
-    def get_required_passes(self) -> List[str]:
+    def get_required_passes(self) -> list[str]:
         """List of MLIR pass names this adapter requires.
 
         Used for documentation and diagnostic purposes.
         """
         return []
 
-    def get_output_dialects(self) -> List[str]:
+    def get_output_dialects(self) -> list[str]:
         """List of MLIR dialects this adapter may produce in its output.
 
         Used for AnchorIR extension validation — if an adapter produces
@@ -104,6 +183,12 @@ class ITritonToLinalgAdapter(ABC):
         as a DSL extension.
         """
         return ["linalg", "tensor", "memref", "arith", "math", "scf", "func"]
+
+
+class ITritonToLinalgAdapter(IAnchorAdapter, ABC):
+    """Abstract interface for TTIR → Linalg-track adapters."""
+
+    pass
 
 
 # ═══════════════════════════════════════════════════════════════════════
