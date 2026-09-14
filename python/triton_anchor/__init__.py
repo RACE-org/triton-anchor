@@ -11,7 +11,7 @@ Architecture:
   Layer 2.5 — AnchorIR Spec      (core invariant: dual-track dialect whitelist)
 """
 
-__version__ = "0.2.0"
+from ._version import __version__ as __version__
 
 from .hw_capability import (
     HWCapability as HWCapability,

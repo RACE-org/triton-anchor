@@ -6,8 +6,12 @@ triton-anchor: 统一构建脚本
 2. 将编译产物复制到正确的 Python 包目录
 3. 同时安装 triton 和 triton_anchor 两个包
 """
+import hashlib
+import json
 import os
 import platform
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +31,284 @@ from distutils.command.clean import clean
 
 def get_base_dir():
     return os.path.abspath(os.path.dirname(__file__))
+
+
+def get_version_constants():
+    """Read version constants without importing triton_anchor."""
+    version_file = Path(get_base_dir()) / "python" / "triton_anchor" / "_version.py"
+    namespace = {}
+    exec(compile(version_file.read_text(encoding="utf-8"), str(version_file), "exec"), namespace)
+    return namespace
+
+
+VERSION_CONSTANTS = get_version_constants()
+BUILD_INFO_SCHEMA_VERSION = "1.1"
+CORE_ABI_FINGERPRINT_SCHEMA = "triton-anchor-core-abi-v1"
+
+
+def _first_match(path, pattern):
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(pattern, text, flags=re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def _read_cmake_cache(cmake_dir):
+    cache = {}
+    cache_path = Path(cmake_dir) / "CMakeCache.txt"
+    try:
+        lines = cache_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return cache
+    for line in lines:
+        if not line or line.startswith(("//", "#")) or "=" not in line:
+            continue
+        key_and_type, value = line.split("=", 1)
+        key = key_and_type.split(":", 1)[0]
+        cache[key] = value
+    return cache
+
+
+def _read_compiler_info(cmake_dir):
+    compiler_files = sorted(
+        Path(cmake_dir).glob("CMakeFiles/*/CMakeCXXCompiler.cmake")
+    )
+    if not compiler_files:
+        return None, None
+    compiler_file = compiler_files[-1]
+    compiler_id = _first_match(
+        compiler_file, r'^set\(CMAKE_CXX_COMPILER_ID "([^"]+)"\)'
+    )
+    compiler_version = _first_match(
+        compiler_file, r'^set\(CMAKE_CXX_COMPILER_VERSION "([^"]+)"\)'
+    )
+    return compiler_id, compiler_version
+
+
+def _read_llvm_version(llvm_dir):
+    if not llvm_dir:
+        return None
+    value = _first_match(
+        Path(llvm_dir) / "LLVMConfig.cmake",
+        r"^set\(LLVM_PACKAGE_VERSION ([^)]+)\)",
+    )
+    return value.strip().strip("\"'") if value else None
+
+
+def _read_mlir_version(mlir_dir):
+    """Read MLIR's own package metadata without copying LLVM's result."""
+    if not mlir_dir:
+        return None
+    config_path = Path(mlir_dir) / "MLIRConfig.cmake"
+    patterns = (
+        r"^set\(MLIR_PACKAGE_VERSION ([^)]+)\)",
+        r"^set\(MLIR_VERSION ([^)]+)\)",
+        # Current upstream MLIRConfig.cmake records the llvm-project version
+        # under LLVM_VERSION rather than defining an MLIR-specific variable.
+        r"^set\(LLVM_PACKAGE_VERSION ([^)]+)\)",
+        r"^set\(LLVM_VERSION ([^)]+)\)",
+    )
+    for pattern in patterns:
+        value = _first_match(config_path, pattern)
+        if value:
+            return value.strip().strip("\"'")
+    return None
+
+
+def _toolchain_root(package_dir):
+    if not package_dir:
+        return None
+    try:
+        # .../<toolchain>/lib/cmake/{llvm,mlir}
+        return Path(package_dir).resolve().parents[2]
+    except (OSError, IndexError):
+        return None
+
+
+def _read_toolchain_commit(package_dir):
+    """Read the revision embedded by the toolchain that is actually in use."""
+    root = _toolchain_root(package_dir)
+    if root is None:
+        return None
+    revision = _first_match(
+        root / "include" / "llvm" / "Support" / "VCSRevision.h",
+        r'^\s*#define\s+LLVM_REVISION\s+"([0-9a-fA-F]{40})"\s*$',
+    )
+    return revision.lower() if revision else None
+
+
+def _read_cxx11_abi(cache):
+    """Ask the configured C++ compiler which libstdc++ ABI it will use."""
+    compiler = cache.get("CMAKE_CXX_COMPILER")
+    if not compiler:
+        return None
+
+    build_type = (cache.get("CMAKE_BUILD_TYPE") or get_build_type()).upper()
+    raw_flags = " ".join(
+        value
+        for value in (
+            cache.get("CMAKE_CXX_COMPILER_ARG1", ""),
+            cache.get("CMAKE_CXX_FLAGS", ""),
+            cache.get("CMAKE_CXX_FLAGS_" + build_type, ""),
+        )
+        if value
+    )
+    try:
+        flags = shlex.split(raw_flags)
+        completed = subprocess.run(
+            [compiler] + flags + ["-dM", "-E", "-x", "c++", "-"],
+            input="#include <string>\n",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if completed.returncode != 0:
+        return None
+    match = re.search(
+        r"^#define\s+_GLIBCXX_USE_CXX11_ABI\s+([01])\s*$",
+        completed.stdout,
+        flags=re.MULTILINE,
+    )
+    return match.group(1) if match else None
+
+
+def _sha256_file(path):
+    if path is None:
+        return None
+    digest = hashlib.sha256()
+    try:
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return "sha256:" + digest.hexdigest()
+
+
+def _core_abi_material(build_info):
+    """Return complete ABI inputs, or None when any critical fact is unknown."""
+    keys = (
+        "core_version",
+        "vendored_triton_commit",
+        "actual_llvm_version_raw",
+        "actual_llvm_commit",
+        "actual_mlir_version_raw",
+        "actual_mlir_commit",
+        "cxx_standard",
+        "cxx_compiler_id",
+        "cxx_compiler_version",
+        "cxx11_abi",
+        "built_python_soabi",
+        "built_platform",
+        "ttgpu",
+        "core_library_sha256",
+    )
+    material = {key: build_info.get(key) for key in keys}
+    if any(value is None or value == "" for value in material.values()):
+        return None
+    return material
+
+
+def _compute_core_abi_fingerprint(build_info):
+    material = _core_abi_material(build_info)
+    if material is None:
+        return None
+    payload = {
+        "schema": CORE_ABI_FINGERPRINT_SCHEMA,
+        "material": material,
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def collect_build_info(cmake_dir=None, core_library=None):
+    """Collect reproducible build metadata without recording host paths."""
+    base_dir = Path(get_base_dir())
+    cmake_dir = Path(cmake_dir) if cmake_dir is not None else get_cmake_dir()
+    cache = _read_cmake_cache(cmake_dir)
+    compiler_id, compiler_version = _read_compiler_info(cmake_dir)
+
+    triton_version = _first_match(
+        base_dir / "triton" / "python" / "triton" / "__init__.py",
+        r"^__version__\s*=\s*['\"]([^'\"]+)['\"]",
+    )
+    triton_commit = _first_match(
+        base_dir / "triton" / "TRITON_VERSION",
+        r"^# Commit:\s*([0-9a-fA-F]+)\s*$",
+    )
+    expected_llvm_commit = (
+        base_dir / "triton" / "cmake" / "llvm-hash.txt"
+    ).read_text(encoding="utf-8").strip()
+
+    llvm_dir = cache.get("LLVM_DIR")
+    mlir_dir = cache.get("MLIR_DIR")
+    actual_llvm_version = _read_llvm_version(llvm_dir)
+    actual_mlir_version = _read_mlir_version(mlir_dir)
+    actual_llvm_commit = _read_toolchain_commit(llvm_dir)
+    actual_mlir_commit = _read_toolchain_commit(mlir_dir)
+    core_library_sha256 = _sha256_file(core_library)
+
+    build_info = {
+        "schema_version": BUILD_INFO_SCHEMA_VERSION,
+        "generated": True,
+        "core_version": VERSION_CONSTANTS["CORE_VERSION"],
+        "backend_protocol_version": VERSION_CONSTANTS[
+            "BACKEND_PLUGIN_PROTOCOL_VERSION"
+        ],
+        "manifest_schema_version": VERSION_CONSTANTS[
+            "BACKEND_MANIFEST_SCHEMA_VERSION"
+        ],
+        "triton_version": triton_version,
+        "vendored_triton_commit": triton_commit,
+        "expected_llvm_project_commit": expected_llvm_commit,
+        # An external LLVM_SYSPATH can point at any compatible installation.
+        # A pin is not evidence of the linked installation's exact commit.
+        "actual_llvm_version_raw": actual_llvm_version,
+        "actual_llvm_commit": actual_llvm_commit,
+        "actual_mlir_version_raw": actual_mlir_version,
+        "actual_mlir_commit": actual_mlir_commit,
+        "cxx_standard": "17",
+        "cxx_compiler_id": compiler_id,
+        "cxx_compiler_version": compiler_version,
+        "cxx11_abi": _read_cxx11_abi(cache),
+        "build_type": cache.get("CMAKE_BUILD_TYPE") or get_build_type(),
+        "ttgpu": "TTGPU" in os.environ,
+        "built_python_version": platform.python_version(),
+        "built_python_soabi": sysconfig.get_config_var("SOABI"),
+        "built_platform": sysconfig.get_platform(),
+        "core_abi_fingerprint_schema": CORE_ABI_FINGERPRINT_SCHEMA,
+        "core_library_sha256": core_library_sha256,
+        "core_abi_fingerprint": None,
+    }
+    build_info["core_abi_fingerprint"] = _compute_core_abi_fingerprint(build_info)
+    return build_info
+
+
+def write_build_info(destination, cmake_dir=None, core_library=None):
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(
+            collect_build_info(cmake_dir, core_library),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def get_cmake_dir():
@@ -63,7 +345,15 @@ class CMakeClean(clean):
 class CMakeBuildPy(build_py):
     def run(self):
         self.run_command('build_ext')
-        return super().run()
+        super().run()
+        core_library = (
+            Path(self.build_lib) / "triton" / "_C" / "libtriton.so"
+        )
+        write_build_info(
+            Path(self.build_lib) / "triton_anchor" / "_build_info.json",
+            get_cmake_dir(),
+            core_library,
+        )
 
 
 class CMakeExtension(Extension):
@@ -186,6 +476,7 @@ def get_packages():
         # triton-anchor 编译框架
         "triton_anchor",
         "triton_anchor.adapters",
+        "triton_anchor.backends",
         "triton_anchor.extensions",
         "triton_anchor.language",
         "triton_anchor.tests",
@@ -195,7 +486,7 @@ def get_packages():
 
 setup(
     name="triton-anchor",
-    version="0.2.0",
+    version=VERSION_CONSTANTS["CORE_VERSION"],
     author="Triton Anchor Contributors",
     description="Unified Triton Compilation Frontend for custom AI accelerators",
     long_description="",
@@ -205,11 +496,20 @@ setup(
         "triton": "triton/python/triton",
     },
     packages=get_packages(),
-    install_requires=[],
+    install_requires=["packaging>=21"],
     package_data={
         "triton.tools": ["compile.h", "compile.c"],
         "triton": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
-        "triton_anchor": ["include/**/*.h", "include/**/*.hpp", "include/**/*.inc", "include/**/*.def", "include/**/*.td"],
+        "triton_anchor": [
+            "_build_info.json",
+            "backends/schemas/*.json",
+            "backends/examples/*.json",
+            "include/**/*.h",
+            "include/**/*.hpp",
+            "include/**/*.inc",
+            "include/**/*.def",
+            "include/**/*.td",
+        ],
     },
     exclude_package_data={
         "triton_anchor": [] if is_ttgpu_enabled() else ["include/ttgpu/*", "include/ttgpu/**/*"],
