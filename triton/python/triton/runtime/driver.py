@@ -5,6 +5,8 @@ from triton_anchor.backends import BackendPluginError
 from triton_anchor.backends import BackendPluginLifecycleError
 from triton_anchor.backends import BackendPluginSelectionError
 
+from ..backends import _has_manifest_records
+from ..backends import _legacy_target_error
 from ..backends import activate_backend
 from ..backends import DriverBase
 from ..backends import get_backend
@@ -39,6 +41,29 @@ def _create_driver():
                 ),
             ) from exc
 
+    prepared = {}
+    if len(actives) > 1 and _has_manifest_records():
+        # Legacy target ownership is unknown until its active driver reports
+        # a real target. Do not infer it from an entry-point name or a dummy
+        # architecture passed to compiler.supports_target().
+        eligible = []
+        ownership_errors = []
+        for backend in actives:
+            if backend.record_id is None:
+                active_driver, target = _construct_driver(backend)
+                error = _legacy_target_error(backend, target)
+                if error is not None:
+                    # This Legacy target is governed, including when its
+                    # Manifest is inactive or rejected. Other targets remain
+                    # eligible; preserve the error if none can be selected.
+                    ownership_errors.append(error)
+                    continue
+                prepared[id(backend)] = (active_driver, target)
+            eligible.append(backend)
+        actives = eligible
+        if not actives and ownership_errors:
+            raise ownership_errors[0]
+
     if not actives:
         raise BackendPluginSelectionError(
             "No Registry-selected backend driver is active",
@@ -67,6 +92,14 @@ def _create_driver():
         )
 
     backend = actives[0]
+    active_driver, target = prepared.get(id(backend), (None, None))
+    if active_driver is None:
+        active_driver, target = _construct_driver(backend)
+    activate_backend(backend, target=target)
+    return active_driver
+
+
+def _construct_driver(backend):
     try:
         active_driver = backend.driver()
     except BackendPluginError:
@@ -101,8 +134,7 @@ def _create_driver():
                 "the same Registry record."
             ),
         ) from exc
-    activate_backend(backend, target=target)
-    return active_driver
+    return active_driver, target
 
 
 class LazyProxy:
