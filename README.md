@@ -7,7 +7,7 @@
 <!-- badges -->
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
-  <a href="../../actions/workflows/ci.yml"><img src="https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white" alt="CI"></a>
+  <a href="../../actions/workflows/ci-gateway.yml"><img src="https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10%2B-3776ab.svg" alt="Python 3.9+"></a>
   <a href="ROADMAP.md"><img src="https://img.shields.io/badge/Status-v0.1-orange.svg" alt="Status"></a>
 </p>
@@ -286,11 +286,11 @@ uv pip install -e ".[dev]"
 # 运行单元测试
 pytest python/triton_anchor/tests/ -v
 
-# 运行 Local CI/Codex 契约测试
-pytest scripts/local_ci/codex_ai/tests scripts/local_ci/tests scripts/local_ci/results/tests -v
+# 按需运行 Local CI 与 GitHub 网关行为回归
+pytest scripts/local_ci/tests -q --import-mode=importlib
 ```
 
-> 更详细的 Local CI 使用、维护和故障排查说明见 `scripts/local_ci/README.md` 和 `scripts/local_ci/DEVELOPMENT_GUIDE.md`。
+> 更详细的 Local CI 使用、维护和故障排查说明见 `scripts/local_ci/README.md`。
 
 ```bash
 # 代码风格检查
@@ -311,14 +311,16 @@ triton-anchor/
 │   └── custom_backend.md        #   自定义硬件后端接入指南
 ├── tests/                       # 产品级和端到端测试
 │   └── test_smoke.py            #   安装后 smoke、binding 和编译链路测试
-├── scripts/local_ci/            # Local CI 控制面及模块内契约测试
+├── scripts/ci/                  # GitHub 网关与安全扫描
+├── scripts/local_ci/            # 服务器 Local CI 实现与统一测试
 │   ├── README.md                #   Local CI 使用说明
-│   ├── DEVELOPMENT_GUIDE.md     #   Local CI 长期开发指南
-│   ├── tests/                   #   Local CI 布局测试
-│   ├── codex_ai/tests/          #   Codex prompt、报告和容器 harness
-│   └── results/tests/           #   Gitee/GitHub bridge 测试
+│   ├── agent_ci/                #   Worker、原生 Codex CLI、任务状态与 Git 发布
+│   ├── prepare/                 #   Rootless 环境与部署
+│   ├── maintenance/             #   健康、watchdog 与本地保留
+│   ├── tools/                   #   构建、安装、测试与性能工具入口
+│   └── tests/                   #   必要的 CI 行为回归
 ├── .github/                     # GitHub 配置
-│   ├── workflows/ci.yml         #   CI 流水线（lint + 单元测试）
+│   ├── workflows/               #   Local CI 编排、功能检查与维护任务
 │   └── ISSUE_TEMPLATE/          #   Issue 模板（Feature Request / Bug Report）
 ├── ROADMAP.md                   # 项目路线图
 ├── CMakeLists.txt               # CMake 顶层构建
@@ -493,7 +495,7 @@ pytest tests/ -v
 
 ### 9.3 CI
 
-项目已配置 [GitHub Actions Basic CI](.github/workflows/ci_basic.yml)，每次 push / PR 自动运行：
+项目已配置 [Local CI 编排工作流](.github/workflows/ci-gateway.yml)，在受支持的 push / PR 事件中调用按功能拆分的检查：
 
 | Job | 内容 | 矩阵 |
 |-----|------|------|

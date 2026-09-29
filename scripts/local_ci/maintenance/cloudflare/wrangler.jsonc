@@ -1,0 +1,22 @@
+{
+  "name": "local-ci-alert-race-v2",
+  "account_id": "63650d963c6b55e0d39ecf555dd6c6e0",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-17",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "ALERT_STATE",
+      "id": "59be2c4a3012435ba5b4da0df7e96536"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  }
+}

@@ -1,0 +1,267 @@
+{
+  "schema": "triton-anchor-local-ci-config",
+  "state_dir": "",
+  "control_root": "",
+  "container_control_root": "/opt/local-ci/control",
+  "control_repo_url": "",
+  "control_branch": "CI_dev",
+  "worker_id": "",
+  "gitee_repo_url": "",
+  "gitee_username": "",
+  "health_repo_url": "",
+  "health_token_env": "GITEE_HEALTH_TOKEN",
+  "repositories": [
+    "RACE-org/triton-anchor"
+  ],
+  "python_bin": "",
+  "container_python": "/opt/venv/bin/python",
+  "docker_bin": "docker",
+  "codex_bin": "",
+  "codex_home": "",
+  "runtime": {
+    "kind": "docker-rootless",
+    "endpoint": "",
+    "context": "",
+    "service": "docker.service"
+  },
+  "resources": {
+    "cpus": null,
+    "memory_bytes": null,
+    "pids_limit": null
+  },
+  "identities": {
+    "task": 11001,
+    "gid": 11001
+  },
+  "poll_interval_seconds": 60,
+  "heartbeat_stale_seconds": 180,
+  "codex_timeout_seconds": 21600,
+  "codex_attempts": 10,
+  "retry_delay_seconds": 30,
+  "results_retention_days": 30,
+  "task_workspace_max_bytes": 107374182400,
+  "cleanup_timeout_seconds": 60,
+  "management_timeout_seconds": 600,
+  "max_jobs": 12,
+  "generation_retention_hours": 72,
+  "minimum_free_bytes": 10737418240,
+  "profiles": {
+    "triton_v3.0": {
+      "name": "triton-3.0",
+      "triton_version": "3.0",
+      "llvm_hash": "",
+      "backend_enabled": true,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "BACKEND_PROFILE": "",
+        "BACKEND_PATH": "/opt/local-ci/runtime/deps/backend",
+        "BACKEND_WHEEL_PATTERN": "",
+        "BACKEND_ENVSETUP": "",
+        "BACKEND_ENVSETUP_ARGS": "",
+        "BACKEND_TEST_COMMAND": "",
+        "EXPECTED_TRITON_BACKEND": "",
+        "PPL_ROOT": "/opt/local-ci/runtime/deps/ppl",
+        "FLAGGEMS_CLONE_DIR": "/opt/local-ci/runtime/deps/flaggems",
+        "MAX_JOBS": "12",
+        "BACKEND_TEST_PATHS": "tests"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/backend",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/ppl",
+          "read_only": true,
+          "sha256": ""
+        },
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/flaggems",
+          "read_only": true,
+          "sha256": ""
+        }
+      ],
+      "devices": []
+    },
+    "triton_v3.1": {
+      "name": "triton-3.1",
+      "triton_version": "3.1",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.2": {
+      "name": "triton-3.2",
+      "triton_version": "3.2",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.3": {
+      "name": "triton-3.3",
+      "triton_version": "3.3",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.4": {
+      "name": "triton-3.4",
+      "triton_version": "3.4",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.5": {
+      "name": "triton-3.5",
+      "triton_version": "3.5",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.6": {
+      "name": "triton-3.6",
+      "triton_version": "3.6",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    },
+    "triton_v3.8": {
+      "name": "triton-3.8",
+      "triton_version": "3.8",
+      "llvm_hash": "",
+      "backend_enabled": false,
+      "workspace_container": "/workspace",
+      "llvm": {
+        "mode": "mount",
+        "commit": ""
+      },
+      "env": {
+        "PYTHON_VENV_ACTIVATE": "",
+        "MAX_JOBS": "12"
+      },
+      "mounts": [
+        {
+          "source": "",
+          "target": "/opt/local-ci/runtime/deps/llvm-<exact-llvm-commit>",
+          "read_only": true,
+          "sha256": ""
+        }
+      ]
+    }
+  },
+  "health_stale_seconds": 1200,
+  "evidence_max_bytes": 107374182400,
+  "image": "",
+  "dependency_root": ""
+}

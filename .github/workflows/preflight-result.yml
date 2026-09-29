@@ -1,0 +1,72 @@
+name: Local CI / Preflight Result
+on:
+  workflow_call:
+    inputs:
+      task_digest: {type: string, required: true}
+      worker_revision_sha: {type: string, required: true}
+      stage: {type: string, required: true}
+      outcome: {type: string, required: true}
+      external_fork: {type: boolean, required: false, default: false}
+      review_card: {type: boolean, required: false, default: false}
+    outputs:
+      eligible:
+        description: Whether the frozen preflight may enter Local CI.
+        value: ${{ jobs.sync.outputs.eligible }}
+      card_result:
+        description: Publication outcome used by the gateway finalizer.
+        value: ${{ jobs.sync.outputs.card_result }}
+# Permissions are supplied by each caller. Basic/API publishers stay read-only;
+# only the security publisher that may create a review card receives PR write.
+jobs:
+  sync:
+    name: Sync ${{ inputs.stage }} result
+    outputs:
+      eligible: ${{ steps.eligibility.outputs.eligible }}
+      card_result: ${{ steps.eligibility.outputs.card_result }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.worker_revision_sha }}
+          persist-credentials: false
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with: {name: 'local-ci-task-${{ inputs.task_digest }}'}
+      - name: Publish this stage to PR Checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_TASK_DIGEST: ${{ inputs.task_digest }}
+          STAGES: '{"${{ inputs.stage }}":"${{ inputs.outcome }}"}'
+        run: python3 scripts/ci/gateway.py checks
+      - name: Publish approval review card
+        id: card
+        if: ${{ inputs.review_card && inputs.outcome == 'success' }}
+        env:
+          EXPECTED_TASK_DIGEST: ${{ inputs.task_digest }}
+          GH_TOKEN: ${{ github.token }}
+          STAGES: '{"prepare":"success","basic":"success","api":"success","security":"success"}'
+        run: python3 scripts/ci/gateway.py card
+      - name: Resolve Local CI eligibility
+        id: eligibility
+        env:
+          REVIEW_CARD: ${{ inputs.review_card }}
+          EXTERNAL_FORK: ${{ inputs.external_fork }}
+          OUTCOME: ${{ inputs.outcome }}
+          CARD_ELIGIBLE: ${{ steps.card.outputs.eligible }}
+        run: |
+          if [ "$REVIEW_CARD" = "true" ]; then
+            eligible="${CARD_ELIGIBLE:-false}"
+            if [ "$eligible" = "true" ]; then card_result=success; else card_result=failure; fi
+          elif [ "$EXTERNAL_FORK" = "true" ]; then
+            eligible=false
+            card_result=failure
+          elif [ "$OUTCOME" = "success" ]; then
+            eligible=true
+            card_result=success
+          else
+            eligible=false
+            card_result=failure
+          fi
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+          echo "card_result=$card_result" >> "$GITHUB_OUTPUT"
