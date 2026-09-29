@@ -5,20 +5,21 @@
 
 ## 配置与环境
 
-`config.example.json` 是 `anchor_ci` 服务器完整非敏感部署配置的唯一维护来源。
+`config.example.json` 是服务器完整非敏感部署配置的唯一维护来源。
 在开发仓库修改并提交，经 Gitee 部署；运行副本由安装器或控制更新器生成，
-不单独维护覆盖 JSON。`profiles/config.template.json` 仅供其他部署参考。
+不单独维护覆盖 JSON 或另一份配置模板。
 
-> **迁移部署前必须确认 Rootless socket。** 示例中的 `unix:///run/user/1007/docker.sock` 保留自来源部署，`1007` **不是已确认的 `anchor_ci` UID，不能直接照抄部署**。服务器同事先运行 `id -u anchor_ci`，确认该用户实际 Rootless Docker socket 后，把仓库中 `config.example.json` 的 `runtime.endpoint` 改为真实路径并提交。`runtime.context` 已改为 `anchor-ci-rootless`，须与服务器实际创建的 context 一致。镜像名、digest 和依赖哈希也保留自来源部署，应核对目标用户能使用这些既有制品，再安装或启用控制更新。
+部署前核对 CI 用户的实际 UID、Rootless Docker socket 与 context，并确认该用户可访问
+配置中的镜像及只读依赖。差异应在仓库配置中修改、审核并提交。
 
 | 内容 | 配置或位置 |
 | --- | --- |
-| 控制来源 | `control_repo_url` 为 `https://gitee.com/race-org/triton-anchor.git`，`control_branch` 为 `CI_dev`；任务与结果仍使用 `gitee_repo_url` 指定的 `triton-anchor-local-ci-results` 仓库 |
-| 控制 checkout | `/home/anchor_ci/local_ci/control_anchor` |
-| 运行配置 | `/home/anchor_ci/local_ci/config/local-ci.json` |
-| 持久状态 | `/home/anchor_ci/local_ci/state` |
-| 私有凭据 | `/home/anchor_ci/local_ci/config/credentials.env` 与 `codex-source/` |
-| 宿主 Python | `/home/anchor_ci/local_ci/local-ci-control-venv/bin/python` |
+| 控制来源 | `control_repo_url` 与 `control_branch`；任务与结果仓库由 `gitee_repo_url` 指定 |
+| 控制 checkout | `control_root` |
+| 运行配置 | 安装时指定的 `--config` 路径 |
+| 持久状态 | `state_dir` |
+| 私有凭据 | `--credentials-env` 指定的文件与 `codex_home` |
+| 宿主 Python | `python_bin` |
 
 安装器读取所在 checkout 的 HEAD 配置，控制更新器读取目标 SHA 的配置，
 均按 JSON 结构完整同步运行副本。`--config` 指定运行副本位置，不是额外配置来源。
@@ -48,6 +49,16 @@ base / candidate 按各自冻结源码的 **Triton major.minor + 完整 LLVM SHA
 安装器通过 `--credentials-env` 加载；控制更新命令在现有私有凭据环境中执行。
 不要在命令行展开或打印凭据值。
 
+以下命令以 CI 用户运行，使用同一 shell 中的路径变量。示例沿用 `local_ci` 目录布局；
+把 `CI_ROOT` 替换为实际绝对路径，并核对其余路径与已提交的配置一致。
+这些变量仅用于调用工具，不覆盖仓库配置。
+
+```bash
+CI_ROOT='/absolute/path/local_ci'
+CI_CONFIG="$CI_ROOT/config/local-ci.json"
+CI_PYTHON="$CI_ROOT/local-ci-control-venv/bin/python"
+```
+
 ## 新服务器安装
 
 先通过可信配置管理或制品通道投放 `bootstrap_control.py`、目标提交的
@@ -59,7 +70,7 @@ base / candidate 按各自冻结源码的 **Triton major.minor + 完整 LLVM SHA
 ```bash
 CONTROL_SHA='<已审核的40位控制SHA>'
 python3 bootstrap_control.py \
-  --config /absolute/path/config.json \
+  --config /absolute/path/config.example.json \
   --credentials-env /absolute/path/credentials.env \
   --expected-revision "$CONTROL_SHA"
 ```
@@ -70,12 +81,10 @@ python3 bootstrap_control.py \
 已有固定版本 checkout 时，从控制目录运行安装器：
 
 ```bash
-cd /home/anchor_ci/local_ci/control_anchor
-CI_PYTHON=/home/anchor_ci/local_ci/local-ci-control-venv/bin/python
-CI_CONFIG=/home/anchor_ci/local_ci/config/local-ci.json
+cd "$CI_ROOT/control_anchor"
 "$CI_PYTHON" scripts/local_ci/prepare/install.py \
   --config "$CI_CONFIG" \
-  --credentials-env /home/anchor_ci/local_ci/config/credentials.env
+  --credentials-env "$CI_ROOT/config/credentials.env"
 ```
 
 预览显示配置差异与计划安装的 units；加 `--apply` 后，安装器获取控制锁，
@@ -92,10 +101,8 @@ systemd 的 enabled/active 状态需要另行恢复；它不是代码、配置�
 从现有控制目录执行，`CONTROL_SHA` 替换为实际目标：
 
 ```bash
-cd /home/anchor_ci/local_ci/control_anchor
+cd "$CI_ROOT/control_anchor"
 CONTROL_SHA='<已提交并同步至Gitee的40位SHA>'
-CI_PYTHON=/home/anchor_ci/local_ci/local-ci-control-venv/bin/python
-CI_CONFIG=/home/anchor_ci/local_ci/config/local-ci.json
 
 "$CI_PYTHON" scripts/local_ci/prepare/control_update.py \
   --config "$CI_CONFIG" --expected-revision "$CONTROL_SHA"
@@ -129,12 +136,12 @@ CI_CONFIG=/home/anchor_ci/local_ci/config/local-ci.json
 仅新增 profile 时，在更新后的控制目录准备环境：
 
 ```bash
-"$CI_PYTHON" - <<'PY'
+"$CI_PYTHON" - "$CI_CONFIG" <<'PY'
 import json
 from pathlib import Path
 import sys
 
-config = json.loads(Path('/home/anchor_ci/local_ci/config/local-ci.json').read_text())
+config = json.loads(Path(sys.argv[1]).read_text())
 sys.path.insert(0, str(Path(config['control_root']) / 'scripts/local_ci'))
 from prepare.runtime import EnvironmentManager
 
@@ -156,7 +163,7 @@ PY
 所有 profile 准备完成后，以同一 CI 用户加载私有环境并运行预检：
 
 ```bash
-"$CI_PYTHON" - <<'PY'
+"$CI_PYTHON" - "$CI_CONFIG" "$CI_ROOT/config/credentials.env" <<'PY'
 from pathlib import Path
 import sys
 
@@ -164,9 +171,9 @@ sys.path.insert(0, str(Path('scripts/local_ci').resolve()))
 from prepare.install import load_environment
 from prepare.preflight import main
 
-load_environment(Path('/home/anchor_ci/local_ci/config/credentials.env'))
-sys.argv = ['preflight.py', '--config',
-            '/home/anchor_ci/local_ci/config/local-ci.json', '--probe-runtime']
+config_path, credentials_path = sys.argv[1:]
+load_environment(Path(credentials_path))
+sys.argv = ['preflight.py', '--config', config_path, '--probe-runtime']
 raise SystemExit(main())
 PY
 ```

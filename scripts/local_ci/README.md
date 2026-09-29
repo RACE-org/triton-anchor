@@ -1,14 +1,14 @@
 # Local CI
 
-AI 驱动 PR 构建、测试与审查。Codex 负责理解意图、选择验证、组织执行及排错；
+AI 驱动 PR、push 和手动任务的构建、测试与审查。Codex 负责理解意图、选择验证、组织执行及排错；
 Worker 负责准备环境、维护任务状态、停止失效任务和交付结果。源码和结果经 Gitee 中转。
 
 ## 执行流程
 
 ```mermaid
 flowchart TD
-  A[GitHub：PR 校验 → Basic CI → API Compatibility → Security Gate] --> B{外部 fork？}
-  B -- 否 --> C[GitHub → Gitee：冻结被测提交、base/head 与 PR 信息，投递任务]
+  A[GitHub：任务准备与前置检查；PR 另校验描述] --> B{外部 fork PR？}
+  B -- 否 --> C[GitHub → Gitee：冻结被测提交、base/head 与任务信息，投递任务]
   B -- 是 --> R[生成审批卡 → 人工审批]
   R --> C
   C --> D[Worker：校验任务，准备 Triton / LLVM / 后端环境]
@@ -69,7 +69,7 @@ GitHub 网关和接收器位于 `scripts/ci/`，页面位于 `dashboard/`。
 | base / candidate | 各自生成 context，记录源码、LLVM、profile、环境变量、后端能力与 fingerprint |
 | 只读依赖 | 相同依赖可复用，不同 LLVM 版本可同时挂载 |
 | 可写数据 | 两侧 checkout、venv、build、cache 和产物目录独立 |
-| 后端能力 | 仅 Triton 3.0 开启；3.1 复用 3.0 LLVM，但使用独立的 frontend profile |
+| 后端能力 | 由所选 profile 声明；两侧分别记录，缺少匹配后端时不执行后端验证 |
 | 基线比较 | 按实际需要执行 base；执行时使用 base context，性能条件不可比时报告 `not_comparable` |
 
 控制代码和服务器依赖只读挂载，源码及构建输出写入任务目录。后端 wheel 在任务内构建；
@@ -125,15 +125,12 @@ state_dir/
 `infra_error`；选传文件超限保留在本机，不改变结论。省略原因写入 `evidence_delivery`。
 报告沿用任务实际文件名，文件从 `sealed/` 与结果一起发布。
 显式 full 的逐算子明细从可信 runner 产物独立封存；`result.json` 只保留检查结论、
-参数和独立文件路径。Dashboard 生成 feed 时再关联两者，任务报告不会重复携带 127 项明细。
-`findings` 按独立问题保存结论、分析及代码证据；`blocking_reasons` 使用阻塞 findings 的简短结论，
-不重复追加检查和审查诊断。无阻塞 finding 时，优先保留 Agent 的阻塞说明，否则以失败检查、
-必要审查的诊断或失败摘要兜底。详细诊断与证据保留在 `checks`、`reviews` 中。
-`limitations` 单独保存环境、工具或证据不足的限制说明，在 PR 评论和 Dashboard 独立展示，
-不改变检查的实际状态和最低验证要求。
-单项限制由检查的 `limitation` 提供，顶层仅补充整体限制，避免重复。补充检查的 `warning`
-表示非阻塞提示，`limited` 表示范围受限，两者不自动导致整体失败；最低必检仍须有通过证据。
-检查记录反映最终行为验证结论，修复或等价入口验证成功后使用 `pass`，初次异常保留在 details 和日志中。
+参数和独立文件路径。Dashboard 生成 feed 时再关联两者，任务报告不重复携带逐算子明细。
+`findings` 保存独立问题的结论、分析和证据，`blocking_reasons` 提供阻塞摘要；
+详细检查和审查记录保留在 `checks`、`reviews` 中。
+`limitations` 单独说明环境、工具或证据不足，不改变实际检查状态和最低验证要求。
+完整结果字段与证据要求见 [Agent 执行契约](AI_CI_PROGRAM.md#最终结果)，
+展示规则见 [Dashboard 文档](../../dashboard/README.md)。
 
 GitHub 状态写入 PR 的 `head_sha`，实际验证对应冻结的 `tested_sha`。
 Summary 覆盖整轮验证，只有当前任务及其工作流可回写；目标基线变化需重新派发。
@@ -148,7 +145,7 @@ Dashboard 提供完整检查、审查、证据及健康信息。
 
 - [环境准备与部署](prepare/README.md)：配置来源、安装、固定 SHA 更新及服务器验收。
 - [只读依赖](prepare/DEPENDENCY_MOUNTS.md)：版本匹配、目录摘要、挂载规则及跨 LLVM 验证。
-- [运行维护](maintenance/README.md)：健康采集、恢复预算、补传和演练。
+- [运行维护](maintenance/README.md)：健康采集、恢复预算、补传与保留策略。
 
 本地行为回归：
 
@@ -157,4 +154,4 @@ python3 -m pytest scripts/local_ci/tests -q
 ```
 
 需要 Python 3.10+、pytest、PyYAML 和 Git；页面测试还需要 Node.js。
-服务器验收覆盖对应工具链的 build/install/smoke/JIT 与性能验证。
+服务器验收按已配置的工具链和所选验证范围检查实际任务及结果交付。

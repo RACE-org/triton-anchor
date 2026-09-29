@@ -57,14 +57,24 @@ CLI 事件只表明会话活跃，不重置恢复中的无进展计数。每轮�
 
 ### 手动恢复
 
+以下命令以 CI 用户在已有私有凭据环境中运行。将 `CI_ROOT` 替换为实际绝对路径，
+并核对路径与仓库部署配置一致；这些变量不覆盖配置。
+
+```bash
+CI_ROOT='/absolute/path/local_ci'
+CI_CONFIG="$CI_ROOT/config/local-ci.json"
+CI_PYTHON="$CI_ROOT/local-ci-control-venv/bin/python"
+cd "$CI_ROOT/control_anchor"
+```
+
 需要提前恢复同一任务时，先在维护窗口停止 Worker，避免并行处理同一状态；
-使用既有私有凭据环境执行，再启动服务：
+执行后再启动服务：
 
 ```bash
 systemctl --user stop triton-anchor-local-ci.service
 CI_TASK_ID='<需要恢复的任务ID>'
-python3 scripts/local_ci/agent_ci/worker.py \
-  --config /home/anchor_ci/local_ci/config/local-ci.json --resume "$CI_TASK_ID"
+"$CI_PYTHON" scripts/local_ci/agent_ci/worker.py \
+  --config "$CI_CONFIG" --resume "$CI_TASK_ID"
 systemctl --user start triton-anchor-local-ci.service
 ```
 
@@ -110,8 +120,7 @@ systemctl --user show triton-anchor-local-ci-health.service \
 健康采集默认可预览，`--publish` 才发布：
 
 ```bash
-python3 scripts/local_ci/maintenance/health.py \
-  --config /home/anchor_ci/local_ci/config/local-ci.json
+"$CI_PYTHON" scripts/local_ci/maintenance/health.py --config "$CI_CONFIG"
 ```
 
 ## 结果保留
@@ -122,8 +131,7 @@ python3 scripts/local_ci/maintenance/health.py \
 补传按原 `task_id + run_id` 定位。
 
 ```bash
-python3 scripts/local_ci/maintenance/retention.py \
-  --config /home/anchor_ci/local_ci/config/local-ci.json
+"$CI_PYTHON" scripts/local_ci/maintenance/retention.py --config "$CI_CONFIG"
 ```
 
 默认预览，审阅后加 `--apply` 清理。
@@ -138,9 +146,7 @@ Dashboard 发布使用 `main` 的 CI Gateway 手动 `mode=publish`，不带任�
 页面发布与服务器部署分别执行。等待健康采集和 Cloudflare 周期后，
 检查新鲜快照、服务/容器状态、页面及 Issues。
 
-手动回退前停止 Worker 并保存 Journal、封存结果和 outbox，
-确认目标代码能理解未完成任务。安装器的 `--rollback` 仅恢复 unit 文件；
-代码回退使用控制更新器，保留任务状态与预算。
+回退按服务器部署文档操作，保留任务状态、封存结果、outbox 与恢复预算。
 
 ### 本地检查
 
@@ -157,15 +163,6 @@ node --test scripts/local_ci/maintenance/cloudflare/worker.test.mjs scripts/loca
 确认前置检查、审批和投递按依赖推进，Worker 经准备、执行、封存、上传完成，
 执行期间心跳持续更新，GitHub、Gitee 与 Dashboard 的结果及证据一致。
 
-### 上传恢复演练
-
-使用独立演练状态与结果目标，保持生产任务和健康上报可用：
-
-1. 仅让演练结果上传失败，记录封存 `result.json` 摘要、run_id、Codex 次数和截止时间。
-2. 重启演练 Worker，确认只补传原结果，不创建任务容器、不启动 Codex，也不刷新预算。
-3. 恢复结果仓库访问，确认同一摘要和 run_id 发布成功。
-4. 检查新鲜健康快照证明交付恢复，Cloudflare 更新并关闭对应事件。
-
-演练保持整机 Docker、依赖目录和生产任务正常运行。
-已封存未入队、响应丢失、有效 fail 报告续封存、认证等待和 session 切换可用相关回归用例验证。
-反馈保留实际版本、上报时间、任务证据、演练摘要与预算保持情况，避免公开私有诊断。
+恢复验证使用独立状态与结果目标，确认封存后只补传原结果，保持任务身份、结果摘要和
+恢复预算。相关回归用例覆盖响应丢失、续封存、认证等待和 session 切换；验收记录保留
+实际版本与证据，不公开私有诊断。

@@ -56,7 +56,9 @@ Prepare the version directory and finalize its permissions and links, then
 calculate `prepare.artifacts.tree_digest(Path(source))` using trusted control code.
 This is a directory-content digest, not an archive checksum.
 
-Use a matching LLVM recipe and read-only mount:
+Use a matching LLVM recipe and read-only mount. Replace the placeholders below
+with literal values; `source` must be an absolute path under the configured
+`dependency_root`. JSON paths do not expand shell variables.
 
 ```json
 {
@@ -64,7 +66,7 @@ Use a matching LLVM recipe and read-only mount:
   "llvm": {"mode": "mount", "commit": "<full LLVM commit>"},
   "mounts": [
     {
-      "source": "/home/anchor_ci/local_ci/workspace/dependencies/llvm-<commit>",
+      "source": "<dependency_root>/llvm-<commit>",
       "target": "/opt/local-ci/runtime/deps/llvm-<commit>",
       "read_only": true,
       "sha256": "<tree_digest of source>"

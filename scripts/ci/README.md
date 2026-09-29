@@ -34,16 +34,14 @@ PR 同步、重开、转为可审查、正文或标签变化，分支创建或�
 该编号写入冻结的 `task.json`，审批、派发、结果接收只传递这个文件及其 task ID。
 其他自动路由按源码、基线、PR 审查信息和 full 范围计算任务身份。
 
-Gateway 的 Re-run all jobs 和 Re-run failed jobs 都转交一次完整的新验证。
-重跑 attempt 不执行原验证作业，也不读取上一轮成功 Prepare 留下的任务产物；
-末尾的 `Restart verification` 作业在各作业结束或跳过后派发新的 Gateway。
-新运行固定传入原重跑入口的触发编号，重新完成前置检查及所需审批。
-因此 Actions 会多出一条完整验证运行，可从重跑作业的摘要进入。
+Gateway 的 Re-run all jobs 和 Re-run failed jobs 都派发完整的新验证，
+重新执行前置检查及所需审批；可从重跑作业的摘要进入新运行。
 
-同一轮重复投递、Codex 恢复、Worker 重启、网络重试和结果补传不生成编号，
-仍沿用原 task ID 与重试预算。receive 续接、单独补收及页面发布也不创建任务。
-接收器只等指定 task ID 的结果，同 SHA 目录中的上一轮结果不会结束新一轮。
+同一轮重复投递、执行恢复及结果补传仍沿用原 task ID 与重试预算；
+receive 续接、单独补收及页面发布也不创建任务。
+接收器只等指定 task ID 的结果，同 SHA 的上一轮结果不会结束新一轮。
 历史任务不带 `trigger_id` 时保持原 ID，历史结果不删除。
+Worker 的恢复和重试规则见 [Local CI 概览](../local_ci/README.md#执行与恢复)。
 
 ## 前置检查与审批
 
@@ -139,7 +137,10 @@ PR 结果按 `result + task_id + run_id + result_digest` 去重，每次运行�
 | `requested_sha` | PR head 或分支 HEAD 的完整 SHA |
 | `action` | 手动分支任务填 `manual`；PR 任务留空 |
 
-full 要求全部可用工具对应的验证，外部 fork 使用同一审批流程。
+`full=true` 仍由 Codex 组织执行：完成必要的构建、安装及后端 smoke 后，
+使用固定工具运行 FlagGems full。性能测试由 Codex 根据任务意图和 diff 决定，
+full 不自动要求性能测试，也不允许用 impact 结果代替 full。外部 fork 使用同一审批流程。
+最低验证要求见 [Agent 工作流程](../local_ci/AI_CI_PROGRAM.md#自主工作流程)，
 base/candidate 的 profile 与能力见 [Local CI 环境](../local_ci/README.md#环境与生命周期)。
 
 ### 更新入口与任务协议
@@ -193,12 +194,19 @@ PR 评论发送失败记录为 `receiver_error`，发布失败在接收轮次预
 
 ## 配置
 
-| 配置 | 用途 |
+以下变量和 Secret 配置在 GitHub 仓库中，取值须与服务器配置一致：
+
+| 配置 | 用途与要求 |
 | --- | --- |
-| `GITEE_RESULTS_REPO_URL` | `https://gitee.com/race-org/triton-anchor-local-ci-results.git`，承载被测源码 `ci/*` refs、任务控制数据与结果；Worker 控制代码由 `control_repo_url` 指定的独立镜像提供 |
-| `GITEE_SUBMODULE_MIRRORS` | 非预装子模块路径到 Gitee 镜像 URL 的 JSON 映射；当前仅 FlagGems，可省略或设为 `{}` |
-| `GITEE_USERNAME` / secret `GITEE_TOKEN` | 用户名保持 `likehupochuan`，Token 需有 RACE 结果仓库的 Git 读写权限 |
+| 变量 `GITEE_RESULTS_REPO_URL` | Gitee 结果中转仓库的 HTTPS Git URL，承载被测源码 `ci/*` refs、任务控制数据与结果；对应服务器的 `gitee_repo_url` |
+| 变量 `GITEE_SUBMODULE_MIRRORS` | 非预装子模块路径到 Gitee 镜像 URL 的 JSON 映射；没有这类子模块时可省略或设为 `{}` |
+| 变量 `GITEE_USERNAME` | `GITEE_TOKEN` 所属的 Gitee 用户名；不要求与仓库组织名或服务器用户名相同 |
+| Secret `GITEE_TOKEN` | 对结果中转仓库具有 Git 读写权限的 Token |
 | `local-ci-fork-approval` environment | 外部 fork 审批，配置非空 required reviewers |
+
+服务器的 `control_repo_url` 指向控制代码镜像，Worker 从其控制分支更新执行代码；
+它与 `GITEE_RESULTS_REPO_URL` 的用途不同，配置时分别指定。
+具体服务器字段和认证方式见 [服务器准备](../local_ci/prepare/README.md)。
 
 工作流按作业配置权限：状态回写使用 `statuses: write`，读取 Actions 与审批使用
 `actions: read`，派发接续使用 `actions: write`，PR 评论使用 `pull-requests: write`。

@@ -290,7 +290,7 @@ pytest python/triton_anchor/tests/ -v
 pytest scripts/local_ci/tests -q --import-mode=importlib
 ```
 
-> 更详细的 Local CI 使用、维护和故障排查说明见 `scripts/local_ci/README.md`。
+> CI 触发与结果查看见 [CI 使用说明](scripts/ci/README.md)，服务器维护见 [Local CI 文档](scripts/local_ci/README.md)。
 
 ```bash
 # 代码风格检查
@@ -495,12 +495,11 @@ pytest tests/ -v
 
 ### 9.3 CI
 
-项目已配置 [Local CI 编排工作流](.github/workflows/ci-gateway.yml)，在受支持的 push / PR 事件中调用按功能拆分的检查：
+PR 和手动验证通过 `main` 分支的 [CI Request](https://github.com/RACE-org/triton-anchor/blob/main/.github/workflows/ci-request.yml) 进入；需要自动检查 push 的源码分支须包含 `ci-request.yml`。请求统一派发到 `CI_dev` 分支的 Gateway。
 
-| Job | 内容 | 矩阵 |
-|-----|------|------|
-| **lint** | `ruff check` + `ruff format --check` | Python 3.10 |
-| **unit-test** | 纯 Python 单元测试 + 覆盖率 | Python 3.9 / 3.10 / 3.11 / 3.12 |
+GitHub 完成基础检查、API 兼容性和安全检查后派发服务器任务。服务器上的 Codex 准备环境并组织构建和验证；`main` 分支接收结果，回写 GitHub 状态和 PR 评论，并发布 Dashboard。
+
+基础检查的具体规则和 Python 矩阵见 [工作流配置](.github/workflows/basic-checks.yml)；触发方式、手动运行和结果查看见 [CI 使用说明](scripts/ci/README.md)。
 
 ## 10 参与贡献
 
