@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "plugins": [
+    {
+      "plugin_id": "example.mock_backend",
+      "display_name": "Mock Backend",
+      "vendor": "Example Vendor",
+      "entry_point": "mock",
+      "backend_protocol": ">=1.0,<2.0",
+      "requires_core": ">=0.2,<0.3",
+      "requires_triton": {
+        "version": ">=3.0,<3.1"
+      },
+      "targets": ["mock"],
+      "capabilities": ["anchor_ir.linalg"],
+      "isolation_mode": "python_only",
+      "priority": 0
+    }
+  ]
+}

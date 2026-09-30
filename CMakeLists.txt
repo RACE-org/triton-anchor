@@ -208,6 +208,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRBytecodeWriter
     MLIRPass
     MLIRTransforms
+    MLIRFuncInlinerExtension
     MLIRLLVMDialect
     MLIRSupport
     MLIRTargetLLVMIRExport
@@ -289,4 +290,3 @@ if(TRITON_BUILD_PYTHON_MODULE)
   # 确保 libtriton.so 输出到 triton/_C 目录
   set_target_properties(triton PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/triton/_C)
 endif()
-

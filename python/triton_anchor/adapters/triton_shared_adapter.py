@@ -60,6 +60,12 @@ class TritonSharedAdapter(ILinalgOptAdapter):
     def name(self) -> str:
         return "triton-shared"
 
+    def get_supported_tracks(self) -> List[str]:
+        return ["linalg"]
+
+    def get_supported_ptr_models(self) -> List[str]:
+        return ["structured"]
+
     def _find_opt_tool(self) -> str:
         """Locate the triton-shared-opt binary."""
         # 1. Explicit path

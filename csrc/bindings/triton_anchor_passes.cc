@@ -1,5 +1,6 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
+#include "mlir/Dialect/Func/Extensions/InlinerExtension.h"
 #include "triton-linalg/Conversion/Passes.h"
 #include "triton-linalg/Dialect/Triton/Transforms/Passes.h"
 #include "triton-linalg/Pipelines/Pipelines.h"
@@ -30,6 +31,7 @@ void init_triton_anchor(py::module &&m) {
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;
     registerTritonLinalgDialects(registry);
+    mlir::func::registerInlinerExtension(registry);
     context.appendDialectRegistry(registry);
     context.loadAllAvailableDialects();
   });

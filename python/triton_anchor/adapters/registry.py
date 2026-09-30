@@ -2,8 +2,8 @@
 Adapter Registry
 =================
 
-Manages discovery and selection of TTIR → Linalg adapters.
-Selection is driven by ``HWCapability.ptr_model`` and optional user override.
+Manages registration and discovery of TTIR -> AnchorIR adapters.
+Final adapter selection is owned by ``AdapterRouter``.
 
 Discovery order:
   1. Explicit registration via ``AdapterRegistry.register()``
@@ -16,7 +16,7 @@ import importlib.metadata
 import logging
 from typing import Dict, Optional, TYPE_CHECKING
 
-from .base import ITritonToLinalgAdapter
+from .base import AdapterNotFoundError, ITritonToLinalgAdapter
 
 if TYPE_CHECKING:
     from ..hw_capability import HWCapability
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class AdapterRegistry:
-    """Registry for TTIR → Linalg conversion adapters.
+    """Registry for TTIR -> AnchorIR conversion adapters.
 
     Usage::
 
@@ -35,7 +35,7 @@ class AdapterRegistry:
         # Auto-discovery from entry_points
         AdapterRegistry.discover()
 
-        # Selection by hardware capability
+        # Compatibility selection entry point, delegated to AdapterRouter
         adapter = AdapterRegistry.get_adapter(hw_capability)
     """
 
@@ -80,61 +80,13 @@ class AdapterRegistry:
         return cls._adapters.get(name)
 
     @classmethod
-    def get_adapter(cls, hw: HWCapability) -> ITritonToLinalgAdapter:
-        """Select the best adapter for the given hardware capability.
+    def get_adapter(
+        cls, hw: HWCapability, metadata: Optional[dict] = None
+    ) -> ITritonToLinalgAdapter:
+        """Compatibility wrapper: delegate final selection to AdapterRouter."""
+        from .router import AdapterRouter
 
-        Selection logic:
-          1. If ``hw.preferred_adapter`` is set, use that adapter
-          2. Otherwise, select by ``hw.ptr_model``:
-             - "structured" → TritonSharedAdapter
-             - "axis_info"  → TritonLinalgAdapter
-             - "hybrid"     → HybridAdapter
-             - "gpu"        → None (GPU path doesn't use Linalg adapters)
-
-        Args:
-            hw: The target hardware capability.
-
-        Returns:
-            The selected adapter instance.
-
-        Raises:
-            AdapterNotFoundError: If no suitable adapter is found.
-        """
-        cls.discover()
-
-        # 1. Explicit preference
-        if hw.preferred_adapter:
-            adapter = cls._adapters.get(hw.preferred_adapter)
-            if adapter:
-                return adapter
-            raise AdapterNotFoundError(
-                f"Preferred adapter '{hw.preferred_adapter}' not found. "
-                f"Available: {list(cls._adapters.keys())}"
-            )
-
-        # 2. Automatic selection by ptr_model
-        _model_to_adapter = {
-            "structured": "triton-shared",
-            "axis_info": "triton-linalg",
-            "hybrid": "hybrid",
-        }
-        adapter_name = _model_to_adapter.get(hw.ptr_model)
-        if adapter_name and adapter_name in cls._adapters:
-            return cls._adapters[adapter_name]
-
-        # 3. Fallback: return any available adapter
-        if cls._adapters:
-            fallback = next(iter(cls._adapters.values()))
-            logger.warning(
-                f"No adapter matching ptr_model='{hw.ptr_model}', "
-                f"falling back to '{fallback.name()}'"
-            )
-            return fallback
-
-        raise AdapterNotFoundError(
-            f"No adapters available for ptr_model='{hw.ptr_model}'. "
-            f"Install a Linalg adapter package."
-        )
+        return AdapterRouter(registry=cls).get_adapter(hw, metadata=metadata)
 
     @classmethod
     def list_adapters(cls) -> Dict[str, str]:
@@ -143,21 +95,23 @@ class AdapterRegistry:
         return {name: type(adapter).__name__ for name, adapter in cls._adapters.items()}
 
     @classmethod
+    def snapshot(cls) -> Dict[str, ITritonToLinalgAdapter]:
+        """Return discovered adapters without making a route decision."""
+        cls.discover()
+        return dict(cls._adapters)
+
+    @classmethod
     def reset(cls) -> None:
         """Reset registry state (for testing)."""
         cls._adapters.clear()
         cls._discovered = False
 
 
-class AdapterNotFoundError(Exception):
-    """Raised when no suitable adapter is found."""
-
-    pass
-
-
 # ── Convenience function ─────────────────────────────────────────────
 
 
-def get_adapter(hw: HWCapability) -> ITritonToLinalgAdapter:
-    """Shortcut for ``AdapterRegistry.get_adapter(hw)``."""
-    return AdapterRegistry.get_adapter(hw)
+def get_adapter(
+    hw: HWCapability, metadata: Optional[dict] = None
+) -> ITritonToLinalgAdapter:
+    """Shortcut for deterministic adapter routing through the registry."""
+    return AdapterRegistry.get_adapter(hw, metadata=metadata)

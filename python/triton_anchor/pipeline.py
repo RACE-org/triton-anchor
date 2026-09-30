@@ -129,6 +129,15 @@ def make_ttir(mod, metadata: dict, hw: Optional[HWCapability] = None):
     return mod
 
 
+def select_adapter(hw: HWCapability, metadata: Optional[dict] = None):
+    """Select the AnchorIR adapter for ``hw`` and record T6.1 metadata."""
+    from .adapters.router import AdapterRouter
+
+    if metadata is None:
+        metadata = {}
+    return AdapterRouter().select(hw, metadata=metadata)
+
+
 def inject_hw_attributes(mod, hw: HWCapability, metadata: dict):
     """将硬件能力信息注入 MLIR module 属性和编译元数据中。
 
@@ -160,6 +169,9 @@ def inject_hw_attributes(mod, hw: HWCapability, metadata: dict):
         pass
 
     # 硬件描述信息通过 metadata dict 传递给下游 Python 代码
+    metadata["hw"] = hw
+    metadata["hw_capability"] = hw
     metadata["hw_name"] = hw.name
     metadata["hw_paradigm"] = hw.compute_paradigm.value
     metadata["hw_arch_family"] = hw.arch_family
+    select_adapter(hw, metadata=metadata)

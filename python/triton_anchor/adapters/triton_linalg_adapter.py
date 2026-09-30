@@ -60,6 +60,12 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
     def name(self) -> str:
         return "triton-linalg"
 
+    def get_supported_tracks(self) -> List[str]:
+        return ["linalg"]
+
+    def get_supported_ptr_models(self) -> List[str]:
+        return ["axis_info"]
+
     def convert(self, ttir_module: Any, metadata: dict, context: Any = None) -> Any:
         """Convert TTIR to Linalg using triton-linalg passes.
 

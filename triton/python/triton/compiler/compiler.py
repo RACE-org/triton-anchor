@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib
 import json
 from .._C.libtriton import get_cache_invalidating_env_vars, ir
-from ..backends import backends
+from ..backends import make_backend as _make_selected_backend
 from ..backends.compiler import GPUTarget
 from .. import __version__
 from ..runtime.autotuner import OutOfResources
@@ -303,11 +303,7 @@ def compile(src, target=None, options=None):
 
 
 def make_backend(target):
-    actives = [x.compiler for x in backends.values() if x.compiler.supports_target(target)]
-    if len(actives) != 1:
-        raise RuntimeError(
-            f"{len(actives)} compatible backends for target ({target.backend}) ({actives}). There should only be one.")
-    return actives[0](target)
+    return _make_selected_backend(target)
 
 
 class LazyDict:

@@ -50,6 +50,22 @@ class ITritonToLinalgAdapter(ABC):
         """Unique identifier for this adapter (e.g., 'triton-linalg')."""
         ...
 
+    def get_supported_tracks(self) -> List[str]:
+        """AnchorIR tracks this adapter may produce.
+
+        Existing third-party adapters that do not override this method keep the
+        historical Linalg behavior.
+        """
+        return ["linalg"]
+
+    def get_supported_ptr_models(self) -> List[str]:
+        """Pointer models this adapter accepts.
+
+        An empty list means the adapter has not declared a T6.1 capability and
+        will be rejected by the router for automatic selection.
+        """
+        return []
+
     @abstractmethod
     def convert(self, ttir_module: Any, metadata: dict, context: Any = None) -> Any:
         """Convert an optimized TTIR module to Linalg IR (AnchorIR).
@@ -83,9 +99,13 @@ class ITritonToLinalgAdapter(ABC):
         Returns:
             True if valid, False otherwise.
         """
-        from ..anchor_ir import AnchorIRValidator
+        from ..anchor_ir import AnchorIRTrack, AnchorIRValidator
 
-        validator = AnchorIRValidator()
+        tracks = self.get_supported_tracks()
+        track = tracks[0] if tracks else AnchorIRTrack.LINALG
+        if not isinstance(track, AnchorIRTrack):
+            track = AnchorIRTrack(track)
+        validator = AnchorIRValidator(track=track)
         ir_text = str(linalg_ir) if not isinstance(linalg_ir, str) else linalg_ir
         return validator.is_valid(ir_text)
 
@@ -160,3 +180,13 @@ class AdapterConversionError(Exception):
         if detail:
             msg += f": {detail}"
         super().__init__(msg)
+
+
+class AdapterSelectionError(Exception):
+    """Raised when the router cannot make a valid adapter decision."""
+
+
+class AdapterNotFoundError(AdapterSelectionError):
+    """Raised when no suitable adapter is registered for a route."""
+
+    pass

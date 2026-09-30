@@ -11,7 +11,7 @@ Architecture:
   Layer 2.5 — AnchorIR Spec      (core invariant: dual-track dialect whitelist)
 """
 
-__version__ = "0.2.0"
+from ._version import __version__ as __version__
 
 from .hw_capability import (
     HWCapability as HWCapability,
@@ -22,3 +22,9 @@ from .anchor_ir import (
     AnchorIRValidator as AnchorIRValidator,
 )
 from .pipeline import build_ttir_pipeline as build_ttir_pipeline
+from .pipeline import select_adapter as select_adapter
+from .adapters import (
+    ADAPTER_ROUTING_POLICY_VERSION as ADAPTER_ROUTING_POLICY_VERSION,
+    AdapterRouter as AdapterRouter,
+    AdapterRoutingPolicy as AdapterRoutingPolicy,
+)

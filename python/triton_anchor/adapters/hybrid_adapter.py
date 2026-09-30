@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from typing import Any, List
 
-from .base import ILinalgOptAdapter
+from .base import ILinalgOptAdapter, AdapterConversionError
 
 logger = logging.getLogger(__name__)
 
@@ -33,22 +33,82 @@ class HybridAdapter(ILinalgOptAdapter):
     def name(self) -> str:
         return "hybrid"
 
+    def get_supported_tracks(self) -> List[str]:
+        return ["linalg"]
+
+    def get_supported_ptr_models(self) -> List[str]:
+        return ["hybrid"]
+
     def convert(self, ttir_module: Any, metadata: dict, context: Any = None) -> Any:
         """Attempt Structured conversion, fall back to AxisInfo on failure.
 
-        .. note:: Currently a STUB — delegates directly to TritonLinalgAdapter.
+        The hybrid route is explicit: fallback to AxisInfo is allowed only after
+        this adapter has been selected, and the reason is recorded in metadata.
         """
-        # TODO: When TritonSharedAdapter is fully implemented, try it first:
-        #
-        # try:
-        #     shared = TritonSharedAdapter()
-        #     return shared.convert(ttir_module, metadata, context)
-        # except AdapterConversionError:
-        #     logger.info("Structured analysis failed, falling back to AxisInfo")
+        ptr_features = str(metadata.get("ptr_features", "")).lower()
+        has_unstructured_hint = any(
+            flag in ptr_features
+            for flag in ("unstructured", "dynamic", "irregular", "unknown")
+        )
+        strict = self._strict_mode(metadata)
+
+        if not has_unstructured_hint:
+            from .triton_shared_adapter import TritonSharedAdapter
+
+            try:
+                metadata["hybrid_ptr_analysis"] = "structured"
+                return TritonSharedAdapter().convert(ttir_module, metadata, context)
+            except AdapterConversionError as exc:
+                if strict:
+                    reason = (
+                        "strict policy blocked hybrid fallback after structured "
+                        "path failed: " + str(exc)
+                    )
+                    metadata["adapter_fallback_reason"] = reason
+                    metadata.setdefault("adapter_reject_reasons", {})[
+                        "triton-shared"
+                    ] = str(exc)
+                    metadata["adapter_reject_reasons"]["fallback"] = reason
+                    raise AdapterConversionError(self.name(), detail=reason)
+
+                logger.info("Hybrid structured path failed; using AxisInfo fallback")
+                metadata["hybrid_ptr_analysis"] = "axis_info"
+                metadata["adapter_fallback_reason"] = (
+                    "hybrid structured path failed: " + str(exc)
+                )
+                metadata["adapter_fallback_chain"] = [
+                    "triton-shared",
+                    "triton-linalg",
+                ]
+        else:
+            if strict:
+                reason = (
+                    "strict policy blocked hybrid fallback requested by "
+                    "ptr_features"
+                )
+                metadata["adapter_fallback_reason"] = reason
+                metadata.setdefault("adapter_reject_reasons", {})["fallback"] = reason
+                raise AdapterConversionError(self.name(), detail=reason)
+
+            metadata["hybrid_ptr_analysis"] = "axis_info"
+            metadata["adapter_fallback_reason"] = (
+                "hybrid metadata ptr_features requested axis_info"
+            )
+            metadata["adapter_fallback_chain"] = [
+                "triton-shared",
+                "triton-linalg",
+            ]
 
         from .triton_linalg_adapter import TritonLinalgAdapter
 
         return TritonLinalgAdapter().convert(ttir_module, metadata, context)
+
+    @staticmethod
+    def _strict_mode(metadata: dict) -> bool:
+        strict = metadata.get("adapter_policy_strict", True)
+        if isinstance(strict, str):
+            return strict.lower() not in {"0", "false", "no", "off"}
+        return bool(strict)
 
     def get_output_dialects(self) -> List[str]:
         return [
