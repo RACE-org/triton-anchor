@@ -167,15 +167,18 @@ def get_packages():
     packages = [
         # 上游 Triton 前端
         "triton",
-        "triton._C",
         "triton.compiler",
         "triton.language",
         "triton.language.extra",
-        "triton.language.extra.cuda",
-        "triton.language.extra.hip",
         "triton.runtime",
         "triton.backends",
         "triton.tools",
+        # Triton 3.4+ imports Gluon language symbols from the shared AST
+        # generator even for ordinary Triton kernels. Anchor provides a small
+        # import-compatible stub instead of packaging NVIDIA Gluon.
+        "triton.experimental",
+        "triton.experimental.gluon",
+        "triton.experimental.gluon.language",
         # triton-anchor 编译框架
         "triton_anchor",
         "triton_anchor.adapters",
@@ -183,6 +186,12 @@ def get_packages():
         "triton_anchor.language",
         "triton_anchor.tests",
     ]
+    # Upstream versions before 3.2 shipped CUDA/HIP helper subpackages here;
+    # newer versions discover optional extra-language packages dynamically.
+    for backend in ("cuda", "hip"):
+        package_dir = Path(get_base_dir()) / "triton" / "python" / "triton" / "language" / "extra" / backend
+        if package_dir.is_dir():
+            packages.append(f"triton.language.extra.{backend}")
     return packages
 
 
@@ -195,6 +204,9 @@ setup(
     package_dir={
         "": "python",
         "triton": "triton/python/triton",
+        "triton.experimental": "python/triton_experimental_stub",
+        "triton.experimental.gluon": "python/triton_experimental_stub/gluon",
+        "triton.experimental.gluon.language": "python/triton_experimental_stub/gluon/language",
     },
     packages=get_packages(),
     install_requires=["filelock"],

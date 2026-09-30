@@ -80,6 +80,35 @@ class MLIRContext;
 } // namespace mlir
 
 using namespace mlir;
+
+namespace {
+using MemoryEffectList =
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>;
+
+template <typename ValueT, typename... Args,
+          std::enable_if_t<
+              std::is_convertible_v<std::decay_t<ValueT>, Value>, int> = 0>
+void addEffect(MemoryEffectList &effects, MemoryEffects::Effect *effect,
+               ValueT &&rawValue, Args &&...args) {
+  Value value = std::forward<ValueT>(rawValue);
+  if (auto result = dyn_cast<OpResult>(value)) {
+    effects.emplace_back(effect, result, std::forward<Args>(args)...);
+    return;
+  }
+  effects.emplace_back(effect, cast<BlockArgument>(value),
+                       std::forward<Args>(args)...);
+}
+
+template <typename First, typename... Rest,
+          std::enable_if_t<
+              !std::is_convertible_v<std::decay_t<First>, Value>, int> = 0>
+void addEffect(MemoryEffectList &effects, MemoryEffects::Effect *effect,
+               First &&first, Rest &&...rest) {
+  effects.emplace_back(effect, std::forward<First>(first),
+                       std::forward<Rest>(rest)...);
+}
+} // namespace
+
 using namespace mlir::linalg;
 using namespace mlir::triton;
 using namespace mlir::triton::linalg_ext;
@@ -122,14 +151,14 @@ static void getGenericEffectsImpl(
   for (auto operand : inputOperands) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Read::get(), operand, /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), operand, /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
   }
   for (auto operand : outputOperands) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Write::get(), operand, /*stage=*/1,
+    addEffect(effects, MemoryEffects::Write::get(), operand, /*stage=*/1,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
   }
@@ -147,7 +176,7 @@ static void getGenericEffectsImpl(
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
     if (linalgOp.payloadUsesValueFromOperand(&linalgOp->getOpOperand(index))) {
-      effects.emplace_back(MemoryEffects::Read::get(), operand, /*stage=*/0,
+      addEffect(effects, MemoryEffects::Read::get(), operand, /*stage=*/0,
                            /*effectOnFullRegion=*/true,
                            SideEffects::DefaultResource::get());
     }
@@ -159,11 +188,11 @@ static void getGenericEffectsImpl(
       continue;
     if (linalgOp.payloadUsesValueFromOperand(
             &linalgOp->getOpOperand(index + inputOperandSize))) {
-      effects.emplace_back(MemoryEffects::Read::get(), operand, /*stage=*/0,
+      addEffect(effects, MemoryEffects::Read::get(), operand, /*stage=*/0,
                            /*effectOnFullRegion=*/true,
                            SideEffects::DefaultResource::get());
     }
-    effects.emplace_back(MemoryEffects::Write::get(), operand, /*stage=*/0,
+    addEffect(effects, MemoryEffects::Write::get(), operand, /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
   }
@@ -492,13 +521,14 @@ static void printNamedStructuredOpResults(OpAsmPrinter &p,
 }
 
 static void printNamedStructuredOp(OpAsmPrinter &p, Operation *op,
-                                   ValueRange inputs, ValueRange outputs) {
-  p.printOptionalAttrDict(
-      op->getAttrs(),
-      /*elidedAttrs=*/{"operand_segment_sizes",
-                       // See generated code in
-                       // LinalgNamedStructuredOps.yamlgen.cpp.inc
-                       "linalg.memoized_indexing_maps"});
+                                   ValueRange inputs, ValueRange outputs,
+                                   ArrayRef<StringRef> elidedAttrs = {}) {
+  SmallVector<StringRef> ignoredAttrs{
+      "operand_segment_sizes",
+      // See generated code in LinalgNamedStructuredOps.yamlgen.cpp.inc.
+      "linalg.memoized_indexing_maps"};
+  llvm::append_range(ignoredAttrs, elidedAttrs);
+  p.printOptionalAttrDict(op->getAttrs(), ignoredAttrs);
 
   // Printing is shared with generic ops, except for the region and
   // attributes.
@@ -508,6 +538,13 @@ static void printNamedStructuredOp(OpAsmPrinter &p, Operation *op,
   printNamedStructuredOpResults(p, op->getResultTypes());
 
   // Region is elided.
+}
+
+static Speculation::Speculatability
+getGenericSpeculatabilityImpl(linalg::LinalgOp linalgOp) {
+  if (!linalgOp.hasPureTensorSemantics())
+    return Speculation::NotSpeculatable;
+  return Speculation::RecursivelySpeculatable;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1407,21 +1444,21 @@ void ScatterOp::getEffects(
     return;
 
   if (mask()) {
-    effects.emplace_back(MemoryEffects::Read::get(), mask(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), mask(), /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Read::get(), update(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), update(), /*stage=*/0,
                          /*effectOnFullRegion=*/false,
                          SideEffects::DefaultResource::get());
   } else {
-    effects.emplace_back(MemoryEffects::Read::get(), update(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), update(), /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
   }
-  effects.emplace_back(MemoryEffects::Read::get(), indice(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), indice(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), getInit(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), getInit(), /*stage=*/1,
                        /*effectOnFullRegion=*/false,
                        SideEffects::DefaultResource::get());
 }
@@ -1470,7 +1507,7 @@ void ScanOp::getEffects(
   for (auto operand : getDpsInits()) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Read::get(), operand, /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), operand, /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
   }
@@ -1731,21 +1768,21 @@ void GatherOp::getEffects(
   if (!hasPureBufferSemantics())
     return;
 
-  effects.emplace_back(MemoryEffects::Read::get(), input(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), input(), /*stage=*/0,
                        /*effectOnFullRegion=*/false,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(), indice(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), indice(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
   if (mask()) {
-    effects.emplace_back(MemoryEffects::Read::get(), mask(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), mask(), /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), getInit(), /*stage=*/1,
+    addEffect(effects, MemoryEffects::Write::get(), getInit(), /*stage=*/1,
                          /*effectOnFullRegion=*/false,
                          SideEffects::DefaultResource::get());
   } else {
-    effects.emplace_back(MemoryEffects::Write::get(), getInit(), /*stage=*/1,
+    addEffect(effects, MemoryEffects::Write::get(), getInit(), /*stage=*/1,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
   }
@@ -1785,23 +1822,23 @@ void AtomicRMWOp::getEffects(
   // FIXME: When atomic ops support memref input, we should remove the effects
   // of tensor.
   if (!hasPureBufferSemantics()) {
-    effects.emplace_back(MemoryEffects::Read::get(), src(),
+    addEffect(effects, MemoryEffects::Read::get(), src(),
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), src(),
+    addEffect(effects, MemoryEffects::Write::get(), src(),
                          SideEffects::DefaultResource::get());
     return;
   }
 
-  effects.emplace_back(MemoryEffects::Read::get(), input(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), input(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(), src(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), src(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), src(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), src(), /*stage=*/1,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), dst(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), dst(), /*stage=*/1,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
 }
@@ -1848,43 +1885,43 @@ void GatherAtomicRMWOp::getEffects(
   // FIXME: When atomic ops support memref input, we should remove the effects
   // of tensor.
   if (!hasPureBufferSemantics()) {
-    effects.emplace_back(MemoryEffects::Read::get(), src(),
+    addEffect(effects, MemoryEffects::Read::get(), src(),
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), src(),
+    addEffect(effects, MemoryEffects::Write::get(), src(),
                          SideEffects::DefaultResource::get());
     return;
   }
 
-  effects.emplace_back(MemoryEffects::Read::get(), indice(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), indice(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
   if (mask()) {
-    effects.emplace_back(MemoryEffects::Read::get(), mask(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), mask(), /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Read::get(), input(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), input(), /*stage=*/0,
                          /*effectOnFullRegion=*/false,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Read::get(), src(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), src(), /*stage=*/0,
                          /*effectOnFullRegion=*/false,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), src(), /*stage=*/1,
+    addEffect(effects, MemoryEffects::Write::get(), src(), /*stage=*/1,
                          /*effectOnFullRegion=*/false,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), window(), /*stage=*/1,
+    addEffect(effects, MemoryEffects::Write::get(), window(), /*stage=*/1,
                          /*effectOnFullRegion=*/false,
                          SideEffects::DefaultResource::get());
   } else {
-    effects.emplace_back(MemoryEffects::Read::get(), input(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), input(), /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Read::get(), src(), /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), src(), /*stage=*/0,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), src(), /*stage=*/1,
+    addEffect(effects, MemoryEffects::Write::get(), src(), /*stage=*/1,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), window(), /*stage=*/1,
+    addEffect(effects, MemoryEffects::Write::get(), window(), /*stage=*/1,
                          /*effectOnFullRegion=*/true,
                          SideEffects::DefaultResource::get());
   }
@@ -1903,26 +1940,26 @@ void AtomicCASOp::getEffects(
   // FIXME: When atomic ops support memref input, we should remove the effects
   // of tensor.
   if (!hasPureBufferSemantics()) {
-    effects.emplace_back(MemoryEffects::Read::get(), input(),
+    addEffect(effects, MemoryEffects::Read::get(), input(),
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), input(),
+    addEffect(effects, MemoryEffects::Write::get(), input(),
                          SideEffects::DefaultResource::get());
     return;
   }
 
-  effects.emplace_back(MemoryEffects::Read::get(), input(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), input(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), input(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), input(), /*stage=*/1,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(), cmp(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), cmp(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(), val(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), val(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), getInit(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), getInit(), /*stage=*/1,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
 }
@@ -1941,29 +1978,29 @@ void GatherAtomicCASOp::getEffects(
   // FIXME: When atomic ops support memref input, we should remove the effects
   // of tensor.
   if (!hasPureBufferSemantics()) {
-    effects.emplace_back(MemoryEffects::Read::get(), input(),
+    addEffect(effects, MemoryEffects::Read::get(), input(),
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), input(),
+    addEffect(effects, MemoryEffects::Write::get(), input(),
                          SideEffects::DefaultResource::get());
     return;
   }
 
-  effects.emplace_back(MemoryEffects::Read::get(), input(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), input(), /*stage=*/0,
                        /*effectOnFullRegion=*/false,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), input(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), input(), /*stage=*/1,
                        /*effectOnFullRegion=*/false,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(), cmp(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), cmp(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(), val(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), val(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Read::get(), indice(), /*stage=*/0,
+  addEffect(effects, MemoryEffects::Read::get(), indice(), /*stage=*/0,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
-  effects.emplace_back(MemoryEffects::Write::get(), getInit(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), getInit(), /*stage=*/1,
                        /*effectOnFullRegion=*/true,
                        SideEffects::DefaultResource::get());
 }
@@ -2571,7 +2608,7 @@ struct FoldOrthogonalPaddings : public OpRewritePattern<PadOp> {
                 loc, intAttr.getValue().getSExtValue());
           }
         } else {
-          lowValue = lowV.get<Value>();
+          lowValue = mlir::cast<Value>(lowV);
         }
         auto highV = newHighPad[i];
         Value highValue;
@@ -2581,7 +2618,7 @@ struct FoldOrthogonalPaddings : public OpRewritePattern<PadOp> {
                 loc, intAttr.getValue().getSExtValue());
           }
         } else {
-          highValue = highV.get<Value>();
+          highValue = mlir::cast<Value>(highV);
         }
         Value dstDim = rewriter.create<arith::AddIOp>(loc, srcDim, lowValue);
         dstDim = rewriter.create<arith::AddIOp>(loc, dstDim, highValue);
@@ -2853,14 +2890,14 @@ LogicalResult PadOp::verify() {
 void AssertOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  effects.emplace_back(MemoryEffects::Write::get(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), /*stage=*/1,
                        /*effectOnFullRegion=*/false,
                        SideEffects::DefaultResource::get());
 
   for (auto operand : getDpsInputs()) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Read::get(), operand, /*stage=*/0,
+    addEffect(effects, MemoryEffects::Read::get(), operand, /*stage=*/0,
                          /*effectOnFullRegion=*/false,
                          SideEffects::DefaultResource::get());
   }
@@ -2910,7 +2947,7 @@ LogicalResult HistogramOp::verify() {
 void ScalarAssertOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  effects.emplace_back(MemoryEffects::Write::get(), /*stage=*/1,
+  addEffect(effects, MemoryEffects::Write::get(), /*stage=*/1,
                        /*effectOnFullRegion=*/false,
                        SideEffects::DefaultResource::get());
 }

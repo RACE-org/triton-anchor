@@ -9,6 +9,7 @@ metadata: !LinalgOpMetadata
     data type as the accumulator/output.
   implements:
   - LinalgConvolutionOpInterface
+  - DeclareOpInterfaceMethods<ConditionallySpeculatable>
 structured_op: !LinalgStructuredOpConfig
   args:
   - !LinalgOperandDefConfig
@@ -88,6 +89,7 @@ metadata: !LinalgOpMetadata
     data type as the accumulator/output.
   implements:
   - LinalgConvolutionOpInterface
+  - DeclareOpInterfaceMethods<ConditionallySpeculatable>
 structured_op: !LinalgStructuredOpConfig
   args:
   - !LinalgOperandDefConfig

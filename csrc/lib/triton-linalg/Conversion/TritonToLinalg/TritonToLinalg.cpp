@@ -1299,8 +1299,7 @@ public:
     auto valType = condVal.getType();
 
     auto assertMessage =
-        llvm::formatv("{0}:{1}: {2} Assertion `{3}` failed", op.getFile(),
-                      op.getLine(), op.getFunc(), op.getMessage());
+        llvm::formatv("Assertion `{0}` failed", op.getMessage());
     auto rankType = cast<RankedTensorType>(valType);
 
     // Only supports int type.
@@ -1775,7 +1774,7 @@ void triton::TritonToLinalgPass::runOnOperation() {
       [](Operation *op) { return !op->getUsers().empty(); });
   target.addLegalOp<LLVM::IntToPtrOp, LLVM::PtrToIntOp, LLVM::GEPOp,
                     triton::aux::StoreResourceOp, triton::aux::ViewOp,
-                    bufferization::ToTensorOp, bufferization::ToMemrefOp,
+                    bufferization::ToTensorOp, bufferization::ToBufferOp,
                     bufferization::MaterializeInDestinationOp,
                     triton::aux::PrintOp, triton::aux::ScalarPrintOp>();
   target.addDynamicallyLegalDialect<

@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include <string>
 #include <tuple>
+#include <type_traits>
+#include <utility>
 
 #include "triton-linalg/Dialect/Auxiliary/IR/AuxiliaryDialect.h"
 #include "llvm/ADT/ilist_iterator.h"
@@ -61,6 +63,34 @@ class IRMapping;
 class Dialect;
 class NamedAttribute;
 } // namespace mlir
+
+namespace {
+using MemoryEffectList =
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>;
+
+template <typename ValueT, typename... Args,
+          std::enable_if_t<
+              std::is_convertible_v<std::decay_t<ValueT>, Value>, int> = 0>
+void addEffect(MemoryEffectList &effects, MemoryEffects::Effect *effect,
+               ValueT &&rawValue, Args &&...args) {
+  Value value = std::forward<ValueT>(rawValue);
+  if (auto result = dyn_cast<OpResult>(value)) {
+    effects.emplace_back(effect, result, std::forward<Args>(args)...);
+    return;
+  }
+  effects.emplace_back(effect, cast<BlockArgument>(value),
+                       std::forward<Args>(args)...);
+}
+
+template <typename First, typename... Rest,
+          std::enable_if_t<
+              !std::is_convertible_v<std::decay_t<First>, Value>, int> = 0>
+void addEffect(MemoryEffectList &effects, MemoryEffects::Effect *effect,
+               First &&first, Rest &&...rest) {
+  effects.emplace_back(effect, std::forward<First>(first),
+                       std::forward<Rest>(rest)...);
+}
+} // namespace
 //===----------------------------------------------------------------------===//
 // AuxiliaryDialect Interfaces
 //===----------------------------------------------------------------------===//
@@ -300,7 +330,7 @@ LogicalResult ViewOp::verify() {
   // identity layout.
   int64_t resultOffset;
   SmallVector<int64_t, 4> resultStrides;
-  if (failed(getStridesAndOffset(resultType, resultStrides, resultOffset)))
+  if (failed(resultType.getStridesAndOffset(resultStrides, resultOffset)))
     return emitError("expected result type to have strided layout but found ")
            << resultType;
 
@@ -345,18 +375,18 @@ void PrintOp::getEffects(
   for (auto operand : getDpsInputs()) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Read::get(), operand,
+    addEffect(effects, MemoryEffects::Read::get(), operand,
                          SideEffects::DefaultResource::get());
   }
   for (auto operand : getDpsInits()) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Read::get(), operand,
+    addEffect(effects, MemoryEffects::Read::get(), operand,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), operand,
+    addEffect(effects, MemoryEffects::Write::get(), operand,
                          SideEffects::DefaultResource::get());
   }
-  effects.emplace_back(MemoryEffects::Write::get(), 0, false,
+  addEffect(effects, MemoryEffects::Write::get(), 0, false,
                        SideEffects::DefaultResource::get());
 }
 
@@ -387,7 +417,7 @@ LogicalResult PrintOp::verify() {
 void ScalarPrintOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
-  effects.emplace_back(MemoryEffects::Write::get(), 0, false,
+  addEffect(effects, MemoryEffects::Write::get(), 0, false,
                        SideEffects::DefaultResource::get());
 }
 
@@ -422,15 +452,15 @@ void BitcastExtOp::getEffects(
   for (auto operand : getDpsInputs()) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Read::get(), operand,
+    addEffect(effects, MemoryEffects::Read::get(), operand,
                          SideEffects::DefaultResource::get());
   }
   for (auto operand : getDpsInits()) {
     if (!llvm::isa<MemRefType>(operand.getType()))
       continue;
-    effects.emplace_back(MemoryEffects::Read::get(), operand,
+    addEffect(effects, MemoryEffects::Read::get(), operand,
                          SideEffects::DefaultResource::get());
-    effects.emplace_back(MemoryEffects::Write::get(), operand,
+    addEffect(effects, MemoryEffects::Write::get(), operand,
                          SideEffects::DefaultResource::get());
   }
 }
@@ -471,7 +501,7 @@ LogicalResult BitcastExtOp::verify() {
     auto outBitwidth = outMemType.getElementTypeBitWidth();
     bool isLowToHigh = inBitwidth < outBitwidth ? 1 : 0;
     auto rank = memType.getRank();
-    auto stride = getStridesAndOffset(memType).first;
+    auto stride = memType.getStridesAndOffset().first;
     int64_t inLastDim = memType.getDimSize(rank - 1);
 
     if (isLowToHigh && (stride[rank - 1] != 1))

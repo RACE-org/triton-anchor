@@ -1195,20 +1195,21 @@ public:
   LogicalResult matchAndRewrite(triton::AssertOp op,
                                 PatternRewriter &rewriter) const override {
     auto condVal = op.getCondition();
-    auto valType = condVal.getType();
-    auto rank = valType.getRank();
+    auto rankedType = dyn_cast<RankedTensorType>(condVal.getType());
+    if (!rankedType)
+      return failure();
+    auto rank = rankedType.getRank();
     auto assertMessage =
-        llvm::formatv("{0}:{1}: {2} Assertion `{3}` failed", op.getFile(),
-                      op.getLine(), op.getFunc(), op.getMessage());
-    assert(isa<mlir::IntegerType>(valType.getElementType()) &&
+        llvm::formatv("Assertion `{0}` failed", op.getMessage());
+    assert(isa<mlir::IntegerType>(rankedType.getElementType()) &&
            "Only support int tensor for assert");
     // If the AssertOp input shape dimension is 1 or 0 dimension and the 0th
     // dimension is 1, it is converted to ScalarAssertOp.
-    if ((rank != 1 && rank != 0) || (rank > 0 && valType.getShape()[0] != 1)) {
+    if ((rank != 1 && rank != 0) ||
+        (rank > 0 && rankedType.getShape()[0] != 1)) {
       return failure();
     }
-    auto rankType = cast<RankedTensorType>(valType);
-    auto elemType = rankType.getElementType();
+    auto elemType = rankedType.getElementType();
     Value zeroIndex = rewriter.create<arith::ConstantIndexOp>(op.getLoc(), 0);
     Value cond;
     if (rank == 0) {
@@ -1265,8 +1266,7 @@ struct CanonicalizeTritonPass
         CanonicalizeTtTensorPtrDimDegerationPattern<triton::LoadOp>,
         CanonicalizeTtTensorPtrDimDegerationPattern<triton::StoreOp>>(&ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
   }

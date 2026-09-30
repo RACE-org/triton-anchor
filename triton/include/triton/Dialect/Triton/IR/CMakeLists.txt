@@ -1,13 +1,6 @@
 set(MLIR_BINARY_DIR ${CMAKE_BINARY_DIR})
 
-if(TTGPU)
-    set(TRITON_OPS_TD "${CMAKE_SOURCE_DIR}/csrc/include/ttgpu/triton/Dialect/Triton/IR/TritonOps.td")
-else()
-    set(TRITON_OPS_TD TritonOps.td)
-endif()
-
-# set(LLVM_TARGET_DEFINITIONS TritonOps.td)
-set(LLVM_TARGET_DEFINITIONS ${TRITON_OPS_TD})
+set(LLVM_TARGET_DEFINITIONS TritonOps.td)
 mlir_tablegen(Ops.h.inc -gen-op-decls)
 mlir_tablegen(Ops.cpp.inc -gen-op-defs)
 mlir_tablegen(OpsEnums.h.inc -gen-enum-decls)
@@ -27,8 +20,8 @@ set(LLVM_TARGET_DEFINITIONS TritonInterfaces.td)
 mlir_tablegen(AttrInterfaces.h.inc -gen-attr-interface-decls)
 mlir_tablegen(AttrInterfaces.cpp.inc -gen-attr-interface-defs)
 
-set(LLVM_TARGET_DEFINITIONS TritonTypeInterfaces.td)
-mlir_tablegen(TritonTypeInterfaces.h.inc -gen-type-interface-decls)
-mlir_tablegen(TritonTypeInterfaces.cpp.inc -gen-type-interface-defs)
+set(LLVM_TARGET_DEFINITIONS TritonOpInterfaces.td)
+mlir_tablegen(OpInterfaces.h.inc -gen-op-interface-decls)
+mlir_tablegen(OpInterfaces.cpp.inc -gen-op-interface-defs)
 
 add_public_tablegen_target(TritonTableGen)

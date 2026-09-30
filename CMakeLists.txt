@@ -4,18 +4,12 @@ if(POLICY CMP0116)
   cmake_policy(SET CMP0116 OLD)
 endif()
 
-project(triton-anchor LANGUAGES CXX)
+project(triton-anchor LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
-
-if(DEFINED ENV{TTGPU})
-  set(TTGPU ON)
-else()
-  set(TTGPU OFF)
-endif()
 
 # ═══════════════════════════════════════════════════════════════════════
 # LLVM / MLIR 查找
@@ -78,10 +72,6 @@ set(TRITON_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/triton")
 include_directories(${MLIR_INCLUDE_DIRS})
 include_directories(${LLVM_INCLUDE_DIRS})
 
-if(TTGPU)
-  include_directories(BEFORE ${CMAKE_SOURCE_DIR}/csrc/include/ttgpu)
-endif()
-
 # 上游 Triton 头文件
 include_directories(${UPSTREAM_DIR}/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/triton/include)  # TableGen 生成
@@ -120,10 +110,48 @@ endfunction()
 # ═══════════════════════════════════════════════════════════════════════
 # Part 1: 编译上游 Triton 核心 C++ 库
 # ═══════════════════════════════════════════════════════════════════════
+# The upstream CMake graph keeps an interface dependency on the in-tree
+# NVIDIA backend dialect. Anchor deliberately does not vendor that backend;
+# provide an empty interface target so the upstream source remains untouched.
+if(NOT TARGET NVGPUIR)
+  add_library(NVGPUIR INTERFACE)
+endif()
+if(NOT TARGET ProtonIR)
+  add_library(ProtonIR INTERFACE)
+endif()
+
 # TableGen 生成的头文件（Dialect 定义）
 add_subdirectory(triton/include)
 # C++ 库实现
 add_subdirectory(triton/lib)
+
+# Triton 3.4+ folds optional Proton handling into the generic TTIR-to-TTGPU
+# source. Anchor does not ship Proton, so compile a generated Proton-free copy
+# without patching the vendored upstream file.
+if(TARGET TritonToTritonGPU AND
+   NOT EXISTS "${UPSTREAM_DIR}/third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h")
+  set(TRITON_TO_TTGPU_SOURCE
+      "${UPSTREAM_DIR}/lib/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.cpp")
+  set(TRITON_TO_TTGPU_ANCHOR_SOURCE
+      "${CMAKE_CURRENT_BINARY_DIR}/generated/TritonToTritonGPUPass.cpp")
+  execute_process(
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT_FILE=${TRITON_TO_TTGPU_SOURCE}
+            -DOUTPUT_FILE=${TRITON_TO_TTGPU_ANCHOR_SOURCE}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/csrc/bindings/PrepareTritonGPUConversion.cmake
+    RESULT_VARIABLE PREPARE_TTGPU_RESULT
+  )
+  if(NOT PREPARE_TTGPU_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to prepare Proton-free TTIR-to-TTGPU source")
+  endif()
+  get_target_property(TRITON_TO_TTGPU_SOURCES TritonToTritonGPU SOURCES)
+  list(FILTER TRITON_TO_TTGPU_SOURCES
+       EXCLUDE REGEX "TritonToTritonGPUPass\\.cpp$")
+  set_property(TARGET TritonToTritonGPU PROPERTY SOURCES
+               "${TRITON_TO_TTGPU_SOURCES}")
+  target_sources(TritonToTritonGPU PRIVATE
+                 "${TRITON_TO_TTGPU_ANCHOR_SOURCE}")
+endif()
 # f2reduce 辅助库
 add_subdirectory(triton/third_party/f2reduce)
 
@@ -173,20 +201,25 @@ if(TRITON_BUILD_PYTHON_MODULE)
     include_directories(${PYTHON_INCLUDE_DIRS})
   endif()
 
-  # 后端标识（空 = 无硬件后端，由 triton-anchor 插件机制代替）
-  set(TRITON_BACKENDS_TUPLE "()")
-  add_compile_definitions(TRITON_BACKENDS_TUPLE=${TRITON_BACKENDS_TUPLE})
-
-  if(TTGPU)
-    set(IR_CC "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/ir.cc")
-  else()
-    set(IR_CC "${PYTHON_SRC_PATH}/ir.cc")
+  set(TRITON_IR_BINDING_SOURCE "${PYTHON_SRC_PATH}/ir.cc")
+  if(NOT EXISTS "${UPSTREAM_DIR}/third_party/proton/dialect/include/Dialect/Proton/IR/Dialect.h")
+    set(TRITON_IR_BINDING_SOURCE
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/triton_core_ir.cc")
+    add_custom_command(
+      OUTPUT "${TRITON_IR_BINDING_SOURCE}"
+      COMMAND ${CMAKE_COMMAND}
+              -DINPUT_FILE=${PYTHON_SRC_PATH}/ir.cc
+              -DOUTPUT_FILE=${TRITON_IR_BINDING_SOURCE}
+              -P ${CMAKE_CURRENT_SOURCE_DIR}/csrc/bindings/PrepareTritonIR.cmake
+      DEPENDS ${PYTHON_SRC_PATH}/ir.cc
+              ${CMAKE_CURRENT_SOURCE_DIR}/csrc/bindings/PrepareTritonIR.cmake
+      VERBATIM
+    )
   endif()
 
   add_library(triton SHARED
-    ${PYTHON_SRC_PATH}/main.cc
-    # ${PYTHON_SRC_PATH}/ir.cc
-    ${IR_CC}
+    csrc/bindings/triton_core_main.cc
+    ${TRITON_IR_BINDING_SOURCE}
     ${PYTHON_SRC_PATH}/passes.cc
     ${PYTHON_SRC_PATH}/interpreter.cc
     ${PYTHON_SRC_PATH}/llvm.cc
@@ -219,7 +252,6 @@ if(TRITON_BUILD_PYTHON_MODULE)
     MLIRIndexToLLVM
     MLIRGPUToROCDLTransforms
 
-    $<$<BOOL:${TTGPU}>:MLIRFTVMToLLVMIRTranslation>
     TritonAnalysis
     TritonTransforms
     TritonGPUTransforms
@@ -289,4 +321,3 @@ if(TRITON_BUILD_PYTHON_MODULE)
   # 确保 libtriton.so 输出到 triton/_C 目录
   set_target_properties(triton PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/triton/_C)
 endif()
-

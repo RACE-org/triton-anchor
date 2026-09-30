@@ -73,14 +73,15 @@ ChangeResult AxisInfoLattice::join(const AxisInfoExt &rhs) {
 AxisInfoAnalysisExt::AxisInfoAnalysisExt(mlir::DataFlowSolver &solver)
     : dataflow::SparseForwardDataFlowAnalysis<AxisInfoLattice>(solver) {}
 
-void AxisInfoAnalysisExt::visitOperation(
+LogicalResult AxisInfoAnalysisExt::visitOperation(
     Operation *op, ArrayRef<const AxisInfoLattice *> operands,
     ArrayRef<AxisInfoLattice *> results) {
   LLVM_DEBUG(llvm::dbgs() << "Inferring axis info for " << *op << "\n");
 
   auto inferrable = dyn_cast<InferAxisInfoInterface>(op);
   if (!inferrable) {
-    return setAllToEntryStates(results);
+    setAllToEntryStates(results);
+    return success();
   }
 
   auto joinCallback = [op, results, this](Value v, const AxisInfoExt &info) {
@@ -108,6 +109,7 @@ void AxisInfoAnalysisExt::visitOperation(
         return val->getValue();
       }));
   inferrable.inferAxisInfos(argInfos, joinCallback);
+  return success();
 }
 
 void AxisInfoAnalysisExt::visitNonControlFlowArguments(

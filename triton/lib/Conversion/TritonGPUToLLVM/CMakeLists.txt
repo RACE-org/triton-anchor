@@ -1,42 +1,25 @@
-if(TTGPU)
-  set(TRITON_GPU_LLVM_TTGPU 
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/DotOpToLLVM/FMA.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/TypeConverter.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/Utility.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVM.cpp"
-  )
-else()
-  set(TRITON_GPU_LLVM_TTGPU 
-    ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp
-    DotOpToLLVM/FMA.cpp
-    TypeConverter.cpp
-    Utility.cpp
-    ElementwiseOpToLLVM.cpp
-  )
-endif()
-
 add_triton_library(TritonGPUToLLVM
-    # ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp
-    # DotOpToLLVM/FMA.cpp
-    # TypeConverter.cpp
-    # Utility.cpp
-    # ElementwiseOpToLLVM.cpp
-    ${TRITON_GPU_LLVM_TTGPU}
-    MemoryOpToLLVM.cpp
-    AssertOpToLLVM.cpp
-    ViewOpToLLVM.cpp
-    MakeRangeOpToLLVM.cpp
-    HistogramOpToLLVM.cpp
+    DotOpToLLVM/FMA.cpp
+    DotOpToLLVM/FMADotUtility.cpp
     AllocateSharedMemory.cpp
+    AllocateWarpGroups.cpp
+    AssertOpToLLVM.cpp
+    ControlFlowOpToLLVM.cpp
+    ConvertLayoutOpToLLVM.cpp
+    ElementwiseOpToLLVM.cpp
+    FuncOpToLLVM.cpp
+    GatherOpToLLVM.cpp
+    GlobalScratchMemoryAllocation.cpp
+    HistogramOpToLLVM.cpp
+    MakeRangeOpToLLVM.cpp
+    MemoryOpToLLVM.cpp
+    PrintOpToLLVM.cpp
     ReduceOpToLLVM.cpp
     ScanOpToLLVM.cpp
-    ConvertLayoutOpToLLVM.cpp
-    ControlFlowOpToLLVM.cpp
-    FuncOpToLLVM.cpp
     SPMDOpToLLVM.cpp
-    DecomposeUnsupportedConversions.cpp
-    PrintOpToLLVM.cpp
+    TypeConverter.cpp
+    Utility.cpp
+    ViewOpToLLVM.cpp
 
     DEPENDS
     TritonGPUConversionPassIncGen

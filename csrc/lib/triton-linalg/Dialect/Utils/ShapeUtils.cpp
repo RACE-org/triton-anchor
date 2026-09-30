@@ -44,7 +44,7 @@ bool mlir::triton::isConsecutive(llvm::ArrayRef<int64_t> array) {
 }
 
 bool mlir::triton::trailingNDimsContiguous(MemRefType type, int64_t n) {
-  if (canonicalizeStridedLayout(type).getLayout().isIdentity())
+  if (type.canonicalizeStridedLayout().getLayout().isIdentity())
     return true;
 
   auto memrefShape = type.getShape().take_back(n);
@@ -53,7 +53,7 @@ bool mlir::triton::trailingNDimsContiguous(MemRefType type, int64_t n) {
 
   int64_t offset;
   SmallVector<int64_t> stridesFull;
-  if (!succeeded(getStridesAndOffset(type, stridesFull, offset)))
+  if (!succeeded(type.getStridesAndOffset(stridesFull, offset)))
     return false;
   auto strides = ArrayRef<int64_t>(stridesFull).take_back(n);
 
@@ -102,9 +102,9 @@ bool mlir::triton::isNoTile(OpFoldResult tileSize, OpFoldResult offset,
 }
 
 OpFoldResult mlir::triton::canonicalizeOpFoldResult(OpFoldResult in) {
-  if (in.is<Attribute>())
+  if (isa<Attribute>(in))
     return in;
-  return getAsOpFoldResult(in.get<Value>());
+  return getAsOpFoldResult(cast<Value>(in));
 }
 
 SmallVector<OpFoldResult>
@@ -174,7 +174,7 @@ Value mlir::triton::materializeOpFoldResult(OpBuilder &builder, Location loc,
                                             OpFoldResult opFoldResult) {
   if (auto value = dyn_cast<Value>(opFoldResult))
     return value;
-  auto attr = cast<IntegerAttr>(opFoldResult.get<Attribute>());
+  auto attr = cast<IntegerAttr>(cast<Attribute>(opFoldResult));
   return builder.create<arith::ConstantIndexOp>(loc,
                                                 attr.getValue().getSExtValue());
 }

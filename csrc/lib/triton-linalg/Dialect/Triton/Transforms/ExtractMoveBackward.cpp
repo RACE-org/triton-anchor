@@ -1576,13 +1576,13 @@ struct ExtractLikeMoveBackwardPass
                       SCFRearrangementPattern<tensor::ExtractSliceOp>>(context);
 
       bool extractChanged = false;
-      if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                              std::move(extractPatterns),
-                                              config, &extractChanged)))
+      if (failed(applyPatternsGreedily(getOperation(),
+                                       std::move(extractPatterns), config,
+                                       &extractChanged)))
         return signalPassFailure();
 
       bool scfChanged = false;
-      if (failed(applyPatternsAndFoldGreedily(
+      if (failed(applyPatternsGreedily(
               getOperation(), std::move(scfPatterns), config, &scfChanged)))
         return signalPassFailure();
 

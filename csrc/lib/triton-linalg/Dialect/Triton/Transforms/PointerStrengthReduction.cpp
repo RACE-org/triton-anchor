@@ -1265,8 +1265,8 @@ struct PointerStrengthReductionPtrPass
         .insert<PtrWithCFGStrengthReductionPattern<RegionBranchOpInterface>>(
             &ctx);
 
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patternsNormal)))) {
+    if (failed(applyPatternsGreedily(getOperation(),
+                                     std::move(patternsNormal)))) {
       signalPassFailure();
     }
   }

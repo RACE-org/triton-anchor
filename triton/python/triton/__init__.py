@@ -1,5 +1,5 @@
 """isort:skip_file"""
-__version__ = '3.0.0'
+__version__ = '3.4.0'
 
 # ---------------------------------------
 # Note: import order is significant here.
@@ -20,10 +20,13 @@ from .runtime import (
 from .runtime.jit import jit
 from .compiler import compile, CompilationError
 from .errors import TritonError
+from .runtime._allocation import set_allocator
 
 from . import language
 from . import testing
 from . import tools
+
+must_use_result = language.core.must_use_result
 
 __all__ = [
     "autotune",
@@ -32,17 +35,18 @@ __all__ = [
     "compile",
     "Config",
     "heuristics",
-    "impl",
     "InterpreterError",
     "jit",
     "JITFunction",
     "KernelInterface",
     "language",
     "MockTensor",
+    "must_use_result",
     "next_power_of_2",
     "OutOfResources",
     "reinterpret",
     "runtime",
+    "set_allocator",
     "TensorWrapper",
     "TritonError",
     "testing",
