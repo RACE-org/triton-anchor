@@ -1,1079 +1,169 @@
 name: CI Gateway
-run-name: "${{ inputs.run_title || (github.event_name == 'pull_request_target' && format('PR {0} | h:{1} | route', github.event.pull_request.number, github.event.pull_request.head.sha)) || (github.event_name == 'workflow_dispatch' && inputs.mode == 'dispatch' && inputs.pr_number != '' && format('PR {0} | route', inputs.pr_number)) || (github.event_name == 'workflow_dispatch' && inputs.mode == 'push' && format('Push {0} | route', inputs.source_branch)) || format('CI Gateway | {0}', github.ref_name) }}"
-
+run-name: >-
+  ${{ inputs.mode == 'publish' && 'Dashboard | 发布页面' || format('{0} | receive {1}', inputs.run_title || (inputs.task_id && format('Task {0}', inputs.task_id)) || 'Local CI result', inputs.receiver_round) }}
 on:
-  pull_request_target:
-    types:
-      - opened
-      - synchronize
-      - reopened
-      - ready_for_review
-      - edited
-      - closed
-      - converted_to_draft
   workflow_dispatch:
     inputs:
-      gateway_contract_version:
-        description: "Internal gateway contract version"
-        required: false
-        default: "3"
-        type: string
       mode:
-        description: "Gateway operation; use push for a manual branch task"
-        required: true
-        default: "dispatch"
         type: choice
-        options:
-          - dispatch
-          - push
-          - receive
-          - pages
-          - cancel
-      pr_number:
-        description: "Pull request number"
-        required: false
-        default: ""
-        type: string
-      expected_head_sha:
-        description: "Exact pull request head SHA"
-        required: false
-        default: ""
-        type: string
-      comparison_base_sha:
-        description: "Frozen base SHA used for result comparison"
-        required: false
-        default: ""
-        type: string
-      worker_revision_sha:
-        description: "Exact target-branch revision containing the workers"
-        required: false
-        default: ""
-        type: string
-      authorization_source:
-        description: "Trusted route authorization source"
-        required: false
-        default: ""
-        type: string
-      tested_sha:
-        description: "Exact revision executed by Local CI; PRs use the merge result"
-        required: false
-        default: ""
-        type: string
-      requested_sha:
-        description: "Optional manual-push branch SHA used to reject drift"
-        required: false
-        default: ""
-        type: string
-      source_branch:
-        description: "Source branch represented by the local CI task"
-        required: false
-        default: ""
-        type: string
-      target_branch:
-        description: "Actual pull request base or push branch represented by the task"
-        required: false
-        default: ""
-        type: string
-      task_ref:
-        description: "Gitee task branch"
-        required: false
-        default: ""
-        type: string
-      context:
-        description: "GitHub commit status context"
-        required: false
-        default: ""
-        type: string
-      attempt:
-        description: "Receiver continuation attempt"
-        required: false
-        default: "1"
-        type: string
-      started_at:
-        description: "Initial dispatch time in UTC"
-        required: false
-        default: ""
-        type: string
-      wait_seconds:
-        description: "Polling window for this receiver attempt"
-        required: false
-        default: "20400"
-        type: string
-      cancellation_reason:
-        description: "Reason supplied to the cancellation worker"
-        required: false
-        default: ""
-        type: string
-      delete_task_ref:
-        description: "Delete the unconsumed Gitee task ref"
-        required: false
-        default: false
-        type: boolean
-      run_title:
-        description: "Workflow run title passed between Gateway stages"
-        required: false
-        default: ""
-        type: string
-
+        options: [receive, publish]
+        default: receive
+      task_id: {type: string, default: ''}
+      receiver_round: {type: choice, options: ['1', '2', '3'], default: '1'}
+      run_title: {type: string, default: '', description: 'Display identity passed between stages; normally leave empty'}
 permissions: {}
-
-env:
-  GATEWAY_CONTRACT_VERSION: "3"
-  FALLBACK_WORKER_BRANCH: ${{ vars.LOCAL_CI_FALLBACK_WORKER_BRANCH || 'CI_dev' }}
-  FALLBACK_PR_ENABLED: ${{ vars.LOCAL_CI_FALLBACK_PR_ENABLED || 'true' }}
-  FALLBACK_PUSH_ENABLED: ${{ vars.LOCAL_CI_FALLBACK_PUSH_ENABLED || 'true' }}
-
+concurrency:
+  group: ${{ format('local-ci-receive-{0}', inputs.task_id) }}
+  cancel-in-progress: false
 jobs:
-  route-cancellation:
-    name: Route PR lifecycle cancellation
-    if: ${{ github.event_name == 'pull_request_target' }}
+  receive:
+    name: Receive local CI result
+    if: >-
+      github.repository == 'RACE-org/triton-anchor' &&
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'receive'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
-      pull-requests: read
-      statuses: write
-    steps:
-      - name: Cancel obsolete Local CI work
-        uses: actions/github-script@v7
-        env:
-          STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
-        with:
-          script: |
-            const pull = context.payload.pull_request;
-            const action = context.payload.action;
-            const { owner, repo } = context.repo;
-            const previousBaseRef = context.payload.changes?.base?.ref?.from || '';
-            const repositoryName = `${owner}/${repo}`;
-            const externalFork = pull.head?.repo?.full_name !== repositoryName;
-
-            let targetRef = '';
-            let reason = '';
-            let deleteTaskRef = false;
-
-            if (action === 'closed') {
-              targetRef = pull.base.ref;
-              reason = 'pull request closed';
-              deleteTaskRef = true;
-            } else if (action === 'converted_to_draft') {
-              targetRef = pull.base.ref;
-              reason = 'pull request converted to draft';
-              deleteTaskRef = true;
-            } else if (action === 'synchronize' && externalFork) {
-              targetRef = pull.base.ref;
-              reason = 'external fork head changed; maintainer authorization expired';
-              deleteTaskRef = false;
-            } else if (action === 'edited' && previousBaseRef) {
-              targetRef = previousBaseRef;
-              reason = 'pull request retargeted';
-              deleteTaskRef = externalFork;
-            } else {
-              core.info('This event does not require lifecycle cancellation.');
-              return;
-            }
-
-            const shaPattern = /^[0-9a-f]{40}$/i;
-            if (!shaPattern.test(pull.head.sha)) {
-              throw new Error('The lifecycle event did not contain a valid head SHA');
-            }
-
-            const inspectCancellationWorker = async (ref, requireCrossBranch) => {
-              if (!ref) {
-                return null;
-              }
-              let branch;
-              try {
-                ({ data: branch } = await github.rest.repos.getBranch({
-                  owner,
-                  repo,
-                  branch: ref,
-                }));
-              } catch (error) {
-                if (error.status === 404) {
-                  core.notice(`Cancellation worker branch ${ref} does not exist.`);
-                  return null;
-                }
-                throw error;
-              }
-
-              const revision = branch.commit.sha;
-              if (!shaPattern.test(revision)) {
-                core.warning(`Cancellation worker ${ref} returned an invalid revision.`);
-                return null;
-              }
-              try {
-                const response = await github.rest.repos.getContent({
-                  owner,
-                  repo,
-                  path: '.github/ci-gateway-manifest.json',
-                  ref: revision,
-                });
-                if (Array.isArray(response.data) || response.data.type !== 'file') {
-                  return null;
-                }
-                const manifest = JSON.parse(
-                  Buffer.from(response.data.content, 'base64').toString('utf8')
-                );
-                const compatible =
-                  manifest.gateway_contract_version === process.env.GATEWAY_CONTRACT_VERSION &&
-                  manifest.role === 'worker' &&
-                  manifest.capabilities?.includes('cancel') &&
-                  (!requireCrossBranch ||
-                    manifest.capabilities.includes('cross-branch-pr'));
-                if (!compatible) {
-                  core.notice(`Branch ${ref} has no compatible cancellation worker.`);
-                  return null;
-                }
-                return { ref, revision };
-              } catch (error) {
-                if (error.status === 404 || error instanceof SyntaxError) {
-                  core.notice(`Branch ${ref} has no readable worker manifest.`);
-                  return null;
-                }
-                throw error;
-              }
-            };
-
-            const candidates = new Map();
-            const target = await inspectCancellationWorker(
-              targetRef,
-              targetRef !== pull.base.ref
-            );
-            if (target) {
-              candidates.set(target.ref, target);
-            }
-
-            const fallbackRef = process.env.FALLBACK_WORKER_BRANCH.trim();
-            const fallback = await inspectCancellationWorker(fallbackRef, true);
-            if (fallback) {
-              candidates.set(fallback.ref, fallback);
-            }
-
-            const workers = [...candidates.values()];
-            const cleanupRef = fallback?.ref || workers[0]?.ref || '';
-            const taskRef = `ci/pr-${pull.number}/${pull.head.ref}`;
-            const failures = [];
-            for (const worker of workers) {
-              try {
-                await github.rest.actions.createWorkflowDispatch({
-                  owner,
-                  repo,
-                  workflow_id: 'ci-gateway.yml',
-                  ref: worker.ref,
-                  inputs: {
-                    gateway_contract_version: process.env.GATEWAY_CONTRACT_VERSION,
-                    mode: 'cancel',
-                    pr_number: String(pull.number),
-                    expected_head_sha: pull.head.sha,
-                    worker_revision_sha: worker.revision,
-                    tested_sha: '',
-                    source_branch: pull.head.ref,
-                    target_branch: targetRef,
-                    task_ref: taskRef,
-                    context: process.env.STATUS_CONTEXT,
-                    cancellation_reason: reason,
-                    delete_task_ref: String(deleteTaskRef && worker.ref === cleanupRef),
-                    run_title: `PR ${pull.number} | h:${pull.head.sha.slice(0, 7)} | cancel`,
-                  },
-                });
-                core.info(
-                  `Cancellation routed to ${worker.ref} at ${worker.revision}.`
-                );
-              } catch (error) {
-                failures.push(`${worker.ref}: ${error.message}`);
-                core.warning(`Failed to route cancellation to ${worker.ref}: ${error.message}`);
-              }
-            }
-            if (workers.length === 0) {
-              core.notice('No compatible worker was available for lifecycle cancellation.');
-            }
-
-            if (action === 'closed' || action === 'converted_to_draft') {
-              await github.rest.repos.createCommitStatus({
-                owner,
-                repo,
-                sha: pull.head.sha,
-                state: 'error',
-                context: `${process.env.STATUS_CONTEXT}/routing`,
-                description: `local CI cancelled: ${reason}`.slice(0, 140),
-              });
-            }
-            if (failures.length > 0) {
-              throw new Error(`Lifecycle cancellation routing failed: ${failures.join('; ')}`);
-            }
-
-  prepare-route:
-    name: Prepare trusted PR route
-    if: ${{ github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'dispatch' && inputs.expected_head_sha == '' && inputs.worker_revision_sha == '') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      pull-requests: read
-      statuses: write
+    timeout-minutes: 350
+    permissions: {contents: read, pull-requests: read, checks: read, statuses: write, actions: write}
     outputs:
-      should_route: ${{ steps.prepare.outputs.should_route }}
-      requires_approval: ${{ steps.prepare.outputs.requires_approval }}
-      pr_number: ${{ steps.prepare.outputs.pr_number }}
-      head_sha: ${{ steps.prepare.outputs.head_sha }}
-      base_sha: ${{ steps.prepare.outputs.base_sha }}
-      tested_sha: ${{ steps.prepare.outputs.tested_sha }}
-      base_ref: ${{ steps.prepare.outputs.base_ref }}
-      head_repo: ${{ steps.prepare.outputs.head_repo }}
-      head_ref: ${{ steps.prepare.outputs.head_ref }}
-      authorization_source: ${{ steps.prepare.outputs.authorization_source }}
-      run_title: ${{ steps.prepare.outputs.run_title }}
+      state: ${{ steps.wait.outputs.receiver_state }}
+      control_sha: ${{ steps.control.outputs.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+      RECEIVER_TASK_ID: ${{ inputs.task_id }}
+      RECEIVER_ROUND: ${{ inputs.receiver_round }}
     steps:
-      - name: Resolve current PR and authorization
-        id: prepare
+      - name: Resolve CI_dev control revision
+        id: control
         uses: actions/github-script@v7
-        env:
-          MANUAL_PR_NUMBER: ${{ inputs.pr_number }}
-          STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
         with:
           script: |
-            const { owner, repo } = context.repo;
-            const automatic = context.eventName === 'pull_request_target';
-            const eventPull = context.payload.pull_request;
-            const prText = automatic
-              ? String(eventPull?.number || '')
-              : process.env.MANUAL_PR_NUMBER;
-            const shaPattern = /^[0-9a-f]{40}$/i;
-            const statusTarget =
-              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-
-            core.setOutput('should_route', 'false');
-            core.setOutput('requires_approval', 'false');
-            if (!/^[1-9][0-9]*$/.test(prText)) {
-              throw new Error('pr_number must be a positive integer');
-            }
-
-            let headSha = automatic ? eventPull?.head?.sha || '' : '';
-            let testedSha = '';
-            const publishStatus = async (state, description) => {
-              const hasMergeResult = shaPattern.test(testedSha);
-              const statusSha = hasMergeResult ? testedSha : headSha;
-              if (!shaPattern.test(statusSha)) {
-                core.warning('Cannot publish a route status because no valid SHA is available.');
-                return;
-              }
-              await github.rest.repos.createCommitStatus({
-                owner,
-                repo,
-                sha: statusSha,
-                state,
-                context: hasMergeResult
-                  ? process.env.STATUS_CONTEXT
-                  : `${process.env.STATUS_CONTEXT}/routing`,
-                description: description.slice(0, 140),
-                target_url: statusTarget,
-              });
-            };
-
-            try {
-              const { data: repository } = await github.rest.repos.get({ owner, repo });
-              if (!automatic && context.ref.replace('refs/heads/', '') !== repository.default_branch) {
-                throw new Error(
-                  `Manual PR authorization must run on the default branch ${repository.default_branch}`
-                );
-              }
-
-              if (!automatic) {
-                const { data: permission } =
-                  await github.rest.repos.getCollaboratorPermissionLevel({
-                    owner,
-                    repo,
-                    username: context.actor,
-                  });
-                if (!['write', 'maintain', 'admin'].includes(permission.permission)) {
-                  throw new Error(
-                    `Actor ${context.actor} does not have write, maintain, or admin permission`
-                  );
-                }
-              }
-
-              const prNumber = Number.parseInt(prText, 10);
-              const { data: pull } = await github.rest.pulls.get({
-                owner,
-                repo,
-                pull_number: prNumber,
-              });
-              headSha = pull.head.sha;
-
-              if (automatic) {
-                if (
-                  pull.head.sha !== eventPull.head.sha ||
-                  pull.base.ref !== eventPull.base.ref
-                ) {
-                  core.notice(`PR #${prNumber} changed after this event; ignoring stale routing.`);
-                  return;
-                }
-                if (
-                  context.payload.action === 'closed' ||
-                  context.payload.action === 'converted_to_draft'
-                ) {
-                  core.notice('The lifecycle cancellation job handles this event.');
-                  return;
-                }
-                if (
-                  context.payload.action === 'edited' &&
-                  !context.payload.changes?.base?.ref?.from
-                ) {
-                  core.notice('The PR was edited without changing its target branch.');
-                  return;
-                }
-              }
-
-              if (pull.state !== 'open') {
-                throw new Error(`PR #${prNumber} is not open`);
-              }
-              if (pull.draft) {
-                await publishStatus('error', 'local CI is paused while the pull request is draft');
-                return;
-              }
-              if (!shaPattern.test(pull.head.sha)) {
-                throw new Error('GitHub returned an invalid pull request head SHA');
-              }
-              if (!pull.head.repo?.full_name || !pull.head.ref || !pull.base.ref) {
-                throw new Error('Pull request repository or branch metadata is incomplete');
-              }
-
-              let mergeable = pull.mergeable;
-              let currentPull = pull;
-              for (let attempt = 0; mergeable === null && attempt < 4; attempt += 1) {
-                await new Promise((resolve) => setTimeout(resolve, 2000));
-                ({ data: currentPull } = await github.rest.pulls.get({
-                  owner,
-                  repo,
-                  pull_number: prNumber,
-                }));
-                mergeable = currentPull.mergeable;
-              }
-              if (mergeable === false) {
-                throw new Error('Pull request has merge conflicts and has no testable merge result');
-              }
-
-              let mergeRef;
-              try {
-                ({ data: mergeRef } = await github.rest.git.getRef({
-                  owner,
-                  repo,
-                  ref: `pull/${prNumber}/merge`,
-                }));
-              } catch (error) {
-                throw new Error(
-                  `GitHub merge result refs/pull/${prNumber}/merge is unavailable: ${error.message}`
-                );
-              }
-              testedSha = mergeRef.object?.sha || '';
-              if (!shaPattern.test(testedSha)) {
-                throw new Error('GitHub returned an invalid merge-result SHA');
-              }
-              const { data: mergeCommit } = await github.rest.git.getCommit({
-                owner,
-                repo,
-                commit_sha: testedSha,
-              });
-              const parents = mergeCommit.parents?.map((parent) => parent.sha) || [];
-              if (
-                parents.length !== 2 ||
-                parents[1].toLowerCase() !== pull.head.sha.toLowerCase()
-              ) {
-                throw new Error('GitHub merge-result head parent does not match the current PR head');
-              }
-              const comparisonBaseSha = parents[0];
-              if (!shaPattern.test(comparisonBaseSha)) {
-                throw new Error('GitHub merge-result returned an invalid base parent SHA');
-              }
-
-              const sameRepository = pull.head.repo.full_name === `${owner}/${repo}`;
-              const requiresApproval = automatic && !sameRepository;
-
-              const authorizationSource = automatic
-                ? (sameRepository ? 'same-repository-event' : 'external-fork-environment')
-                : `manual-maintainer:${context.actor}`;
-
-              await publishStatus(
-                'pending',
-                requiresApproval
-                  ? 'external fork Local CI is waiting for environment approval'
-                  : 'local CI authorization and routing in progress'
-              );
-              core.setOutput('should_route', 'true');
-              core.setOutput('requires_approval', requiresApproval ? 'true' : 'false');
-              core.setOutput('pr_number', String(prNumber));
-              core.setOutput('head_sha', pull.head.sha);
-              core.setOutput('base_sha', comparisonBaseSha);
-              core.setOutput('tested_sha', testedSha);
-              core.setOutput('base_ref', pull.base.ref);
-              core.setOutput('head_repo', pull.head.repo.full_name);
-              core.setOutput('head_ref', pull.head.ref);
-              core.setOutput('authorization_source', authorizationSource);
-              core.setOutput(
-                'run_title',
-                `PR ${prNumber} | h:${pull.head.sha.slice(0, 7)} m:${testedSha.slice(0, 7)} | dispatch`
-              );
-            } catch (error) {
-              await publishStatus('error', `failed to authorize local CI: ${error.message}`);
-              throw error;
-            }
-
-  approve-external-fork:
-    name: Approve external fork Local CI
-    needs: prepare-route
-    if: ${{ needs.prepare-route.outputs.requires_approval == 'true' }}
+            const {data: branch} = await github.rest.repos.getBranch({...context.repo, branch: 'CI_dev'});
+            core.setOutput('sha', branch.commit.sha);
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.control.outputs.sha }}
+          persist-credentials: false
+          submodules: false
+      - name: Wait for this task or continue within the round limit
+        id: wait
+        run: python3 scripts/ci/gateway.py receive
+  publish:
+    name: Publish CI results
+    needs: receive
+    if: >-
+      !cancelled() &&
+      github.repository == 'RACE-org/triton-anchor' &&
+      (inputs.mode == 'publish' || needs.receive.outputs.state == 'ready' || needs.receive.outputs.state == 'obsolete')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     concurrency:
-      group: local-ci-fork-approval-${{ needs.prepare-route.outputs.pr_number }}
-      cancel-in-progress: true
-    environment:
-      name: ${{ vars.LOCAL_CI_FORK_APPROVAL_ENVIRONMENT || 'local-ci-fork-approval' }}
-    permissions:
-      contents: read
-      pull-requests: read
-      statuses: write
+      group: local-ci-publish
+      cancel-in-progress: false
+    outputs:
+      dashboard_changed: ${{ steps.dashboard.outputs.changed }}
+    permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write, pages: read}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
     steps:
-      - name: Revalidate approved PR revision
-        uses: actions/github-script@v7
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.mode == 'publish' && 'CI_dev' || needs.receive.outputs.control_sha }}
+          persist-credentials: false
+          submodules: false
+      - name: Prepare business dashboard
+        run: |
+          mkdir -p _site
+          cp -R dashboard/. _site/
+      - name: Collect dashboard data
+        id: collect
         env:
-          PR_NUMBER: ${{ needs.prepare-route.outputs.pr_number }}
-          EXPECTED_HEAD_SHA: ${{ needs.prepare-route.outputs.head_sha }}
-          COMPARISON_BASE_SHA: ${{ needs.prepare-route.outputs.base_sha }}
-          TESTED_SHA: ${{ needs.prepare-route.outputs.tested_sha }}
-          BASE_REF: ${{ needs.prepare-route.outputs.base_ref }}
-          STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
+          # An obsolete receiver may CAS-close only its own pending Summary.
+          RECEIVER_TASK_ID: ${{ inputs.mode == 'receive' && (needs.receive.outputs.state == 'ready' || needs.receive.outputs.state == 'obsolete') && inputs.task_id || '' }}
+          # A manual publish may repair a current task whose receiver was cancelled after its result arrived.
+          RECONCILE_PENDING_RESULTS: ${{ inputs.mode == 'publish' && 'true' || 'false' }}
+        run: python3 scripts/ci/gateway.py collect
+      - name: Check whether dashboard content changed
+        id: dashboard
+        uses: actions/github-script@v7
         with:
           script: |
-            const { owner, repo } = context.repo;
-            const prNumber = Number.parseInt(process.env.PR_NUMBER, 10);
-            const markError = async (description) => {
-              await github.rest.repos.createCommitStatus({
-                owner,
-                repo,
-                sha: process.env.TESTED_SHA,
-                state: 'error',
-                context: process.env.STATUS_CONTEXT,
-                description: description.slice(0, 140),
-                target_url:
-                  `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-              });
-            };
-
-            try {
-              const { data: pull } = await github.rest.pulls.get({
-                owner,
-                repo,
-                pull_number: prNumber,
-              });
-              if (
-                pull.state !== 'open' ||
-                pull.draft ||
-                pull.head.sha.toLowerCase() !== process.env.EXPECTED_HEAD_SHA.toLowerCase() ||
-                pull.base.ref !== process.env.BASE_REF
-              ) {
-                throw new Error('Pull request changed while waiting for environment approval');
-              }
-              const mergeRef = await github.rest.git.getRef({
-                owner,
-                repo,
-                ref: `pull/${prNumber}/merge`,
-              });
-              const approvedMergeSha = String(mergeRef.data.object?.sha || '');
-              if (approvedMergeSha.toLowerCase() !== process.env.TESTED_SHA.toLowerCase()) {
-                throw new Error('Pull request merge result changed while waiting for approval');
-              }
-              const mergeCommit = await github.rest.git.getCommit({
-                owner,
-                repo,
-                commit_sha: process.env.TESTED_SHA,
-              });
-              const parents = mergeCommit.data.parents?.map((parent) => parent.sha) || [];
-              if (
-                parents.length !== 2 ||
-                parents[0].toLowerCase() !== process.env.COMPARISON_BASE_SHA.toLowerCase() ||
-                parents[1].toLowerCase() !== process.env.EXPECTED_HEAD_SHA.toLowerCase()
-              ) {
-                throw new Error('Pull request merge-result parents changed while waiting for approval');
-              }
-              core.info(`External fork PR #${prNumber} is approved for ${process.env.TESTED_SHA}.`);
-            } catch (error) {
-              await markError(`external fork approval expired: ${error.message}`);
-              throw error;
-            }
-
-  route-pull-request:
-    name: Route PR to target branch CI
-    needs:
-      - route-cancellation
-      - prepare-route
-      - approve-external-fork
-    if: ${{ always() && (needs.route-cancellation.result == 'success' || needs.route-cancellation.result == 'skipped') && needs.prepare-route.result == 'success' && needs.prepare-route.outputs.should_route == 'true' && (needs.prepare-route.outputs.requires_approval != 'true' || needs.approve-external-fork.result == 'success') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
-      pull-requests: read
-      statuses: write
-    steps:
-      - name: Validate worker manifest and dispatch exact revision
-        uses: actions/github-script@v7
-        env:
-          PR_NUMBER: ${{ needs.prepare-route.outputs.pr_number }}
-          EXPECTED_HEAD_SHA: ${{ needs.prepare-route.outputs.head_sha }}
-          COMPARISON_BASE_SHA: ${{ needs.prepare-route.outputs.base_sha }}
-          TESTED_SHA: ${{ needs.prepare-route.outputs.tested_sha }}
-          BASE_REF: ${{ needs.prepare-route.outputs.base_ref }}
-          AUTHORIZATION_SOURCE: ${{ needs.prepare-route.outputs.authorization_source }}
-          RUN_TITLE: ${{ needs.prepare-route.outputs.run_title }}
-          STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const prNumber = Number.parseInt(process.env.PR_NUMBER, 10);
-            const expectedContract = process.env.GATEWAY_CONTRACT_VERSION;
-            const shaPattern = /^[0-9a-f]{40}$/i;
-            const baseCapabilities = [
-              'security-scan',
-              'codeql',
-              'dispatch',
-              'receive',
-              'pages',
-              'cancel',
-              'merge-result',
-            ];
-            const requiredPaths = [
-              '.github/workflows/ci-gateway.yml',
-              '.github/workflows/security-gate.yml',
-              'scripts/ci/scan_pr_security.py',
-              '.github/workflows/dispatch-local-ci.yml',
-              '.github/workflows/receive-local-ci-result.yml',
-              '.github/workflows/backend-status-pages.yml',
-            ];
-            const statusTarget =
-              `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
-
-            const markError = async (description) => {
-              await github.rest.repos.createCommitStatus({
-                owner,
-                repo,
-                sha: process.env.TESTED_SHA,
-                state: 'error',
-                context: process.env.STATUS_CONTEXT,
-                description: description.slice(0, 140),
-                target_url: statusTarget,
-              });
-            };
-
-            const inspectWorker = async (ref, allowMissingManifest, extraCapabilities = []) => {
-              let branch;
-              try {
-                ({ data: branch } = await github.rest.repos.getBranch({
-                  owner,
-                  repo,
-                  branch: ref,
-                }));
-              } catch (error) {
-                if (error.status === 404 && allowMissingManifest) {
-                  return null;
-                }
-                throw new Error(`Cannot resolve worker branch ${ref}: ${error.message}`);
-              }
-
-              const revision = branch.commit.sha;
-              if (!shaPattern.test(revision)) {
-                throw new Error(`Worker branch ${ref} returned an invalid revision`);
-              }
-
-              const readFile = async (path) => {
-                try {
-                  const response = await github.rest.repos.getContent({
-                    owner,
-                    repo,
-                    path,
-                    ref: revision,
-                  });
-                  if (Array.isArray(response.data) || response.data.type !== 'file') {
-                    throw new Error(`${path} is not a regular file at ${revision}`);
-                  }
-                  return Buffer.from(response.data.content, 'base64').toString('utf8');
-                } catch (error) {
-                  if (error.status === 404) {
-                    return null;
-                  }
-                  throw error;
-                }
-              };
-
-              const manifestText = await readFile('.github/ci-gateway-manifest.json');
-              if (manifestText === null) {
-                if (allowMissingManifest) {
-                  return null;
-                }
-                throw new Error(`Worker branch ${ref} does not provide a manifest`);
-              }
-
-              let manifest;
-              try {
-                manifest = JSON.parse(manifestText);
-              } catch (error) {
-                throw new Error(`Worker manifest on ${ref} is invalid JSON: ${error.message}`);
-              }
-              if (
-                manifest.schema_version !== 1 ||
-                manifest.gateway_contract_version !== expectedContract ||
-                manifest.role !== 'worker' ||
-                manifest.tested_revision !== 'merge-result' ||
-                !Array.isArray(manifest.capabilities)
-              ) {
-                throw new Error(`Worker branch ${ref} has an incompatible manifest`);
-              }
-
-              const requiredCapabilities = [...baseCapabilities, ...extraCapabilities];
-              const missingCapabilities = requiredCapabilities.filter(
-                (capability) => !manifest.capabilities.includes(capability)
-              );
-              if (missingCapabilities.length > 0) {
-                throw new Error(
-                  `Worker branch ${ref} is missing capabilities: ${missingCapabilities.join(', ')}`
-                );
-              }
-
-              for (const path of requiredPaths) {
-                if ((await readFile(path)) === null) {
-                  throw new Error(`Worker branch ${ref} is missing ${path}`);
-                }
-              }
-              return { ref, revision };
-            };
-
-            try {
-              const { data: pull } = await github.rest.pulls.get({
-                owner,
-                repo,
-                pull_number: prNumber,
-              });
-              if (
-                pull.state !== 'open' ||
-                pull.draft ||
-                pull.head.sha !== process.env.EXPECTED_HEAD_SHA ||
-                pull.base.ref !== process.env.BASE_REF
-              ) {
-                throw new Error('Pull request changed after authorization; rerun the Gateway');
-              }
-
-              const mergeRef = await github.rest.git.getRef({
-                owner,
-                repo,
-                ref: `pull/${prNumber}/merge`,
-              });
-              if (mergeRef.data.object?.sha !== process.env.TESTED_SHA) {
-                throw new Error('Pull request merge result changed after authorization');
-              }
-              const mergeCommit = await github.rest.git.getCommit({
-                owner,
-                repo,
-                commit_sha: process.env.TESTED_SHA,
-              });
-              const parents = mergeCommit.data.parents?.map((parent) => parent.sha) || [];
-              if (
-                parents.length !== 2 ||
-                parents[0].toLowerCase() !== process.env.COMPARISON_BASE_SHA.toLowerCase() ||
-                parents[1].toLowerCase() !== process.env.EXPECTED_HEAD_SHA.toLowerCase()
-              ) {
-                throw new Error('Pull request merge-result parents changed during routing');
-              }
-
-              let worker = await inspectWorker(pull.base.ref, true);
-              if (worker === null) {
-                if (process.env.FALLBACK_PR_ENABLED.trim().toLowerCase() !== 'true') {
-                  throw new Error(
-                    `Target branch ${pull.base.ref} has no worker and PR fallback is disabled`
-                  );
-                }
-                const fallbackRef = process.env.FALLBACK_WORKER_BRANCH.trim();
-                if (!fallbackRef) {
-                  throw new Error(
-                    `Target branch ${pull.base.ref} has no worker and no fallback is configured`
-                  );
-                }
-                worker = await inspectWorker(fallbackRef, false, ['cross-branch-pr']);
-                core.notice(
-                  `Target branch ${pull.base.ref} has no manifest; using fallback worker ${worker.ref}.`
-                );
-              }
-
-              const { data: latestPull } = await github.rest.pulls.get({
-                owner,
-                repo,
-                pull_number: prNumber,
-              });
-              if (
-                latestPull.state !== 'open' ||
-                latestPull.draft ||
-                latestPull.head.sha !== process.env.EXPECTED_HEAD_SHA ||
-                latestPull.base.ref !== process.env.BASE_REF
-              ) {
-                throw new Error('Pull request changed while validating workers; rerun the Gateway');
-              }
-              const latestMergeRef = await github.rest.git.getRef({
-                owner,
-                repo,
-                ref: `pull/${prNumber}/merge`,
-              });
-              if (latestMergeRef.data.object?.sha !== process.env.TESTED_SHA) {
-                throw new Error('Pull request merge result changed while validating workers');
-              }
-
-              await github.rest.actions.createWorkflowDispatch({
-                owner,
-                repo,
-                workflow_id: 'ci-gateway.yml',
-                ref: worker.ref,
-                inputs: {
-                  gateway_contract_version: expectedContract,
-                  mode: 'dispatch',
-                  pr_number: String(prNumber),
-                  expected_head_sha: latestPull.head.sha,
-                  comparison_base_sha: process.env.COMPARISON_BASE_SHA,
-                  tested_sha: process.env.TESTED_SHA,
-                  worker_revision_sha: worker.revision,
-                  authorization_source: process.env.AUTHORIZATION_SOURCE,
-                  source_branch: latestPull.head.ref,
-                  target_branch: latestPull.base.ref,
-                  run_title: process.env.RUN_TITLE,
-                },
-              });
-              core.info(
-                `Dispatched PR #${prNumber} to worker ${worker.ref} at ${worker.revision}.`
-              );
-            } catch (error) {
-              await markError(`failed to route local CI: ${error.message}`);
-              throw error;
-            }
-
-  route-manual-push:
-    name: Route manual branch push to fallback CI
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'push' && inputs.worker_revision_sha == '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
-      statuses: write
-    steps:
-      - name: Validate branch head and dispatch fallback worker
-        uses: actions/github-script@v7
-        env:
-          REQUESTED_BRANCH: ${{ inputs.source_branch }}
-          REQUESTED_SHA: ${{ inputs.requested_sha }}
-          STATUS_CONTEXT: ${{ inputs.context || vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
-        with:
-          script: |
-            const { owner, repo } = context.repo;
-            const shaPattern = /^[0-9a-f]{40}$/i;
-            const sourceBranch = process.env.REQUESTED_BRANCH.trim();
-            const requestedSha = process.env.REQUESTED_SHA.trim();
-            const fallbackRef = process.env.FALLBACK_WORKER_BRANCH.trim();
-            const requiredCapabilities = ['cross-branch-push', 'dispatch', 'receive'];
-            const requiredPaths = [
-              '.github/workflows/ci-gateway.yml',
-              '.github/workflows/dispatch-local-ci.yml',
-              '.github/workflows/receive-local-ci-result.yml',
-            ];
-            const statusTarget =
-              `${context.serverUrl}/${owner}/${repo}/actions/workflows/ci-gateway.yml`;
-            let statusSha = '';
-
-            const publishStatus = async (state, description) => {
-              if (!shaPattern.test(statusSha)) {
-                return;
-              }
-              await github.rest.repos.createCommitStatus({
-                owner,
-                repo,
-                sha: statusSha,
-                state,
-                context: process.env.STATUS_CONTEXT,
-                description: description.slice(0, 140),
-                target_url: statusTarget,
-              });
-            };
-
-            const readWorkerFile = async (path, revision) => {
-              try {
-                const response = await github.rest.repos.getContent({
-                  owner,
-                  repo,
-                  path,
-                  ref: revision,
-                });
-                if (Array.isArray(response.data) || response.data.type !== 'file') {
-                  throw new Error(`${path} is not a regular file at ${revision}`);
-                }
-                return Buffer.from(response.data.content, 'base64').toString('utf8');
-              } catch (error) {
-                if (error.status === 404) {
-                  return null;
-                }
-                throw error;
-              }
-            };
-
-            try {
-              const { data: repository } = await github.rest.repos.get({ owner, repo });
-              const runRef = context.ref.replace('refs/heads/', '');
-              if (runRef !== repository.default_branch) {
-                throw new Error(
-                  `Manual push routing must run on the default branch ${repository.default_branch}`
-                );
-              }
-
-              const { data: permission } =
-                await github.rest.repos.getCollaboratorPermissionLevel({
-                  owner,
-                  repo,
-                  username: context.actor,
-                });
-              if (!['write', 'maintain', 'admin'].includes(permission.permission)) {
-                throw new Error(
-                  `Actor ${context.actor} does not have write, maintain, or admin permission`
-                );
-              }
-              if (!sourceBranch) {
-                throw new Error('source_branch is required for mode=push');
-              }
-              if (!fallbackRef) {
-                throw new Error('No fallback worker branch is configured');
-              }
-              if (
-                sourceBranch !== fallbackRef &&
-                process.env.FALLBACK_PUSH_ENABLED.trim().toLowerCase() !== 'true'
-              ) {
-                throw new Error(
-                  `Cross-branch push fallback is disabled for ${sourceBranch}`
-                );
-              }
-
-              const { data: source } = await github.rest.repos.getBranch({
-                owner,
-                repo,
-                branch: sourceBranch,
-              });
-              statusSha = source.commit.sha;
-              if (!shaPattern.test(statusSha)) {
-                throw new Error(`Branch ${sourceBranch} returned an invalid head SHA`);
-              }
-              if (requestedSha && requestedSha.toLowerCase() !== statusSha.toLowerCase()) {
-                throw new Error(
-                  `Requested SHA does not match the current head of ${sourceBranch}`
-                );
-              }
-
-              const { data: fallback } = await github.rest.repos.getBranch({
-                owner,
-                repo,
-                branch: fallbackRef,
-              });
-              const workerRevision = fallback.commit.sha;
-              if (!shaPattern.test(workerRevision)) {
-                throw new Error(`Fallback worker ${fallbackRef} returned an invalid revision`);
-              }
-
-              const manifestText = await readWorkerFile(
-                '.github/ci-gateway-manifest.json',
-                workerRevision
-              );
-              if (manifestText === null) {
-                throw new Error(`Fallback worker ${fallbackRef} does not provide a manifest`);
-              }
-              let manifest;
-              try {
-                manifest = JSON.parse(manifestText);
-              } catch (error) {
-                throw new Error(`Fallback worker manifest is invalid JSON: ${error.message}`);
-              }
-              if (
-                manifest.schema_version !== 1 ||
-                manifest.gateway_contract_version !== process.env.GATEWAY_CONTRACT_VERSION ||
-                manifest.role !== 'worker' ||
-                requiredCapabilities.some(
-                  (capability) => !manifest.capabilities?.includes(capability)
-                )
-              ) {
-                throw new Error(`Fallback worker ${fallbackRef} is not cross-branch-push capable`);
-              }
-              for (const path of requiredPaths) {
-                if ((await readWorkerFile(path, workerRevision)) === null) {
-                  throw new Error(`Fallback worker ${fallbackRef} is missing ${path}`);
-                }
-              }
-
-              await publishStatus('pending', 'manual branch Local CI is being routed');
-
-              const { data: latestSource } = await github.rest.repos.getBranch({
-                owner,
-                repo,
-                branch: sourceBranch,
-              });
-              if (latestSource.commit.sha !== statusSha) {
-                throw new Error(`Branch ${sourceBranch} changed while routing; run Gateway again`);
-              }
-
-              const runTitle = `Push ${sourceBranch} | ${statusSha.slice(0, 7)} | dispatch`;
-              await github.rest.actions.createWorkflowDispatch({
-                owner,
-                repo,
-                workflow_id: 'ci-gateway.yml',
-                ref: fallbackRef,
-                inputs: {
-                  gateway_contract_version: process.env.GATEWAY_CONTRACT_VERSION,
-                  mode: 'push',
-                  worker_revision_sha: workerRevision,
-                  authorization_source: `manual-push:${context.actor}`,
-                  tested_sha: statusSha,
-                  requested_sha: requestedSha,
-                  source_branch: sourceBranch,
-                  target_branch: sourceBranch,
-                  context: process.env.STATUS_CONTEXT,
-                  run_title: runTitle,
-                },
-              });
-              core.info(
-                `Dispatched ${sourceBranch}@${statusSha} to ${fallbackRef}@${workerRevision}.`
-              );
-            } catch (error) {
-              await publishStatus('error', `failed to route branch Local CI: ${error.message}`);
-              throw error;
-            }
-
-  route-failure-status:
-    name: Publish route failure
-    needs:
-      - route-cancellation
-      - prepare-route
-      - approve-external-fork
-      - route-pull-request
-    if: ${{ always() && needs.prepare-route.outputs.should_route == 'true' && ((needs.route-cancellation.result == 'failure' || needs.route-cancellation.result == 'cancelled') || (needs.prepare-route.outputs.requires_approval == 'true' && (needs.approve-external-fork.result == 'failure' || needs.approve-external-fork.result == 'cancelled')) || needs.route-pull-request.result == 'failure' || needs.route-pull-request.result == 'cancelled') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      statuses: write
-    steps:
-      - name: Mark routing failure
-        uses: actions/github-script@v7
-        env:
-          SHA: ${{ needs.prepare-route.outputs.tested_sha }}
-          STATUS_CONTEXT: ${{ vars.LOCAL_CI_CONTEXT || 'local-ci/sophgo-cmodel' }}
-        with:
-          script: |
-            await github.rest.repos.createCommitStatus({
-              ...context.repo,
-              sha: process.env.SHA,
-              state: 'error',
-              context: process.env.STATUS_CONTEXT,
-              description: 'local CI routing did not authorize this revision',
-              target_url:
-                `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            const fs = require('fs');
+            const next = JSON.parse(fs.readFileSync('_site/data/tasks.json', 'utf8'));
+            const files = (directory = '') => fs.readdirSync('_site/' + directory, {withFileTypes: true}).flatMap(entry => {
+              const path = directory + entry.name;
+              return entry.isDirectory() ? files(path + '/') : path === 'data/tasks.json' ? [] : [path];
             });
+            const digest = require('crypto').createHash('sha256');
+            for (const path of files().sort()) {
+              const bytes = fs.readFileSync('_site/' + path);
+              digest.update(JSON.stringify([path, bytes.length]) + '\n').update(bytes);
+            }
+            next.site_digest = digest.digest('hex');
+            fs.writeFileSync('_site/data/tasks.json', JSON.stringify(next, null, 2) + '\n');
+            let previous;
+            try {
+              const {data: page} = await github.rest.repos.getPages(context.repo);
+              const url = new URL('data/tasks.json', page.html_url);
+              url.searchParams.set('run', context.runId);
+              const response = await fetch(url, {headers: {'Cache-Control': 'no-cache'}});
+              if (response.status !== 404) {
+                if (!response.ok) throw new Error('Cannot read the published dashboard: HTTP ' + response.status);
+                previous = await response.json();
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            const content = data => JSON.stringify({schema: data?.schema, tasks: data?.tasks, site_digest: data?.site_digest});
+            core.setOutput('changed', content(previous) !== content(next));
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.dashboard.outputs.changed == 'true'
+        with: {path: _site}
+      - name: Surface incomplete receiver operations
+        if: >-
+          steps.collect.outputs.receiver_errors != '0' &&
+          (inputs.mode == 'publish' ||
+           (inputs.mode == 'receive' &&
+            (needs.receive.outputs.state == 'ready' || needs.receive.outputs.state == 'obsolete')))
+        run: exit 1
+      - name: Retry incomplete publication within the receiver round limit
+        if: >-
+          failure() && inputs.mode == 'receive' && inputs.receiver_round != '3' &&
+          (needs.receive.outputs.state == 'ready' || needs.receive.outputs.state == 'obsolete')
+        uses: actions/github-script@v7
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+          RECEIVER_ROUND: ${{ inputs.receiver_round }}
+          RUN_TITLE: ${{ inputs.run_title }}
+        with:
+          retries: 3
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo, workflow_id: 'ci-gateway.yml', ref: 'main',
+              inputs: {
+                mode: 'receive', task_id: process.env.TASK_ID,
+                receiver_round: String(Number(process.env.RECEIVER_ROUND) + 1),
+                run_title: process.env.RUN_TITLE
+              }
+            });
+  deploy-dashboard:
+    name: Deploy dashboard (independent of test results)
+    needs: publish
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.publish.outputs.dashboard_changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: local-ci-dashboard
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions: {pages: write, id-token: write}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
