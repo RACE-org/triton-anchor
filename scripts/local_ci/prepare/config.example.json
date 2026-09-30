@@ -312,7 +312,7 @@
   "retry_delay_seconds": 30,
   "runtime": {
     "context": "anchor-ci-rootless",
-    "endpoint": "unix:///run/user/1007/docker.sock",
+    "endpoint": "unix:///run/user/1008/docker.sock",
     "kind": "docker-rootless",
     "service": "docker.service"
   },
