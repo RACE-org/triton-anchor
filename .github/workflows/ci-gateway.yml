@@ -29,9 +29,9 @@ jobs:
       control_sha: ${{ steps.control.outputs.sha }}
     env:
       GH_TOKEN: ${{ github.token }}
-      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+      GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results.git' }}
       RECEIVER_TASK_ID: ${{ inputs.task_id }}
       RECEIVER_ROUND: ${{ inputs.receiver_round }}
     steps:
@@ -67,9 +67,9 @@ jobs:
     permissions: {contents: read, pull-requests: write, statuses: write, checks: write, actions: write, pages: read}
     env:
       GH_TOKEN: ${{ github.token }}
-      GITEE_USERNAME: ${{ vars.GITEE_USERNAME }}
+      GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+      GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results.git' }}
     steps:
       - uses: actions/checkout@v4
         with:
