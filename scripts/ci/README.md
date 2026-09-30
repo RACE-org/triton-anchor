@@ -198,9 +198,9 @@ PR 评论发送失败记录为 `receiver_error`，发布失败在接收轮次预
 
 | 配置 | 用途与要求 |
 | --- | --- |
-| 变量 `GITEE_RESULTS_REPO_URL` | 可选覆盖；默认 `https://gitee.com/race-org/triton-anchor-local-ci-results.git`。承载被测源码 `ci/*` refs、任务控制数据与结果；对应服务器的 `gitee_repo_url` |
+| 变量 `GITEE_RESULTS_REPO_URL` | Gitee 结果中转仓库的 HTTPS Git URL，承载被测源码 `ci/*` refs、任务控制数据与结果；对应服务器的 `gitee_repo_url` |
 | 变量 `GITEE_SUBMODULE_MIRRORS` | 非预装子模块路径到 Gitee 镜像 URL 的 JSON 映射；没有这类子模块时可省略或设为 `{}` |
-| 变量 `GITEE_USERNAME` | 可选覆盖；默认 `likehupochuan`，应为 `GITEE_TOKEN` 所属的 Gitee 用户名；不要求与仓库组织名或服务器用户名相同 |
+| 变量 `GITEE_USERNAME` | `GITEE_TOKEN` 所属的 Gitee 用户名；不要求与仓库组织名或服务器用户名相同 |
 | Secret `GITEE_TOKEN` | 对结果中转仓库具有 Git 读写权限的 Token |
 | `local-ci-fork-approval` environment | 外部 fork 审批，配置非空 required reviewers |
 
