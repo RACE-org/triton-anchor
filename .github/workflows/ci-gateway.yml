@@ -41,7 +41,7 @@ jobs:
           SOURCE_BRANCH: ${{ inputs.source_branch }}
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+          GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results.git' }}
         run: python3 scripts/ci/gateway.py cancel
   prepare:
     name: >-
@@ -211,7 +211,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITEE_USERNAME: ${{ vars.GITEE_USERNAME || 'likehupochuan' }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL }}
+          GITEE_RESULTS_REPO_URL: ${{ vars.GITEE_RESULTS_REPO_URL || 'https://gitee.com/race-org/triton-anchor-local-ci-results.git' }}
         run: python3 trusted/scripts/ci/gateway.py enqueue
       - name: Start the receiver for this published task
         uses: actions/github-script@v7
