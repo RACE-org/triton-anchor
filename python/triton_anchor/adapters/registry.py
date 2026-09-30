@@ -1,13 +1,7 @@
-"""
-Adapter Registry
-=================
+"""Adapter registration and discovery.
 
-Manages discovery and selection of TTIR → Linalg adapters.
-Selection is driven by ``HWCapability.ptr_model`` and optional user override.
-
-Discovery order:
-  1. Explicit registration via ``AdapterRegistry.register()``
-  2. ``entry_points("triton.adapters")`` discovery (pip-installed adapters)
+The registry deliberately does not own routing policy.  T6.1 adapter choice is
+handled by ``AdapterRouter`` so fallback and rejection reasons are explicit.
 """
 
 from __future__ import annotations
@@ -16,7 +10,7 @@ import importlib.metadata
 import logging
 from typing import Dict, Optional, TYPE_CHECKING
 
-from .base import ITritonToLinalgAdapter
+from .base import IAnchorAdapter
 
 if TYPE_CHECKING:
     from ..hw_capability import HWCapability
@@ -25,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class AdapterRegistry:
-    """Registry for TTIR → Linalg conversion adapters.
+    """Registry for TTIR → AnchorIR conversion adapters.
 
     Usage::
 
@@ -34,16 +28,13 @@ class AdapterRegistry:
 
         # Auto-discovery from entry_points
         AdapterRegistry.discover()
-
-        # Selection by hardware capability
-        adapter = AdapterRegistry.get_adapter(hw_capability)
     """
 
-    _adapters: Dict[str, ITritonToLinalgAdapter] = {}
+    _adapters: Dict[str, IAnchorAdapter] = {}
     _discovered: bool = False
 
     @classmethod
-    def register(cls, adapter: ITritonToLinalgAdapter) -> None:
+    def register(cls, adapter: IAnchorAdapter) -> None:
         """Explicitly register an adapter instance."""
         name = adapter.name()
         if name in cls._adapters:
@@ -74,67 +65,41 @@ class AdapterRegistry:
                 logger.warning(f"Failed to load adapter entry_point '{ep.name}': {e}")
 
     @classmethod
-    def get(cls, name: str) -> Optional[ITritonToLinalgAdapter]:
+    def get(cls, name: str) -> Optional[IAnchorAdapter]:
         """Get a specific adapter by name."""
         cls.discover()
         return cls._adapters.get(name)
 
     @classmethod
-    def get_adapter(cls, hw: HWCapability) -> ITritonToLinalgAdapter:
-        """Select the best adapter for the given hardware capability.
-
-        Selection logic:
-          1. If ``hw.preferred_adapter`` is set, use that adapter
-          2. Otherwise, select by ``hw.ptr_model``:
-             - "structured" → TritonSharedAdapter
-             - "axis_info"  → TritonLinalgAdapter
-             - "hybrid"     → HybridAdapter
-             - "gpu"        → None (GPU path doesn't use Linalg adapters)
-
-        Args:
-            hw: The target hardware capability.
-
-        Returns:
-            The selected adapter instance.
-
-        Raises:
-            AdapterNotFoundError: If no suitable adapter is found.
-        """
+    def items(cls) -> Dict[str, IAnchorAdapter]:
+        """Return discovered adapters as a deterministic name -> adapter map."""
         cls.discover()
+        return dict(sorted(cls._adapters.items()))
 
-        # 1. Explicit preference
-        if hw.preferred_adapter:
-            adapter = cls._adapters.get(hw.preferred_adapter)
-            if adapter:
-                return adapter
-            raise AdapterNotFoundError(
-                f"Preferred adapter '{hw.preferred_adapter}' not found. "
-                f"Available: {list(cls._adapters.keys())}"
-            )
+    @classmethod
+    def get_adapter(cls, hw: "HWCapability") -> IAnchorAdapter:
+        """Compatibility shortcut that delegates selection to ``AdapterRouter``.
 
-        # 2. Automatic selection by ptr_model
-        _model_to_adapter = {
-            "structured": "triton-shared",
-            "axis_info": "triton-linalg",
-            "hybrid": "hybrid",
-        }
-        adapter_name = _model_to_adapter.get(hw.ptr_model)
-        if adapter_name and adapter_name in cls._adapters:
-            return cls._adapters[adapter_name]
+        New code should call ``AdapterRouter.select`` or ``AdapterRouter.route``
+        directly and pass explicit backend capabilities, user config, and op
+        coverage.  This legacy shortcut infers only the basic AnchorIR track
+        capability and still performs no registry-owned fallback.
+        """
+        from ..anchor_ir import AnchorIRTrack
+        from .router import AdapterRouter, AdapterRoutingError
 
-        # 3. Fallback: return any available adapter
-        if cls._adapters:
-            fallback = next(iter(cls._adapters.values()))
-            logger.warning(
-                f"No adapter matching ptr_model='{hw.ptr_model}', "
-                f"falling back to '{fallback.name()}'"
-            )
-            return fallback
-
-        raise AdapterNotFoundError(
-            f"No adapters available for ptr_model='{hw.ptr_model}'. "
-            f"Install a Linalg adapter package."
+        backend_capability = (
+            "anchor_ir.triton_gpu"
+            if hw.anchor_ir_track == AnchorIRTrack.TRITON_GPU
+            else "anchor_ir.linalg"
         )
+        try:
+            return AdapterRouter(registry=cls).route(
+                hw,
+                backend_capabilities=(backend_capability,),
+            ).adapter
+        except AdapterRoutingError as exc:
+            raise AdapterNotFoundError(str(exc)) from exc
 
     @classmethod
     def list_adapters(cls) -> Dict[str, str]:
@@ -158,6 +123,6 @@ class AdapterNotFoundError(Exception):
 # ── Convenience function ─────────────────────────────────────────────
 
 
-def get_adapter(hw: HWCapability) -> ITritonToLinalgAdapter:
+def get_adapter(hw: "HWCapability") -> IAnchorAdapter:
     """Shortcut for ``AdapterRegistry.get_adapter(hw)``."""
     return AdapterRegistry.get_adapter(hw)

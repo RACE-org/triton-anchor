@@ -26,8 +26,9 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
+from ..anchor_ir import AnchorIRTrack
 from .base import ILinalgOptAdapter, AdapterConversionError
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,18 @@ class TritonSharedAdapter(ILinalgOptAdapter):
 
     def name(self) -> str:
         return "triton-shared"
+
+    def get_supported_tracks(self) -> Tuple[AnchorIRTrack, ...]:
+        return (AnchorIRTrack.LINALG,)
+
+    def get_supported_ptr_models(self) -> Tuple[str, ...]:
+        return ("structured",)
+
+    def get_required_backend_capabilities(self) -> Tuple[str, ...]:
+        return ("anchor_ir.linalg",)
+
+    def get_supported_ops(self) -> Tuple[str, ...]:
+        return ("*",)
 
     def _find_opt_tool(self) -> str:
         """Locate the triton-shared-opt binary."""

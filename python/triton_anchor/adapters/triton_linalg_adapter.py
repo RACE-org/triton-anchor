@@ -2,15 +2,15 @@
 TritonLinalgAdapter — In-Process Adapter wrapping triton-linalg
 ================================================================
 
-This adapter wraps the triton-linalg conversion pipeline (from Cambricon)
-that is used by triton_race for Sophgo TPU support.
+This adapter wraps the in-process Linalg-track conversion path exposed by
+``triton._C.libtriton.anchor.passes`` on the 3.3 line.
 
 It calls the MLIR PassManager directly (in-process), with zero subprocess
-overhead.  The pass sequence is extracted from triton_race's ``_make_raceir()``.
+overhead.
 
 Dependencies:
-  - ``triton._C.libtriton`` must be available (i.e., triton_race installed)
-  - race passes must be linked into libtriton.so
+  - ``triton._C.libtriton`` must be available
+  - triton-anchor passes must be linked into libtriton.so
 
 Output dialects:
   linalg, linalg_ext, tensor, memref, arith, math, scf, func, aux
@@ -21,8 +21,9 @@ from __future__ import annotations
 import logging
 import re
 import traceback
-from typing import Any, List
+from typing import Any, List, Optional, Tuple
 
+from ..anchor_ir import AnchorIRTrack
 from .base import ILinalgPybindAdapter, AdapterConversionError
 
 logger = logging.getLogger(__name__)
@@ -34,31 +35,25 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
     This adapter directly calls the MLIR passes from triton-linalg via
     pybind11 bindings, making it the fastest conversion path.
 
-    Note: The "triton-linalg" name is the Adapter registry name. The
-    actual passes wrapped here are triton_race's self-developed 11-pass
-    pipeline (``passes.race.triton_to_linalg.*``), NOT the Cambricon
-    triton-linalg standalone library.
-
-    Pass pipeline (from triton_race ``_make_raceir()``):
-      1. triton_to_ppl                    — PPL index preparation
-      2. wrap_func_body_with_single_block  — normalize function body
-      3. inliner                           — inline called functions
-      4. canonicalizer                     — standard canonicalization
-      5. canonicalize_triton               — Triton-specific canonicalization
-      6. pointer_strength_reduction        — pointer analysis (AxisInfo)
-      7. canonicalizer                     — re-canonicalize after pointer analysis
-      8. triton_to_linalg                  — core Triton→Linalg conversion
-      9. extract_like_move_backward        — optimization on extract ops
-      10. canonicalizer                    — post-conversion canonicalization
-      11. arith_to_linalg                  — arithmetic op lowering
-      12. math_to_linalg                   — math op lowering
-      13. cse                              — common sub-expression elimination
-      14. licm                             — loop-invariant code motion
-      15. wrap_func_body_with_single_block — final normalization
+    Note: The "triton-linalg" name is the Adapter registry name.  The Python
+    binding contract for 3.3 is flat ``anchor.passes.add_*`` functions, not the
+    older ``anchor_passes.triton_to_linalg.*`` layout.
     """
 
     def name(self) -> str:
         return "triton-linalg"
+
+    def get_supported_tracks(self) -> Tuple[AnchorIRTrack, ...]:
+        return (AnchorIRTrack.LINALG,)
+
+    def get_supported_ptr_models(self) -> Tuple[str, ...]:
+        return ("axis_info",)
+
+    def get_required_backend_capabilities(self) -> Tuple[str, ...]:
+        return ("anchor_ir.linalg",)
+
+    def get_supported_ops(self) -> Tuple[str, ...]:
+        return ("*",)
 
     def convert(self, ttir_module: Any, metadata: dict, context: Any = None) -> Any:
         """Convert TTIR to Linalg using triton-linalg passes.
@@ -75,18 +70,24 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
             AdapterConversionError: If any pass in the pipeline fails.
         """
         try:
-            from triton._C.libtriton.anchor import anchor_passes as passes
+            from triton._C.libtriton.anchor import passes as anchor_passes
             from triton._C.libtriton import ir
-        except ImportError:
+        except ImportError as exc:
             raise AdapterConversionError(
                 self.name(),
-                detail="triton_anchor._C not available. Is the C++ extension built?",
-            )
+                detail=(
+                    "triton._C.libtriton.anchor.passes is not available. "
+                    "Build triton-anchor's C++ extension for the 3.3 line."
+                ),
+            ) from exc
 
-        # Check that anchor passes are available
-        if not hasattr(passes, "triton_to_linalg"):
+        if not self._has_supported_pipeline(anchor_passes):
             raise AdapterConversionError(
-                self.name(), detail="anchor_passes.triton_to_linalg not available."
+                self.name(),
+                detail=(
+                    "triton._C.libtriton.anchor.passes does not expose "
+                    "add_triton_to_linalg or add_triton_to_linalg_experimental."
+                ),
             )
 
         # Pre-process: fix allow_reorder attribute format
@@ -104,7 +105,7 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
         pm = ir.pass_manager(ttir_module.context)
         pm.enable_debug()
 
-        self._add_passes(pm, passes)
+        selected_pipeline = self._add_passes(pm, anchor_passes)
 
         try:
             pm.run(ttir_module)
@@ -118,31 +119,45 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
                 self.name(), kernel_name=metadata.get("name", ""), detail=str(e)
             )
 
+        metadata["adapter_pipeline"] = selected_pipeline
         return ttir_module
 
-    def _add_passes(self, pm, passes) -> None:
-        """Add the triton-linalg conversion pass pipeline."""
-        tl = passes.triton_to_linalg
+    def _has_supported_pipeline(self, anchor_passes) -> bool:
+        return hasattr(anchor_passes, "add_triton_to_linalg") or hasattr(
+            anchor_passes,
+            "add_triton_to_linalg_experimental",
+        )
 
-        # Note: triton_to_ppl has been stripped. The backend should handle it if needed.
-        tl.add_wrap_func_body_with_single_block(pm)
+    def _add_passes(self, pm, anchor_passes) -> str:
+        """Add the 3.3 anchor-bound Linalg conversion pipeline."""
+        common = self._load_common_passes()
+        self._add_common(pm, common, "add_inliner")
+        self._add_common(pm, common, "add_canonicalizer")
 
-        # We need common passes from libtriton
-        from triton._C.libtriton.passes import common
+        if hasattr(anchor_passes, "add_triton_to_linalg_experimental"):
+            anchor_passes.add_triton_to_linalg_experimental(pm)
+            pipeline = "anchor.passes.add_triton_to_linalg_experimental"
+        else:
+            anchor_passes.add_triton_to_linalg(pm)
+            pipeline = "anchor.passes.add_triton_to_linalg"
 
-        common.add_inliner(pm)
-        common.add_canonicalizer(pm)
-        tl.add_canonicalize_triton(pm)
-        tl.add_pointer_strength_reduction(pm)
-        common.add_canonicalizer(pm)
-        tl.add_triton_to_linalg(pm)
-        tl.add_extract_like_move_backward(pm)
-        common.add_canonicalizer(pm)
-        tl.add_arith_to_linalg(pm)
-        tl.add_math_to_linalg(pm)
-        common.add_cse(pm)
-        common.add_licm(pm)
-        tl.add_wrap_func_body_with_single_block(pm)
+        self._add_common(pm, common, "add_canonicalizer")
+        self._add_common(pm, common, "add_cse")
+        return pipeline
+
+    def _load_common_passes(self) -> Optional[Any]:
+        try:
+            from triton._C.libtriton.passes import common
+        except ImportError:
+            return None
+        return common
+
+    def _add_common(self, pm, common: Optional[Any], pass_name: str) -> None:
+        if common is None:
+            return
+        fn = getattr(common, pass_name, None)
+        if fn is not None:
+            fn(pm)
 
     def _extract_kernel_name(self, mod) -> str:
         """Extract the Triton kernel function name from the module."""
@@ -154,18 +169,10 @@ class TritonLinalgAdapter(ILinalgPybindAdapter):
 
     def get_required_passes(self) -> List[str]:
         return [
-            "triton_to_ppl",
-            "wrap_func_body_with_single_block",
-            "inliner",
-            "canonicalizer",
-            "canonicalize_triton",
-            "pointer_strength_reduction",
-            "triton_to_linalg",
-            "extract_like_move_backward",
-            "arith_to_linalg",
-            "math_to_linalg",
-            "cse",
-            "licm",
+            "common.add_inliner",
+            "common.add_canonicalizer",
+            "anchor.passes.add_triton_to_linalg",
+            "common.add_cse",
         ]
 
     def get_output_dialects(self) -> List[str]:

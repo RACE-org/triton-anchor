@@ -22,3 +22,12 @@ from .anchor_ir import (
     AnchorIRValidator as AnchorIRValidator,
 )
 from .pipeline import build_ttir_pipeline as build_ttir_pipeline
+from .pipeline import route_adapter as route_adapter
+from .pipeline import convert_ttir_to_anchor_ir as convert_ttir_to_anchor_ir
+from .adapters.router import (
+    AdapterDecision as AdapterDecision,
+    AdapterRouter as AdapterRouter,
+    AdapterRouterConfig as AdapterRouterConfig,
+    AdapterRoutingError as AdapterRoutingError,
+    OpCoverage as OpCoverage,
+)
