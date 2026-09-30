@@ -1,0 +1,28 @@
+.health-panel { border:1px solid var(--border); border-radius:10px; background:var(--surface); padding:20px 24px; margin-bottom:24px; }
+.health-heading { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }
+.health-heading h2 { font-size:18px; margin:0 0 5px; }
+.health-heading p { margin:0; }
+.health-muted { color:var(--text-muted); font-size:12px; line-height:1.7; }
+.health-summary { display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px; margin-bottom:14px; }
+.health-badge { display:inline-block; font-size:13px; padding:4px 8px; border-radius:5px; background:var(--gray-soft); color:var(--gray); line-height:1.5; }
+.health-badge.good { color:var(--green); background:var(--green-soft); }
+.health-badge.bad { color:var(--red); background:var(--red-soft); }
+.health-badge.warn { color:var(--amber); background:var(--amber-soft); }
+.health-badge.info { color:var(--blue); background:var(--blue-soft); }
+.health-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; }
+.health-card { display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:12px 14px; background:var(--surface-muted); border-radius:6px; }
+.health-card strong { overflow-wrap:anywhere; }
+.health-issues { margin:16px 0; padding:12px 14px 12px 32px; border-left:3px solid var(--amber); background:var(--amber-soft); font-size:13px; line-height:1.8; overflow-wrap:anywhere; }
+.health-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }
+.health-section { border-top:1px solid var(--border); padding-top:20px; margin-top:24px; font-size:13px; min-width:0; }
+.health-section h3 { font-size:16px; margin-bottom:12px; }
+.health-facts { display:grid; grid-template-columns:minmax(110px,auto) minmax(0,1fr); gap:7px 20px; line-height:1.7; }
+.health-facts dt { color:var(--text-muted); }
+.health-facts dd { margin:0; overflow-wrap:anywhere; }
+.health-alerts { padding-left:18px; line-height:1.9; }
+.health-panel button:focus-visible { outline:3px solid #76b997; outline-offset:3px; }
+@media(max-width:760px) { .health-panel { padding:16px; } .health-heading { align-items:flex-start; flex-wrap:wrap; } .health-cards { grid-template-columns:repeat(2,minmax(0,1fr)); } .health-detail-grid { grid-template-columns:1fr; gap:0; } }
+
+.health-upload + .health-upload { border-top:1px dashed var(--border); padding-top:16px; margin-top:16px; }
+.health-alerts { overflow-wrap:anywhere; }
+.health-section .button { margin-top:12px; }

@@ -1,0 +1,63 @@
+name: Local CI / Basic Checks
+on:
+  workflow_call:
+    inputs:
+      tested_sha: {type: string, required: true}
+permissions: {contents: read}
+jobs:
+  lint:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested_sha }}
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m pip install ruff==0.15.22
+      - name: Blocking Python errors and advisory style
+        run: |
+          paths=(python tests)
+          if [ -d scripts/ci ]; then paths+=(scripts/ci); fi
+          if [ -d scripts/local_ci ]; then paths+=(scripts/local_ci); fi
+          ruff check --select E9,F63,F7,F82 "${paths[@]}"
+          ruff check --ignore E9,F63,F7,F82 "${paths[@]}" || echo "::warning::Style findings; see log"
+  unit-tests:
+    name: Python tests (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: {python: ['3.9', '3.10', '3.11', '3.12']}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested_sha }}
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install pytest pytest-cov
+      - name: Pure frontend tests
+        env: {PYTHONPATH: python}
+        run: python -m pytest python/triton_anchor/tests/ -q
+  gateway-contracts:
+    name: Gateway contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested_sha }}
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: python -m pip install pytest pyyaml
+      - name: GitHub gateway contracts when present in this version
+        env: {PYTHONPATH: python}
+        run: |
+          if [ -f scripts/local_ci/tests/test_gateway.py ]; then
+            python -m pytest scripts/local_ci/tests/test_gateway.py scripts/local_ci/tests/test_delivery.py scripts/local_ci/tests/test_security.py -q
+          fi

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Local CI 验证结果 · Triton Anchor</title>
+  <link rel="icon" href="assets/triton-anchor-logo.png">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="local-ci.css">
+  <script src="data.js" defer></script>
+  <script src="local-ci.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><img src="assets/triton-anchor-logo.png" alt="" class="brand-logo"><div><p class="brand-kicker">TRITON ANCHOR</p><h1>Local CI 验证结果</h1></div></div>
+    <div class="header-meta"><span id="updatedAt">等待结果同步</span><button id="refresh" class="button secondary" type="button" title="查询最新已发布快照，不触发服务器采样或 CI">查询最新快照</button></div>
+  </header>
+  <nav class="view-tabs" aria-label="Dashboard 导航"><a id="tasksTab" class="tab-button active" href="local-ci.html" aria-current="page">任务与证据</a><a class="tab-button" href="index.html">全量算子测试</a><a class="tab-button" href="index.html?view=performance">后端与性能</a><a class="tab-button" href="worker.html">Worker 运行状态</a></nav>
+  <main class="ci-main">
+    <div id="dataNotice" class="ci-notice" role="status" aria-live="polite" hidden></div>
+    <div id="taskModule" class="ci-layout">
+      <aside class="ci-task-panel" aria-labelledby="tasksHeading">
+        <div class="ci-panel-title"><h2 id="tasksHeading">验证任务</h2><span id="taskCount" class="ci-count">0</span></div>
+        <label class="ci-field" for="taskSearch">按 PR 编号、分支或提交查找<input type="search" id="taskSearch" placeholder="例如：3、main、提交 SHA"></label>
+        <p class="ci-help">输入 PR 编号即可精确查找对应任务。</p>
+        <label class="ci-field" for="historyFilter">显示范围<select id="historyFilter"><option value="current">当前结果</option><option value="all">包含历史记录</option></select></label>
+        <label class="ci-field" for="resultFilter">结果筛选<select id="resultFilter"><option value="all">全部结果</option><option value="failure">未通过</option><option value="error">执行错误</option><option value="success">通过</option><option value="cancelled">已取消</option><option value="waiting">等待 / 待交付</option></select></label>
+        <div id="taskList" class="ci-task-list"></div>
+      </aside>
+      <div class="ci-content">
+        <section id="taskDetail" class="ci-detail" aria-label="任务详情" aria-live="polite"></section>
+      </div>
+    </div>
+    <section id="syncWarnings" class="ci-notice" hidden aria-label="数据同步异常"></section>
+    <footer class="ci-footer">页面只展示已发布的验证结果。合入前请核对 PR、被测提交、完成时间和阻塞项。</footer>
+  </main>
+</body>
+</html>

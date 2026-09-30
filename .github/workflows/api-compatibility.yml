@@ -1,0 +1,48 @@
+name: Local CI / API Compatibility
+on:
+  workflow_call:
+    inputs:
+      task_digest: {type: string, required: true}
+      tested_sha: {type: string, required: true}
+      base_sha: {type: string, required: true}
+      worker_revision_sha: {type: string, required: true}
+permissions: {contents: read}
+jobs:
+  api-compatibility:
+    name: Compare public API
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.worker_revision_sha }}
+          path: trusted
+          persist-credentials: false
+          submodules: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_sha }}
+          path: base
+          persist-credentials: false
+          submodules: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested_sha }}
+          path: candidate
+          persist-credentials: false
+          submodules: false
+      - uses: actions/download-artifact@v4
+        with: {name: 'local-ci-task-${{ inputs.task_digest }}'}
+      - name: Compare the frozen base and tested public API without exemptions
+        env:
+          EXPECTED_TASK_DIGEST: ${{ inputs.task_digest }}
+        run: python3 trusted/scripts/ci/gateway.py api
+      - name: Preserve API evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-api-compatibility
+          path: |
+            api-result.json
+            api-report.md
+      - if: always()
+        run: if [ -f api-report.md ]; then cat api-report.md >> "$GITHUB_STEP_SUMMARY"; fi

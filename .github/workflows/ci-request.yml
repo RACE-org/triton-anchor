@@ -1,0 +1,150 @@
+name: CI Request
+run-name: >-
+  ${{ github.event_name == 'pull_request_target' && format('PR #{0}', github.event.pull_request.number) || format('Branch {0}', inputs.source_branch || github.ref_name) }} | request
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited, closed, converted_to_draft, labeled, unlabeled]
+  push:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      source_branch: {type: string, required: true, description: 'Branch to validate'}
+      requested_sha: {type: string, default: '', description: 'Optional exact branch HEAD SHA'}
+permissions: {}
+concurrency:
+  group: >-
+    local-ci-request-${{ github.event_name == 'pull_request_target' && format('pr-{0}', github.event.pull_request.number) || format('branch-{0}', inputs.source_branch || github.ref_name) }}
+  cancel-in-progress: true
+jobs:
+  route:
+    name: Route CI request
+    if: >-
+      github.repository == 'RACE-org/triton-anchor' &&
+      !github.event.deleted
+    runs-on: ubuntu-latest
+    permissions: {contents: read, pull-requests: read, actions: write, statuses: write}
+    steps:
+      - name: Route to CI_dev
+        id: route
+        uses: actions/github-script@v7
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+          REQUESTED_SHA: ${{ inputs.requested_sha }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull = context.payload.pull_request;
+            const manual = context.eventName === 'workflow_dispatch';
+            const push = context.eventName === 'push';
+            const shaPattern = /^[0-9a-f]{40}$/i;
+            let branch = pull?.base.ref || (push ? context.ref.replace(/^refs\/heads\//, '') : '');
+            let requestedSha = pull?.head.sha || (push ? context.sha : '');
+            let action = context.payload.action || (push ? 'push' : '');
+            if (manual) {
+              const {data: repository} = await github.rest.repos.get({owner, repo});
+              const runRef = context.ref.replace('refs/heads/', '');
+              if (runRef !== repository.default_branch) {
+                throw new Error(`Manual branch routing must run on the default branch ${repository.default_branch}`);
+              }
+              const {data: permission} = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner, repo, username: context.actor
+              });
+              if (!['write', 'maintain', 'admin'].includes(permission.permission)) {
+                throw new Error(`Actor ${context.actor} cannot route a manual branch task`);
+              }
+              branch = process.env.SOURCE_BRANCH.trim();
+              if (!branch) throw new Error('source_branch is required');
+              const {data: source} = await github.rest.repos.getBranch({owner, repo, branch});
+              requestedSha = source.commit.sha;
+              const expected = process.env.REQUESTED_SHA.trim();
+              if (expected && (!shaPattern.test(expected) || expected.toLowerCase() !== requestedSha.toLowerCase())) {
+                throw new Error(`Requested SHA does not match the current head of ${branch}`);
+              }
+              action = 'manual';
+            }
+            if (!pull && !manual && !push) throw new Error(`Unsupported event ${context.eventName}`);
+            if (!branch || !shaPattern.test(requestedSha)) throw new Error('Invalid branch routing request');
+            let verify = true;
+            if (pull) {
+              const {data: latest} = await github.rest.pulls.get({owner, repo, pull_number: pull.number});
+              if (latest.head.sha !== requestedSha || latest.base.ref !== branch) {
+                core.info('A newer PR revision superseded this request');
+                return;
+              }
+              verify = latest.state === 'open' && !latest.draft;
+              if (verify && ['closed', 'converted_to_draft'].includes(action)) return;
+              if (!verify) action = latest.state === 'closed' ? 'closed' : 'converted_to_draft';
+            } else {
+              const {data: latest} = await github.rest.repos.getBranch({owner, repo, branch});
+              if (latest.commit.sha !== requestedSha) throw new Error(`Branch ${branch} changed while routing`);
+            }
+            const attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
+            const requestId = `${context.runId}:${attempt}`;
+            const freshPush = push && (context.payload.created || context.payload.forced);
+            const freshPullState = pull && [
+              'synchronize', 'reopened', 'ready_for_review', 'edited', 'labeled', 'unlabeled'
+            ].includes(action);
+            const triggerId = verify && (manual || freshPush || freshPullState || attempt > 1) ? requestId : '';
+            if (verify) {
+              const rows = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+                owner, repo, ref: requestedSha, per_page: 100
+              });
+              const previous = rows.find(row => row.context === 'Summary');
+              const identity = new URLSearchParams((previous?.target_url || '').split('#')[1]);
+              const prior = identity.get('local-ci-request');
+              if (previous?.creator?.login === 'github-actions[bot]' && prior) {
+                const [run, priorAttempt] = prior.split(':').map(Number);
+                if ((run > context.runId && attempt === 1) ||
+                    (run === Number(context.runId) && priorAttempt >= attempt)) {
+                  core.info('This request already has a status or has been superseded');
+                  return;
+                }
+              }
+              const target = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${context.runId}#local-ci-request=${requestId}`;
+              core.setOutput('summary_sha', requestedSha);
+              core.setOutput('request_url', target);
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: requestedSha, context: 'Summary', state: 'pending',
+                description: 'Local CI: request accepted; waiting for Gateway initialization', target_url: target
+              });
+            }
+            const controlRef = 'CI_dev';
+            const {data: release} = await github.rest.repos.getBranch({owner, repo, branch: controlRef});
+            const revision = release.commit.sha;
+            const subject = pull ? `PR #${pull.number}` : `Branch ${branch}`;
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo, workflow_id: 'ci-gateway.yml', ref: controlRef,
+              inputs: {
+                mode: 'run',
+                pr_number: String(pull?.number || 0),
+                source_branch: branch,
+                requested_sha: requestedSha,
+                request_id: verify ? requestId : '',
+                trigger_id: triggerId,
+                run_title: `${subject} | h:${requestedSha.slice(0, 7)}`,
+                worker_revision_sha: revision,
+                action,
+                full: 'false'
+              }
+            });
+      - name: Finish an undelivered request
+        if: ${{ (failure() || cancelled()) && steps.route.outputs.summary_sha != '' }}
+        uses: actions/github-script@v7
+        env:
+          SUMMARY_SHA: ${{ steps.route.outputs.summary_sha }}
+          REQUEST_URL: ${{ steps.route.outputs.request_url }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const sha = process.env.SUMMARY_SHA;
+            const rows = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              owner, repo, ref: sha, per_page: 100
+            });
+            const current = rows.find(row => row.context === 'Summary');
+            if (current?.state !== 'pending' || current.target_url !== process.env.REQUEST_URL ||
+                current.creator?.login !== 'github-actions[bot]') return;
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha, context: 'Summary', state: 'error',
+              description: 'Local CI: request dispatch failed or was cancelled; retry CI Request',
+              target_url: process.env.REQUEST_URL
+            });

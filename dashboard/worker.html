@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Worker 运行状态 · Triton Anchor</title>
+  <link rel="icon" href="assets/triton-anchor-logo.png">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="health.css">
+  <script src="health.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><img src="assets/triton-anchor-logo.png" alt="" class="brand-logo"><div><p class="brand-kicker">TRITON ANCHOR</p><h1>Worker 运行状态</h1></div></div>
+    <div class="header-meta">执行进展 · 恢复过程 · 每 5 分钟刷新</div>
+  </header>
+  <nav class="view-tabs" aria-label="Dashboard 导航">
+    <a class="tab-button" href="local-ci.html">任务与证据</a>
+    <a class="tab-button" href="index.html">全量算子测试</a>
+    <a class="tab-button" href="index.html?view=performance">后端与性能</a>
+    <a class="tab-button active" href="worker.html" aria-current="page">Worker 运行状态</a>
+  </nav>
+  <main>
+    <section id="serverHealth" class="health-panel" aria-label="Worker 健康状态"></section>
+    <noscript>请启用 JavaScript，以读取和展示服务器健康状态。</noscript>
+  </main>
+</body>
+</html>

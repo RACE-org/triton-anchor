@@ -111,6 +111,11 @@ h1 {
   white-space: nowrap;
 }
 
+.status-error {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
 .mode-badge {
   color: var(--amber);
   background: var(--amber-soft);
@@ -126,6 +131,9 @@ h1 {
 }
 
 .tab-button {
+  display: flex;
+  align-items: center;
+  text-decoration: none;
   min-height: 49px;
   padding: 0 2px;
   color: var(--text-muted);
@@ -189,7 +197,7 @@ code {
 
 .metric-band {
   display: grid;
-  grid-template-columns: repeat(5, minmax(110px, 1fr));
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
   margin-bottom: 22px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -493,6 +501,12 @@ tbody tr:hover {
 .panel-heading > span {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.measurement-source {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .worker-identity {
