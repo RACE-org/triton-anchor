@@ -1,7 +1,7 @@
 """Tests for AnchorIR validator."""
 
 import pytest
-from triton_anchor.anchor_ir import AnchorIRValidator, AnchorIRError
+from triton_anchor.anchor_ir import AnchorIRTrack, AnchorIRValidator, AnchorIRError
 
 
 VALID_LINALG_IR = """
@@ -107,3 +107,19 @@ class TestAnchorIRValidator:
         }
         """
         assert v.is_valid(ir_with_comments)
+
+    def test_ttg_allowed_only_on_triton_gpu_track(self):
+        gpu_ir = """
+        module {
+          func.func @kernel(%arg0: tensor<16xf32>) {
+            %0 = ttg.convert_layout %arg0
+              : tensor<16xf32> -> tensor<16xf32>
+            return
+          }
+        }
+        """
+        assert AnchorIRValidator(track=AnchorIRTrack.TRITON_GPU).is_valid(gpu_ir)
+        linalg_violations = AnchorIRValidator(track=AnchorIRTrack.LINALG).validate(
+            gpu_ir
+        )
+        assert any(violation.dialect == "ttg" for violation in linalg_violations)

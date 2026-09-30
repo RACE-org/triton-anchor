@@ -92,12 +92,14 @@ LINALG_TRACK_FORBIDDEN: Set[str] = {
     "tptr",  # Triton pointer transition dialect
     "smt",  # DSL Extension Python namespace — must be lowered to xsmt.*
     "triton_gpu",  # TritonGPU dialect (wrong track)
+    "ttg",  # TritonGPU dialect name in Triton 3.6 MLIR
     "nvidia_gpu",  # NVIDIA-specific
 }
 
 # TritonGPU Track base whitelist
 TRITON_GPU_TRACK_ALLOWED: Set[str] = {
     "triton_gpu",  # TritonGPU dialect (with Encoding attributes)
+    "ttg",  # TritonGPU dialect name in Triton 3.6 MLIR
     "tt",  # Triton Op retained (with Encoding)
     "arith",  # Arithmetic operations
     "math",  # Math operations
