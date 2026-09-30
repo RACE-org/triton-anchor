@@ -1299,8 +1299,7 @@ public:
     auto valType = condVal.getType();
 
     auto assertMessage =
-        llvm::formatv("{0}:{1}: {2} Assertion `{3}` failed", op.getFile(),
-                      op.getLine(), op.getFunc(), op.getMessage());
+        llvm::formatv("Assertion `{0}` failed", op.getMessage());
     auto rankType = cast<RankedTensorType>(valType);
 
     // Only supports int type.

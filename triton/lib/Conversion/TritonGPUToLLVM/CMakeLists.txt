@@ -1,28 +1,9 @@
-if(TTGPU)
-  set(TRITON_GPU_LLVM_TTGPU 
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/DotOpToLLVM/FMA.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/TypeConverter.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/Utility.cpp"
-    "${CMAKE_SOURCE_DIR}/csrc/lib/ttgpu/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVM.cpp"
-  )
-else()
-  set(TRITON_GPU_LLVM_TTGPU 
+add_triton_library(TritonGPUToLLVM
     ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp
     DotOpToLLVM/FMA.cpp
     TypeConverter.cpp
     Utility.cpp
     ElementwiseOpToLLVM.cpp
-  )
-endif()
-
-add_triton_library(TritonGPUToLLVM
-    # ConvertLayoutOpToLLVM/SharedToDotOperandFMA.cpp
-    # DotOpToLLVM/FMA.cpp
-    # TypeConverter.cpp
-    # Utility.cpp
-    # ElementwiseOpToLLVM.cpp
-    ${TRITON_GPU_LLVM_TTGPU}
     MemoryOpToLLVM.cpp
     AssertOpToLLVM.cpp
     ViewOpToLLVM.cpp

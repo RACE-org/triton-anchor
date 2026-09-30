@@ -49,7 +49,7 @@ TritonLinalgTypeConverter::TritonLinalgTypeConverter() {
   auto addUnrealizedCast = [](OpBuilder &builder, Type type, ValueRange inputs,
                               Location loc) {
     auto cast = builder.create<UnrealizedConversionCastOp>(loc, type, inputs);
-    return std::optional<Value>(cast.getResult(0));
+    return Value(cast.getResult(0));
   };
   addSourceMaterialization(addUnrealizedCast);
   addTargetMaterialization(addUnrealizedCast);

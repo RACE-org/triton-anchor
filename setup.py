@@ -171,8 +171,6 @@ def get_packages():
         "triton.compiler",
         "triton.language",
         "triton.language.extra",
-        "triton.language.extra.cuda",
-        "triton.language.extra.hip",
         "triton.runtime",
         "triton.backends",
         "triton.tools",
@@ -183,6 +181,12 @@ def get_packages():
         "triton_anchor.language",
         "triton_anchor.tests",
     ]
+    # Upstream versions before 3.2 shipped CUDA/HIP helper subpackages here;
+    # newer versions discover optional extra-language packages dynamically.
+    for backend in ("cuda", "hip"):
+        package_dir = Path(get_base_dir()) / "triton" / "python" / "triton" / "language" / "extra" / backend
+        if package_dir.is_dir():
+            packages.append(f"triton.language.extra.{backend}")
     return packages
 
 

@@ -1,4 +1,6 @@
-# Vendored from: https://github.com/openai/triton
-# Commit: 757b6a61e7df814ba806f498f8bb3160f84b120c
-# Date: 2026-05-08
+# Vendored from: https://github.com/triton-lang/triton
+# Branch: release/3.2.x
+# Version: 3.2.0
+# Commit: 9641643da6c52000c807b5eeed05edaec4402a67
+# Date: 2025-01-22
 # 升级指南见 docs/upgrade_triton.md

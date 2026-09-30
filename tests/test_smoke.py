@@ -305,6 +305,7 @@ class _MinimalOptions:
         self.allowed_dot_input_precisions = ("ieee", "tf32", "tf32x3")
         self.allow_fp8e4nv = False
         self.max_num_imprecise_acc_default = False
+        self.sanitize_overflow = True
         self.debug = False
 
 
@@ -315,8 +316,13 @@ def test_ttir_generation():
     # 构建 ASTSource
     src = triton.compiler.ASTSource(
         fn=_smoke_add_kernel,
-        signature={0: "*fp32", 1: "*fp32", 2: "*fp32", 3: "i32"},
-        constants={4: 256},
+        signature={
+            "x_ptr": "*fp32",
+            "y_ptr": "*fp32",
+            "out_ptr": "*fp32",
+            "n": "i32",
+        },
+        constants={"BLOCK": 256},
     )
 
     # 创建 MLIR context 并加载方言
@@ -324,7 +330,9 @@ def test_ttir_generation():
     ir.load_dialects(ctx)
     anchor.load_dialects(ctx)
 
-    ttir_module = src.make_ir(options=_MinimalOptions(), codegen_fns=None, context=ctx)
+    ttir_module = src.make_ir(
+        options=_MinimalOptions(), codegen_fns=None, module_map={}, context=ctx
+    )
     ir_text = str(ttir_module)
 
     assert "tt.func" in ir_text or "func.func" in ir_text, "TTIR 中应包含函数定义"
