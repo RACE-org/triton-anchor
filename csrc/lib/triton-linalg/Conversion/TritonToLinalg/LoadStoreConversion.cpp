@@ -201,26 +201,25 @@ public:
     auto memref = getMemRef(loc, op.getPtr(), elementType, rewriter,
                             getCacheModeAttr(op.getContext(), op.getCache()));
     Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value scalar =
-        rewriter.create<memref::LoadOp>(loc, elementType, memref, c0);
     if (!op.getMask()) {
+      Value scalar =
+          rewriter.create<memref::LoadOp>(loc, elementType, memref, c0);
       rewriter.replaceOp(op, scalar);
       return success();
     }
 
     auto ifOp = rewriter.create<scf::IfOp>(
         loc, op.getMask(),
-        [scalar](OpBuilder &b, Location loc) {
+        [memref, elementType, c0](OpBuilder &b, Location loc) {
+          Value scalar = b.create<memref::LoadOp>(loc, elementType, memref, c0);
           b.create<scf::YieldOp>(loc, scalar);
         },
-        [other = adaptor.getOther(), scalar](OpBuilder &b, Location loc) {
-          // If other is nullptr, it's a undefined case, here we just yield
-          // original scalar.
-          if (!other) {
-            b.create<scf::YieldOp>(loc, scalar);
-          } else {
-            b.create<scf::YieldOp>(loc, other);
-          }
+        [other = adaptor.getOther(), elementType](OpBuilder &b, Location loc) {
+          Value fallback = other;
+          if (!fallback)
+            fallback = b.create<arith::ConstantOp>(loc, elementType,
+                                                   b.getZeroAttr(elementType));
+          b.create<scf::YieldOp>(loc, fallback);
         });
     rewriter.replaceOp(op, ifOp.getResults());
     return success();
@@ -250,7 +249,16 @@ public:
                             getCacheModeAttr(op.getContext(), op.getCache()));
 
     Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    rewriter.create<memref::StoreOp>(loc, op.getValue(), memref, c0);
+    if (op.getMask()) {
+      rewriter.create<scf::IfOp>(
+          loc, op.getMask(),
+          [memref, c0, value = op.getValue()](OpBuilder &b, Location loc) {
+            b.create<memref::StoreOp>(loc, value, memref, c0);
+            b.create<scf::YieldOp>(loc);
+          });
+    } else {
+      rewriter.create<memref::StoreOp>(loc, op.getValue(), memref, c0);
+    }
     rewriter.eraseOp(op);
     return success();
   }
